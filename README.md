@@ -1,5 +1,5 @@
 ## Installation
-一键安装
+导入.sh文件 启动傻瓜式一键安装
 
 bash nowhere-install.sh
 
