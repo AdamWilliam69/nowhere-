@@ -3,17 +3,7 @@
 
 bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh)
 
-一键安装 ： bash nowhere-install.sh
-
-查看状态 : systemctl status nowhere
-
-查看日志 : journalctl -u nowhere -f
-
-重启服务 : systemctl restart nowhere
-
-查看配置 : cat /etc/nowhere/config.txt
-
-# Nowhere Portal Installer
+## Nowhere Portal Installer
 
 A simple one-click installer for automatic TLS certificate setup and deployment of the Nowhere service.
 
