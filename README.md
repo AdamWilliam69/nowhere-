@@ -1,6 +1,5 @@
 ## Installation
-
-```bash
+一键安装
 bash nowhere-install.sh
 常用指令
 查看状态 : systemctl status nowhere
