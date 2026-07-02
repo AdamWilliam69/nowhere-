@@ -13,7 +13,7 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 
 - A domain managed by Cloudflare
 - Cloudflare API Token with DNS edit permission
-- Linux VPS (Ubuntu/Debian recommended)
+- Linux VPS (Ubuntu 20+/Debian 11+recommended)
 
 ## Installation
 
