@@ -1,3 +1,14 @@
+## Installation
+
+运行```bash
+bash nowhere-install.sh
+一键安装
+常用指令
+查看状态 : systemctl status nowhere
+查看日志 : journalctl -u nowhere -f
+重启服务 : systemctl restart nowhere
+查看配置 : cat /etc/nowhere/config.txt
+
 # Nowhere Portal Installer
 
 A simple one-click installer for automatic TLS certificate setup and deployment of the Nowhere service.
@@ -15,7 +26,3 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 - Cloudflare API Token with DNS edit permission
 - Linux VPS (Ubuntu/Debian recommended)
 
-## Installation
-
-```bash
-bash nowhere-install.sh
