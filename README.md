@@ -1,8 +1,7 @@
 ## Installation
 
-运行```bash
+```bash
 bash nowhere-install.sh
-一键安装
 常用指令
 查看状态 : systemctl status nowhere
 查看日志 : journalctl -u nowhere -f
