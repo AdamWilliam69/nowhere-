@@ -1,10 +1,14 @@
 ## Installation
 一键安装
+
 bash nowhere-install.sh
-常用指令
+
 查看状态 : systemctl status nowhere
+
 查看日志 : journalctl -u nowhere -f
+
 重启服务 : systemctl restart nowhere
+
 查看配置 : cat /etc/nowhere/config.txt
 
 # Nowhere Portal Installer
