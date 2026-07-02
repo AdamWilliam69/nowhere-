@@ -1,8 +1,9 @@
 ## Installation
-''bash 
-curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh | bash
+```bash
 
-bash nowhere-install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh)
+
+一键安装 ： bash nowhere-install.sh
 
 查看状态 : systemctl status nowhere
 
