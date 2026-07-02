@@ -1,5 +1,5 @@
 ## Installation
-导入.sh文件 启动傻瓜式一键安装
+curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh | bash
 
 bash nowhere-install.sh
 
