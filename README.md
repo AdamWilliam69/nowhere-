@@ -1,7 +1,3 @@
-## Installation
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh)
-
 # Nowhere Portal Installer
 
 A simple one-click installer for automatic TLS certificate setup and deployment of the Nowhere service.
@@ -17,7 +13,9 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 
 - A domain managed by Cloudflare
 - Cloudflare API Token with DNS edit permission
-- Linux VPS (Ubuntu 20+/Debian 11+recommended)
+- Linux VPS (Ubuntu/Debian recommended)
 
+## Installation
 
-
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh)
