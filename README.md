@@ -1,0 +1,21 @@
+# Nowhere Portal Installer
+
+A simple one-click installer for automatic TLS certificate setup and deployment of the Nowhere service.
+
+## Features
+
+- One-click deployment script
+- Automatic SSL certificate via Cloudflare DNS API
+- Systemd service management
+- Minimal configuration required
+
+## Requirements
+
+- A domain managed by Cloudflare
+- Cloudflare API Token with DNS edit permission
+- Linux VPS (Ubuntu/Debian recommended)
+
+## Installation
+
+```bash
+bash nowhere-install.sh
