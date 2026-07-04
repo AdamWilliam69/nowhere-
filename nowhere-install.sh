@@ -32,10 +32,8 @@ detect_binary() {
     esac
 }
 
-# 生成 Anywhere 深链
 generate_deeplink() {
     local portal_url="$1"
-    # 使用 bash 内置方法进行 URL 编码
     python3 -c "
 import urllib.parse
 import sys
@@ -86,7 +84,6 @@ do_install() {
     divider
     echo -e "${YELLOW}请依次输入以下信息${NC}\n"
 
-    # 域名
     if [ "$TLS_MODE" = "2" ]; then
         while true; do
             read -p "请输入你的域名（例如: node.example.com）: " DOMAIN
@@ -99,7 +96,6 @@ do_install() {
         DOMAIN="localhost"
     fi
 
-    # 邮箱
     while true; do
         read -p "请输入邮箱（用于证书申请/恢复）: " EMAIL
         EMAIL=$(echo "$EMAIL" | tr -d ' \r\n')
@@ -108,7 +104,6 @@ do_install() {
         break
     done
 
-    # ── DNS 验证方式 ──────────────────────────────
     if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
         echo ""
         echo -e "${BOLD}DNS 服务商：${NC}"
@@ -170,7 +165,6 @@ do_install() {
         fi
     fi
 
-    # 端口
     echo ""
     read -p "请输入监听端口（直接回车默认443）: " PORT
     PORT=$(echo "$PORT" | tr -d ' \r\n')
@@ -180,7 +174,6 @@ do_install() {
         PORT=443
     fi
 
-    # 传输模式
     echo ""
     echo -e "${BOLD}传输模式：${NC}"
     echo "  1) mix - TLS/TCP + QUIC/UDP 双栈（推荐）"
@@ -194,17 +187,14 @@ do_install() {
         *) NET="mix" ;;
     esac
 
-    # 日志级别
     echo ""
     read -p "请输入日志级别 [info/debug/none，默认info]: " LOG
     LOG=${LOG:-info}
 
-    # 速率限制
     echo ""
     read -p "请输入速率限制 MB/s（直接回车不限速）: " RATE_LIMIT
     RATE_LIMIT=$(echo "$RATE_LIMIT" | tr -d ' \r\n')
 
-    # 密钥和 Spec
     echo ""
     read -p "请输入共享密钥（直接回车随机生成）: " SHARED_KEY
     SHARED_KEY=$(echo "$SHARED_KEY" | tr -d ' \r\n')
@@ -220,7 +210,6 @@ do_install() {
         info "已随机生成 Spec: ${SPEC}"
     fi
 
-    # 确认
     echo ""
     divider
     echo -e "${BOLD}请确认以下配置信息：${NC}"
@@ -241,8 +230,8 @@ do_install() {
     CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
     KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
     ACME_HOME="/root/.acme.sh"
+    CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 
-    # 构建启动参数
     EXTRA_PARAMS="tls=${TLS_MODE}&net=${NET}&log=${LOG}&spec=${SPEC}"
     if [ "$TLS_MODE" = "2" ]; then
         EXTRA_PARAMS="${EXTRA_PARAMS}&crt=${CRT}&key=${KEY_PEM}"
@@ -251,14 +240,19 @@ do_install() {
         EXTRA_PARAMS="${EXTRA_PARAMS}&rate=${RATE_LIMIT}m"
     fi
 
-    # ── 安装依赖 ──────────────────────────────────
     step "第 3 步：安装系统依赖"
     divider
     apt-get update -qq
     apt-get install -y -qq curl wget tar ufw socat openssl python3
     success "系统依赖安装完成"
 
-    # ── 申请证书 ──────────────────────────────────
+    # ──【关键修复】在申请证书前创建目录 ────────────────
+    if [ "$TLS_MODE" = "2" ]; then
+        info "预创建证书目录: ${CERT_DIR}"
+        mkdir -p "${CERT_DIR}"
+        chmod 755 "${CERT_DIR}"
+    fi
+
     if [ "$TLS_MODE" = "2" ]; then
         if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
             step "第 4 步：申请 Let's Encrypt 证书（HTTP-01）"
@@ -267,20 +261,31 @@ do_install() {
             curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1 || true
             . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
             
-            if [ -f "$CRT" ]; then
+            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
                 warn "证书已存在，跳过申请"
             else
                 info "正在申请证书（需要 80 端口开放）..."
                 ufw allow 80/tcp 2>/dev/null || true
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --standalone --force
+                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --standalone --force || true
+                
+                # 【修复】确保目录存在后再安装
+                mkdir -p "${CERT_DIR}"
                 "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
                     --cert-file "${CRT}" \
                     --key-file "${KEY_PEM}" \
-                    --fullchain-file "${CRT}"
+                    --fullchain-file "${CRT}" || {
+                    # 如果 acme.sh 安装失败，手动复制
+                    warn "acme.sh 安装失败，尝试手动复制..."
+                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.cer" "${CRT}" 2>/dev/null || \
+                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.cer" "${CRT}" 2>/dev/null || error "证书文件未找到"
+                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || \
+                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || error "密钥文件未找到"
+                }
                 success "证书申请成功"
             fi
             
-            # 自动续期钩子
+            # 【修复】再次确保目录存在
+            mkdir -p "${CERT_DIR}"
             "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
                 --cert-file "${CRT}" \
                 --key-file "${KEY_PEM}" \
@@ -294,19 +299,29 @@ do_install() {
             curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1 || true
             . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
             
-            if [ -f "$CRT" ]; then
+            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
                 warn "证书已存在，跳过申请"
             else
                 info "正在申请证书..."
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force
+                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force || true
+                
+                # 【修复】确保目录存在后再安装
+                mkdir -p "${CERT_DIR}"
                 "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
                     --cert-file "${CRT}" \
                     --key-file "${KEY_PEM}" \
-                    --fullchain-file "${CRT}"
+                    --fullchain-file "${CRT}" || {
+                    warn "acme.sh 安装失败，尝试手动复制..."
+                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.cer" "${CRT}" 2>/dev/null || \
+                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.cer" "${CRT}" 2>/dev/null || error "证书文件未找到"
+                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || \
+                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || error "密钥文件未找到"
+                }
                 success "证书申请成功"
             fi
             
-            # 自动续期钩子
+            # 【修复】再次确保目录存在
+            mkdir -p "${CERT_DIR}"
             "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
                 --cert-file "${CRT}" \
                 --key-file "${KEY_PEM}" \
@@ -331,9 +346,11 @@ CFEOF
             success "Cloudflare 凭据已写入"
             
             apt-get install -y -qq certbot python3-certbot-dns-cloudflare
-            if [ -f "$CRT" ]; then
+            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
                 warn "证书已存在，跳过申请"
             else
+                # 【修复】确保目录存在
+                mkdir -p "${CERT_DIR}"
                 info "正在申请证书..."
                 certbot certonly \
                     --dns-cloudflare \
@@ -350,7 +367,6 @@ CFEOF
         info "证书路径: ${CRT}"
         info "私钥路径: ${KEY_PEM}"
 
-        # 证书续期钩子（certbot）
         mkdir -p /etc/letsencrypt/renewal-hooks/deploy
         cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << 'HOOKEOF'
 #!/bin/bash
@@ -359,7 +375,6 @@ HOOKEOF
         chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
     fi
 
-    # ── 下载 Nowhere ──────────────────────────────
     step "第 5 步：下载 Nowhere"
     divider
     detect_binary
@@ -378,7 +393,6 @@ HOOKEOF
     rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
     success "Nowhere 安装完成"
 
-    # ── systemd 服务 ──────────────────────────────
     step "第 6 步：创建系统服务"
     divider
     cat > /etc/systemd/system/nowhere.service << SVCEOF
@@ -404,7 +418,6 @@ SVCEOF
     sleep 2
     systemctl is-active --quiet nowhere && success "服务启动成功" || error "服务启动失败"
 
-    # ── 防火墙 ──────────────────────────────────
     step "第 7 步：配置防火墙"
     divider
     ufw allow ssh 2>/dev/null || true
@@ -414,11 +427,8 @@ SVCEOF
     ufw --force enable
     success "防火墙已配置"
 
-    # ── 保存配置并生成深链 ────────────────────────
     mkdir -p /etc/nowhere
     PORTAL_URL="portal://${SHARED_KEY}@${DOMAIN}:${PORT}?${EXTRA_PARAMS}"
-    
-    # 生成深链
     ANYWHERE_LINK=$(generate_deeplink "${PORTAL_URL}")
 
     cat > /etc/nowhere/config.txt << CONFEOF
