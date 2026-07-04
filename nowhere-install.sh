@@ -36,11 +36,10 @@ generate_deeplink() {
     local portal_url="$1"
     python3 -c "
 import urllib.parse
-import sys
 portal = '''${portal_url}'''
 encoded = urllib.parse.quote(portal, safe='')
 print('anywhere://add-proxy?link=' + encoded)
-" 2>/dev/null || echo "anywhere://add-proxy?link=$(echo -n "${portal_url}" | od -An -tx1 | tr ' ' % | tr -d '\n')"
+" 2>/dev/null || echo "anywhere://add-proxy?link=${portal_url}"
 }
 
 show_menu() {
@@ -67,17 +66,15 @@ do_install() {
     echo -e "${BOLD}TLS 证书获取方式：${NC}"
     echo "  1) 自签证书 - 无需域名，快速测试（tls=1）"
     echo "  2) Let's Encrypt HTTP-01 - 需要开放 80 端口（自动续期）"
-    echo "  3) Let's Encrypt DNS-01 通用 - 支持任意 DNS 服务商（自动续期）"
-    echo "  4) Cloudflare DNS-01 - 需要 CF API Key（自动续期）"
-    read -p "请选择 [1/2/3/4，默认2]: " CERT_CHOICE
-    CERT_CHOICE=${CERT_CHOICE:-2}
+    echo "  3) Cloudflare DNS-01 - 需要 CF API Key（自动续期，推荐）"
+    read -p "请选择 [1/2/3，默认3]: " CERT_CHOICE
+    CERT_CHOICE=${CERT_CHOICE:-3}
 
     case $CERT_CHOICE in
         1) TLS_MODE=1; CERT_METHOD="self-signed" ;;
         2) TLS_MODE=2; CERT_METHOD="letsencrypt-http" ;;
-        3) TLS_MODE=2; CERT_METHOD="letsencrypt-dns" ;;
-        4) TLS_MODE=2; CERT_METHOD="cloudflare-dns" ;;
-        *) TLS_MODE=2; CERT_METHOD="letsencrypt-http" ;;
+        3) TLS_MODE=2; CERT_METHOD="cloudflare-dns" ;;
+        *) TLS_MODE=2; CERT_METHOD="cloudflare-dns" ;;
     esac
 
     step "第 2 步：收集配置信息"
@@ -104,47 +101,10 @@ do_install() {
         break
     done
 
-    if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
-        echo ""
-        echo -e "${BOLD}DNS 服务商：${NC}"
-        echo "  1) Cloudflare"
-        echo "  2) DNSPod（腾讯）"
-        echo "  3) Aliyun（阿里云）"
-        echo "  4) 其他/手动配置"
-        read -p "请选择 [1/2/3/4，默认1]: " DNS_PROVIDER
-        DNS_PROVIDER=${DNS_PROVIDER:-1}
-        
-        case $DNS_PROVIDER in
-            1)
-                read -p "请输入 Cloudflare Email: " CF_EMAIL
-                read -p "请输入 Cloudflare Global API Key: " CF_API_KEY
-                export CF_Email="${CF_EMAIL}"
-                export CF_Key="${CF_API_KEY}"
-                DNS_API="dns_cf"
-                ;;
-            2)
-                read -p "请输入 DNSPod ID: " DNSPOD_ID
-                read -p "请输入 DNSPod Token: " DNSPOD_TOKEN
-                export DP_Id="${DNSPOD_ID}"
-                export DP_Key="${DNSPOD_TOKEN}"
-                DNS_API="dns_dp"
-                ;;
-            3)
-                read -p "请输入阿里云 AccessKey ID: " ALIYU_ID
-                read -p "请输入阿里云 AccessKey Secret: " ALIYU_SECRET
-                export Ali_Key="${ALIYU_ID}"
-                export Ali_Secret="${ALIYU_SECRET}"
-                DNS_API="dns_ali"
-                ;;
-            *)
-                warn "请手动配置 DNS 环境变量，参考 acme.sh 文档"
-                DNS_API="dns_manual"
-                ;;
-        esac
-    elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
+    if [ "$CERT_METHOD" = "cloudflare-dns" ]; then
         echo ""
         echo -e "${BOLD}Cloudflare 认证方式：${NC}"
-        echo "  1) Global API Key"
+        echo "  1) Global API Key（推荐）"
         echo "  2) API Token"
         read -p "请选择 [1/2，默认1]: " CF_AUTH_TYPE
         CF_AUTH_TYPE=${CF_AUTH_TYPE:-1}
@@ -229,7 +189,6 @@ do_install() {
 
     CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
     KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
-    ACME_HOME="/root/.acme.sh"
     CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 
     EXTRA_PARAMS="tls=${TLS_MODE}&net=${NET}&log=${LOG}&spec=${SPEC}"
@@ -246,87 +205,36 @@ do_install() {
     apt-get install -y -qq curl wget tar ufw socat openssl python3
     success "系统依赖安装完成"
 
-    # ──【关键修复】在申请证书前创建目录 ────────────────
+    # ── 申请证书 ──────────────────────────────────
     if [ "$TLS_MODE" = "2" ]; then
-        info "预创建证书目录: ${CERT_DIR}"
         mkdir -p "${CERT_DIR}"
         chmod 755 "${CERT_DIR}"
-    fi
 
-    if [ "$TLS_MODE" = "2" ]; then
         if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
             step "第 4 步：申请 Let's Encrypt 证书（HTTP-01）"
             divider
-            info "安装 acme.sh..."
-            curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1 || true
-            . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
-            
-            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
-                warn "证书已存在，跳过申请"
-            else
-                info "正在申请证书（需要 80 端口开放）..."
-                ufw allow 80/tcp 2>/dev/null || true
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --standalone --force || true
-                
-                # 【修复】确保目录存在后再安装
-                mkdir -p "${CERT_DIR}"
-                "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                    --cert-file "${CRT}" \
-                    --key-file "${KEY_PEM}" \
-                    --fullchain-file "${CRT}" || {
-                    # 如果 acme.sh 安装失败，手动复制
-                    warn "acme.sh 安装失败，尝试手动复制..."
-                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.cer" "${CRT}" 2>/dev/null || \
-                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.cer" "${CRT}" 2>/dev/null || error "证书文件未找到"
-                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || \
-                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || error "密钥文件未找到"
-                }
-                success "证书申请成功"
-            fi
-            
-            # 【修复】再次确保目录存在
-            mkdir -p "${CERT_DIR}"
-            "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                --cert-file "${CRT}" \
-                --key-file "${KEY_PEM}" \
-                --fullchain-file "${CRT}" \
-                --reloadcmd "systemctl restart nowhere" 2>/dev/null || true
-
-        elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
-            step "第 4 步：申请 Let's Encrypt 证书（DNS-01）"
-            divider
-            info "安装 acme.sh..."
-            curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1 || true
-            . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
+            info "安装 certbot..."
+            apt-get install -y -qq certbot
             
             if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
                 warn "证书已存在，跳过申请"
             else
                 info "正在申请证书..."
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force || true
-                
-                # 【修复】确保目录存在后再安装
-                mkdir -p "${CERT_DIR}"
-                "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                    --cert-file "${CRT}" \
-                    --key-file "${KEY_PEM}" \
-                    --fullchain-file "${CRT}" || {
-                    warn "acme.sh 安装失败，尝试手动复制..."
-                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.cer" "${CRT}" 2>/dev/null || \
-                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.cer" "${CRT}" 2>/dev/null || error "证书文件未找到"
-                    cp "${ACME_HOME}/${DOMAIN}_ecc/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || \
-                    cp "${ACME_HOME}/${DOMAIN}/${DOMAIN}.key" "${KEY_PEM}" 2>/dev/null || error "密钥文件未找到"
+                ufw allow 80/tcp 2>/dev/null || true
+                # 增加超时时间并添加调试输出
+                certbot certonly \
+                    --standalone \
+                    --preferred-challenges http \
+                    --non-interactive \
+                    --agree-tos \
+                    --email "${EMAIL}" \
+                    -d "${DOMAIN}" \
+                    --http-01-port 80 \
+                    --http-01-address 0.0.0.0 || {
+                    error "证书申请失败，请检查：1) 域名是否正确 2) 80 端口是否开放 3) 域名是否指向本 VPS"
                 }
                 success "证书申请成功"
             fi
-            
-            # 【修复】再次确保目录存在
-            mkdir -p "${CERT_DIR}"
-            "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                --cert-file "${CRT}" \
-                --key-file "${KEY_PEM}" \
-                --fullchain-file "${CRT}" \
-                --reloadcmd "systemctl restart nowhere" 2>/dev/null || true
 
         elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
             step "第 4 步：申请 Let's Encrypt 证书（Cloudflare DNS-01）"
@@ -343,15 +251,13 @@ dns_cloudflare_api_token = ${CF_TOKEN}
 CFEOF
             fi
             chmod 600 /etc/cloudflare/credentials.ini
-            success "Cloudflare 凭据已写入"
             
             apt-get install -y -qq certbot python3-certbot-dns-cloudflare
             if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
                 warn "证书已存在，跳过申请"
             else
-                # 【修复】确保目录存在
-                mkdir -p "${CERT_DIR}"
-                info "正在申请证书..."
+                info "正在申请证书（DNS 验证通常需要 30-60 秒）..."
+                # 使用 certbot 而非 acme.sh，更稳定
                 certbot certonly \
                     --dns-cloudflare \
                     --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
@@ -359,7 +265,9 @@ CFEOF
                     --agree-tos \
                     --email "${EMAIL}" \
                     -d "${DOMAIN}" \
-                    --dns-cloudflare-propagation-seconds 30
+                    --dns-cloudflare-propagation-seconds 60 || {
+                    error "证书申请失败，请检查：1) CF API Key 是否正确 2) 域名是否在 CF 管理下 3) DNS 记录是否生效"
+                }
                 success "证书申请成功"
             fi
         fi
@@ -367,6 +275,7 @@ CFEOF
         info "证书路径: ${CRT}"
         info "私钥路径: ${KEY_PEM}"
 
+        # 配置自动续期
         mkdir -p /etc/letsencrypt/renewal-hooks/deploy
         cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << 'HOOKEOF'
 #!/bin/bash
@@ -375,6 +284,7 @@ HOOKEOF
         chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
     fi
 
+    # ── 下载 Nowhere ──────────────────────────────
     step "第 5 步：下载 Nowhere"
     divider
     detect_binary
@@ -385,14 +295,16 @@ HOOKEOF
     info "正在下载..."
     wget --show-progress -q \
         "https://github.com/NodePassProject/Nowhere/releases/download/${LATEST}/${BIN_NAME}" \
-        -O /tmp/nowhere.tar.gz
-    tar -xzf /tmp/nowhere.tar.gz -C /tmp/
+        -O /tmp/nowhere.tar.gz || error "下载失败"
+    tar -xzf /tmp/nowhere.tar.gz -C /tmp/ || error "解压失败"
     BINARY_PATH=$(find /tmp -name "nowhere" -type f | head -1)
+    [ -z "$BINARY_PATH" ] && error "未找到 nowhere 二进制"
     cp "${BINARY_PATH}" /usr/local/bin/nowhere
     chmod +x /usr/local/bin/nowhere
     rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
     success "Nowhere 安装完成"
 
+    # ── systemd 服务 ──────────────────────────────
     step "第 6 步：创建系统服务"
     divider
     cat > /etc/systemd/system/nowhere.service << SVCEOF
@@ -418,6 +330,7 @@ SVCEOF
     sleep 2
     systemctl is-active --quiet nowhere && success "服务启动成功" || error "服务启动失败"
 
+    # ── 防火墙 ──────────────────────────────────
     step "第 7 步：配置防火墙"
     divider
     ufw allow ssh 2>/dev/null || true
@@ -427,6 +340,7 @@ SVCEOF
     ufw --force enable
     success "防火墙已配置"
 
+    # ── 保存配置 ──────────────────────────────────
     mkdir -p /etc/nowhere
     PORTAL_URL="portal://${SHARED_KEY}@${DOMAIN}:${PORT}?${EXTRA_PARAMS}"
     ANYWHERE_LINK=$(generate_deeplink "${PORTAL_URL}")
