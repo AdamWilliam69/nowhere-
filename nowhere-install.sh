@@ -2,8 +2,9 @@
 set -e
 
 # ══════════════════════════════════════════════════════════════
-#   Nowhere Portal 完全版一键管理脚本
+#   Adam Nowhere Portal 一键管理脚本
 #   合并证书自动申请（install版）+ 完整协议参数（vps版）
+#   快捷命令：adam(菜单) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
 #   支持 Debian / Ubuntu · x86_64 / aarch64
 # ══════════════════════════════════════════════════════════════
 
@@ -21,6 +22,7 @@ CONFIG_DIR="/etc/nowhere"
 CONFIG_FILE="${CONFIG_DIR}/nowhere.env"
 SERVICE_FILE="/etc/systemd/system/nowhere.service"
 ACME_HOME="/root/.acme.sh"
+MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 
 DEFAULT_NET="mix"
 DEFAULT_ALPN="now/1"
@@ -37,6 +39,9 @@ step()    { echo -e "\n${BOLD}${CYAN}━━━ $1 ━━━${NC}"; }
 divider() { echo -e "${CYAN}────────────────────────────────────────────────────────${NC}"; }
 
 [ "$EUID" -ne 0 ] && error "请以 root 用户运行此脚本"
+
+# 支持命令行直接传参调用，例如: adam status / adam config
+ACTION="${1:-menu}"
 
 detect_binary() {
     ARCH=$(uname -m)
@@ -205,11 +210,69 @@ print_tls_fingerprint() {
     warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100"
 }
 
+# ══════════════════════════════════════════════════════════════
+#  快捷命令安装：adam(菜单入口) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
+# ══════════════════════════════════════════════════════════════
+
+install_shortcuts() {
+    step "安装快捷命令"
+    divider
+    local self_path
+    self_path="$(readlink -f "$0" 2>/dev/null || true)"
+
+    if [ -n "$self_path" ] && [ -f "$self_path" ]; then
+        cp "$self_path" "$MANAGER_PATH"
+        chmod +x "$MANAGER_PATH"
+    else
+        warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
+        warn "快捷命令需要脚本以文件形式保存后再运行，例如："
+        warn "  wget -O nowhere-install.sh <脚本地址> && bash nowhere-install.sh"
+        return 1
+    fi
+
+    cat > /usr/local/bin/adam << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" "\$@"
+SHORTEOF
+    chmod +x /usr/local/bin/adam
+
+    cat > /usr/local/bin/zt << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" status
+SHORTEOF
+    chmod +x /usr/local/bin/zt
+
+    cat > /usr/local/bin/pz << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" config
+SHORTEOF
+    chmod +x /usr/local/bin/pz
+
+    cat > /usr/local/bin/cxpz << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" reconfig
+SHORTEOF
+    chmod +x /usr/local/bin/cxpz
+
+    cat > /usr/local/bin/cq << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" restart
+SHORTEOF
+    chmod +x /usr/local/bin/cq
+
+    success "快捷命令已安装完成"
+    echo -e "  ${CYAN}adam${NC}   — 打开管理菜单"
+    echo -e "  ${CYAN}zt${NC}     — 查看服务状态"
+    echo -e "  ${CYAN}pz${NC}     — 查看节点/连接信息"
+    echo -e "  ${CYAN}cxpz${NC}   — 重新修改配置"
+    echo -e "  ${CYAN}cq${NC}     — 快速重启服务"
+}
+
 show_menu() {
     clear
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         Nowhere Portal 完全版一键管理脚本                    ║"
+    echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
     echo "║         加密隧道协议 · TLS/TCP + QUIC/UDP                    ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -222,9 +285,14 @@ show_menu() {
     echo -e "  ${BOLD}7)${NC} 查看实时日志"
     echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
     echo -e "  ${BOLD}9)${NC} 重启服务"
+    echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
-    read -p "请选择操作 [0-9]: " MENU_CHOICE
+    if [ -x /usr/local/bin/adam ]; then
+        echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
+        divider
+    fi
+    read -p "请选择操作 [0-10]: " MENU_CHOICE
 }
 
 do_install() {
@@ -577,6 +645,10 @@ SVCEOF
     divider
     build_client_links
     print_all_info
+
+    step "第 12 步：安装快捷命令"
+    divider
+    install_shortcuts || true
 }
 
 print_all_info() {
@@ -760,17 +832,38 @@ do_restart() {
     load_saved_config 2>/dev/null && print_tls_fingerprint
 }
 
-show_menu
-case $MENU_CHOICE in
-    1) do_install ;;
-    2) do_uninstall ;;
-    3) do_update ;;
-    4) do_reconfig ;;
-    5) do_show_config ;;
-    6) do_show_status ;;
-    7) do_show_logs ;;
-    8) do_fingerprint ;;
-    9) do_restart ;;
-    0) exit 0 ;;
-    *) error "无效选择" ;;
+run_interactive_menu() {
+    show_menu
+    case $MENU_CHOICE in
+        1) do_install ;;
+        2) do_uninstall ;;
+        3) do_update ;;
+        4) do_reconfig ;;
+        5) do_show_config ;;
+        6) do_show_status ;;
+        7) do_show_logs ;;
+        8) do_fingerprint ;;
+        9) do_restart ;;
+        10) install_shortcuts ;;
+        0) exit 0 ;;
+        *) error "无效选择" ;;
+    esac
+}
+
+# 支持两种调用方式：
+#   1) bash nowhere-install.sh          → 打开交互菜单
+#   2) bash nowhere-install.sh status   → 直接执行（配合 adam/zt/pz/cxpz/cq 快捷命令）
+case "$ACTION" in
+    menu)       run_interactive_menu ;;
+    install)    do_install ;;
+    uninstall)  do_uninstall ;;
+    update)     do_update ;;
+    reconfig)   do_reconfig ;;
+    config)     do_show_config ;;
+    status)     do_show_status ;;
+    logs)       do_show_logs ;;
+    fingerprint) do_fingerprint ;;
+    restart)    do_restart ;;
+    shortcuts)  install_shortcuts ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart）" ;;
 esac
