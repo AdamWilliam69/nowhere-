@@ -18,7 +18,5 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 ## Installation
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh)
-OR
 wget -O nowhere-install.sh https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh && chmod +x nowhere-install.sh && bash nowhere-install.sh
 
