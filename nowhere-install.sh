@@ -235,15 +235,18 @@ install_shortcuts() {
     local self_path
     self_path="$(readlink -f "$0" 2>/dev/null || true)"
 
-    if [ -n "$self_path" ] && [ -f "$self_path" ]; then
-        cp "$self_path" "$MANAGER_PATH"
-        chmod +x "$MANAGER_PATH"
-    else
+    if [ -z "$self_path" ] || [ ! -f "$self_path" ]; then
         warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
-        warn "快捷命令需要脚本以文件形式保存后再运行，例如："
-        warn "  wget -O nowhere-install.sh <脚本地址> && bash nowhere-install.sh"
+        warn "这种一次性管道运行方式下，脚本内容来自匿名管道，读取一次即耗尽，无法复制自身"
+        warn "快捷命令需要脚本先以文件形式保存到磁盘再运行，例如："
+        warn "  curl -fsSL <脚本地址> -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
         return 1
     fi
+
+    if [ "$self_path" != "$MANAGER_PATH" ]; then
+        cp "$self_path" "$MANAGER_PATH"
+    fi
+    chmod +x "$MANAGER_PATH"
 
     cat > /usr/local/bin/adam << SHORTEOF
 #!/bin/bash
