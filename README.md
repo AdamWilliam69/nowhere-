@@ -20,7 +20,7 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 ```bash
 wget -O nowhere-install.sh https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh && chmod +x nowhere-install.sh && bash nowhere-install.sh
 
-## Upstream Projects
+## Installation
 
 Nowhere: https://github.com/NodePassProject/Nowhere
 Anywhere: https://github.com/NodePassProject/Anywhere
