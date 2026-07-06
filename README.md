@@ -1,3 +1,12 @@
+## 🔗 Upstream Projects
+
+This project is based on the following upstream repositories:
+
+**Nowhere**: https://github.com/NodePassProject/Nowhere  
+**Anywhere**: https://github.com/NodePassProject/Anywhere  
+**VPS.sh**: https://github.com/chikacya/nowhere-sh  
+
+
 # Nowhere Portal Installer
 
 A simple one-click installer for automatic TLS certificate setup and deployment of the Nowhere service.
@@ -19,10 +28,4 @@ A simple one-click installer for automatic TLS certificate setup and deployment 
 
 ```bash
 wget -O nowhere-install.sh https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh && chmod +x nowhere-install.sh && bash nowhere-install.sh
-
-## Installation
-
-Nowhere: https://github.com/NodePassProject/Nowhere
-Anywhere: https://github.com/NodePassProject/Anywhere
-VPS.sh：
-https://github.com/chikacya/nowhere-sh
+ 
