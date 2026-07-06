@@ -143,6 +143,9 @@ validate_socks() {
 }
 
 build_portal_url() {
+    # 服务端启动 URL（Portal），仅包含 Portal 真正接受的参数。
+    # 明确不加入 pool —— 该参数是 Anywhere 客户端 TCP 导入链接专用，Portal 服务端不识别，
+    # 加进去会被服务端忽略或报错，因此这里永远不拼接 pool。
     local encoded_key host_part query
     encoded_key="$(urlencode "$SHARED_KEY")"
     host_part="$(format_host_for_url "${LISTEN_HOST:-}")"
@@ -172,18 +175,30 @@ build_client_links() {
     encoded_name="$(urlencode "Nowhere-${DOMAIN}")"
     base="nowhere://${encoded_key}@${host_part}:${PORT}"
 
-    query="net=udp"
-    [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
-    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-    UDP_LINK="${base}?${query}#${encoded_name}"
+    UDP_LINK=""
+    TCP_LINK=""
+    IMPORT_UDP=""
+    IMPORT_TCP=""
 
-    query="net=tcp&pool=${POOL:-$DEFAULT_POOL}"
-    [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
-    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-    TCP_LINK="${base}?${query}#${encoded_name}"
+    # 服务端 net=mix 时 UDP/TCP 均可用；net=udp 只生成 UDP 链接；net=tcp 只生成 TCP 链接
+    # 这样客户端导入链接始终和服务端实际监听的协议匹配，不会生成连不通的链接
+    if [[ "$NET" == "mix" || "$NET" == "udp" ]]; then
+        query="net=udp"
+        [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
+        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+        UDP_LINK="${base}?${query}#${encoded_name}"
+        IMPORT_UDP="anywhere://add-proxy?link=$(urlencode "$UDP_LINK")"
+    fi
 
-    IMPORT_UDP="anywhere://add-proxy?link=$(urlencode "$UDP_LINK")"
-    IMPORT_TCP="anywhere://add-proxy?link=$(urlencode "$TCP_LINK")"
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        # 注意：pool 仅是 Anywhere 客户端 TLS/TCP 导入链接的参数，
+        # Portal（服务端）不接受该参数，因此绝不会出现在 build_portal_url() 生成的启动串里
+        query="net=tcp&pool=${POOL:-$DEFAULT_POOL}"
+        [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
+        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+        TCP_LINK="${base}?${query}#${encoded_name}"
+        IMPORT_TCP="anywhere://add-proxy?link=$(urlencode "$TCP_LINK")"
+    fi
 }
 
 print_tls_fingerprint() {
@@ -436,10 +451,16 @@ do_install() {
         4) LOG="error" ;; 5) LOG="event" ;; 6) LOG="none" ;; *) LOG="info" ;;
     esac
 
-    echo ""
-    read -p "Anywhere TCP Pool 连接池大小 0-9（回车默认 ${DEFAULT_POOL}）: " POOL
-    POOL=${POOL:-$DEFAULT_POOL}
-    [[ "$POOL" =~ ^[0-9]$ ]] || { warn "Pool 值不合法，重置为默认"; POOL=$DEFAULT_POOL; }
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        echo ""
+        echo -e "${BOLD}Anywhere TCP Pool${NC}（${YELLOW}仅客户端 TLS/TCP 导入链接使用，Portal 服务端不接受此参数，不会写入启动命令${NC}）："
+        read -p "连接池大小 0-9（回车默认 ${DEFAULT_POOL}）: " POOL
+        POOL=${POOL:-$DEFAULT_POOL}
+        [[ "$POOL" =~ ^[0-9]$ ]] || { warn "Pool 值不合法，重置为默认"; POOL=$DEFAULT_POOL; }
+    else
+        POOL="$DEFAULT_POOL"
+        info "传输模式为 udp，不涉及 TCP 连接，跳过 Pool 设置"
+    fi
 
     echo ""
     divider
@@ -459,7 +480,9 @@ do_install() {
     echo -e "  出站源IP      : ${GREEN}${DIAL}${NC}"
     echo -e "  SOCKS5出站    : ${GREEN}$(display_socks "$SOCKS")${NC}"
     echo -e "  日志级别      : ${GREEN}${LOG}${NC}"
-    echo -e "  TCP Pool      : ${GREEN}${POOL}${NC}"
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        echo -e "  TCP Pool      : ${GREEN}${POOL}${NC}（仅客户端参数）"
+    fi
     divider
     read -p "确认安装 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
@@ -652,6 +675,31 @@ SVCEOF
 }
 
 print_all_info() {
+    # 按服务端 net 模式，只拼接实际存在的链接段落，避免展示连不通的链接
+    local udp_section="" tcp_section=""
+
+    if [[ -n "$UDP_LINK" ]]; then
+        udp_section="
+【Anywhere App 导入 —— QUIC/UDP（推荐，延迟更低）】
+链接：
+${UDP_LINK}
+
+一键导入深链（手机点击）：
+${IMPORT_UDP}
+"
+    fi
+
+    if [[ -n "$TCP_LINK" ]]; then
+        tcp_section="
+【Anywhere App 导入 —— TLS/TCP（兼容性更好，pool=${POOL}，仅客户端参数，Portal 服务端不接受）】
+链接：
+${TCP_LINK}
+
+一键导入深链（手机点击）：
+${IMPORT_TCP}
+"
+    fi
+
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
   Nowhere Portal 连接信息
@@ -660,6 +708,8 @@ print_all_info() {
 
 【服务端启动参数（Portal URL，用于 systemd ExecStart）】
 ${NOWHERE_PORTAL}
+※ 注意：pool 是 Anywhere 客户端 TCP 导入链接专用参数，Portal 服务端不识别该参数，
+   因此上面这条服务端启动串里不会出现 pool，这是正常且预期的行为。
 
 【客户端连接参数】
   域名/公网地址 : ${PUBLIC_HOST}
@@ -669,21 +719,7 @@ ${NOWHERE_PORTAL}
   ALPN          : ${ALPN}
   传输模式      : ${NET}
   TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1)" || echo "真实证书(tls=2)")
-
-【Anywhere App 导入 —— QUIC/UDP（推荐，延迟更低）】
-链接：
-${UDP_LINK}
-
-一键导入深链（手机点击）：
-${IMPORT_UDP}
-
-【Anywhere App 导入 —— TLS/TCP（兼容性更好，pool=${POOL}）】
-链接：
-${TCP_LINK}
-
-一键导入深链（手机点击）：
-${IMPORT_TCP}
-
+${udp_section}${tcp_section}
 【Anywhere 手动填写】
   服务器 : ${PUBLIC_HOST}
   端口   : ${PORT}
@@ -692,9 +728,14 @@ ${IMPORT_TCP}
   TLS    : 开启
   SNI    : ${DOMAIN}
   ALPN   : ${ALPN}
+$([[ "$NET" == "mix" || "$NET" == "tcp" ]] && echo "  Pool   : ${POOL}（仅 TLS/TCP 方式导入时需要，服务端不使用）")
 
 【防火墙提醒】
-  需放行: TCP ${PORT} 和 UDP ${PORT}
+$(case "$NET" in
+    tcp) echo "  需放行: TCP ${PORT}" ;;
+    udp) echo "  需放行: UDP ${PORT}" ;;
+    *)   echo "  需放行: TCP ${PORT} 和 UDP ${PORT}" ;;
+esac)
 $([ "$TLS_MODE" = "1" ] && echo "
 【TLS 提示】
   tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用
@@ -714,9 +755,15 @@ CONFEOF
     echo -e "${NC}"
     cat "${CONFIG_DIR}/config.txt"
     echo ""
-    echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP，推荐）：${NC}"
-    echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
-    echo -e "${CYAN}${IMPORT_UDP}${NC}"
+    if [[ -n "$IMPORT_UDP" ]]; then
+        echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP，推荐）：${NC}"
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "${CYAN}${IMPORT_UDP}${NC}"
+    elif [[ -n "$IMPORT_TCP" ]]; then
+        echo -e "${BOLD}✅ 最快导入方式（TLS/TCP）：${NC}"
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "${CYAN}${IMPORT_TCP}${NC}"
+    fi
     echo ""
     print_tls_fingerprint
     echo ""
