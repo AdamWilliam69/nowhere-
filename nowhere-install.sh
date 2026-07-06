@@ -310,6 +310,38 @@ show_menu() {
     read -p "请选择操作 [0-10]: " MENU_CHOICE
 }
 
+ensure_ipv4_preference() {
+    # 很多VPS配置了IPv6地址但实际不通外网(没正确路由)，
+    # 系统按RFC6724默认优先尝试IPv6，导致curl/certbot直接报错 Network unreachable，
+    # 且不会自动回退IPv4。这里做一次检测，问题存在就自动修正，而不是等报错再手动改。
+    local has_ipv6_addr=false
+    if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
+        has_ipv6_addr=true
+    fi
+
+    [ "$has_ipv6_addr" = false ] && return 0
+
+    info "检测到本机配置了 IPv6 地址，测试实际是否能连通外网..."
+    if curl -6 -fsS --max-time 5 https://www.cloudflare.com >/dev/null 2>&1; then
+        success "IPv6 连通性正常，无需调整"
+        return 0
+    fi
+
+    warn "IPv6 地址已配置，但实际无法连通外网（VPS常见问题：分配了地址却未正确路由）"
+    warn "这会导致 curl/certbot 优先尝试 IPv6 而报错 'Network is unreachable'"
+
+    if ! grep -q "^precedence ::ffff:0:0/96" /etc/gai.conf 2>/dev/null; then
+        info "写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）"
+        echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+    fi
+
+    if curl -fsS --max-time 5 https://acme-v02.api.letsencrypt.org/directory >/dev/null 2>&1; then
+        success "已修正为 IPv4 优先，现在可以正常连接 Let's Encrypt"
+    else
+        warn "调整后仍无法连接，请检查 VPS 出网本身是否正常: ping -c 3 8.8.8.8"
+    fi
+}
+
 do_install() {
     step "第 1 步：选择证书获取方式"
     divider
@@ -501,6 +533,7 @@ do_install() {
     success "依赖安装完成"
 
     if [ "$TLS_MODE" = "2" ]; then
+        ensure_ipv4_preference
         step "第 6 步：申请 TLS 证书"
         divider
         mkdir -p "/etc/letsencrypt/live/${DOMAIN}"
