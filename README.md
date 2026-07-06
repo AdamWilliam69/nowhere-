@@ -4,7 +4,7 @@ This project is based on the following upstream repositories:
 
 -  **Nowhere**: https://github.com/NodePassProject/Nowhere  
 -  **Anywhere**: https://github.com/NodePassProject/Anywhere  
--  **VPS.sh**: https://github.com/chikacya/nowhere-sh  
+-  **nowhere-sh**: https://github.com/chikacya/nowhere-sh  
 
 ## Nowhere Portal Installer
 
