@@ -618,7 +618,33 @@ ENVEOF
     chmod 600 "$CONFIG_FILE"
     success "配置已保存至 ${CONFIG_FILE}"
 
-    step "第 9 步：创建系统服务"
+    step "第 9 步：安装前端口占用检测"
+    divider
+    EXISTING_PROC=""
+    if command -v ss >/dev/null 2>&1; then
+        EXISTING_PROC="$(ss -tlnp 2>/dev/null | grep -E ":${PORT}\b" || true)"
+        [ -z "$EXISTING_PROC" ] && EXISTING_PROC="$(ss -ulnp 2>/dev/null | grep -E ":${PORT}\b" || true)"
+    fi
+    if [ -n "$EXISTING_PROC" ]; then
+        warn "检测到端口 ${PORT} 已被其他进程占用："
+        echo "$EXISTING_PROC"
+        warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启，客户端表现为一直 timeout"
+        read -p "仍要继续安装吗？[y/N]: " PORT_CONFIRM
+        [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消安装"; return; }
+    else
+        success "端口 ${PORT} 空闲，可以使用"
+    fi
+
+    step "第 10 步：配置防火墙（先于服务启动，避免中间态连不通）"
+    divider
+    ufw allow ssh 2>/dev/null || true
+    ufw allow "${PORT}/tcp" 2>/dev/null || true
+    ufw allow "${PORT}/udp" 2>/dev/null || true
+    [ "$CERT_METHOD" = "letsencrypt-http" ] && ufw allow 80/tcp 2>/dev/null || true
+    ufw --force enable
+    success "防火墙已配置（端口 ${PORT} TCP+UDP 已放行）"
+
+    step "第 11 步：创建并启动系统服务"
     divider
     cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
@@ -648,28 +674,35 @@ SVCEOF
     systemctl daemon-reload
     systemctl enable nowhere
     systemctl restart nowhere
-    sleep 2
-    systemctl is-active --quiet nowhere && success "服务启动成功" || {
+    sleep 3
+
+    # 用是否真的在监听端口来判定，而不是只看 systemd 的 active 状态
+    # （Restart=on-failure 会在崩溃循环中短暂显示 active，制造"安装成功但连不上"的假象）
+    LISTENING=""
+    if command -v ss >/dev/null 2>&1; then
+        LISTENING="$(ss -tlnp 2>/dev/null | grep nowhere || true)"
+        [ -z "$LISTENING" ] && LISTENING="$(ss -ulnp 2>/dev/null | grep nowhere || true)"
+    fi
+
+    if systemctl is-active --quiet nowhere && [ -n "$LISTENING" ]; then
+        success "服务启动成功，且已确认端口 ${PORT} 正在监听"
+    elif systemctl is-active --quiet nowhere && [ -z "$LISTENING" ]; then
+        warn "systemd 显示服务 active，但未检测到端口 ${PORT} 实际在监听"
+        warn "常见原因：证书路径错误、端口被抢占后又被其他进程释放、TLS 参数不匹配"
+        journalctl -u nowhere -n 30 --no-pager
+        warn "服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout"
+    else
         warn "服务未能启动，查看日志排查："
         journalctl -u nowhere -n 30 --no-pager
         error "安装中止"
-    }
+    fi
 
-    step "第 10 步：配置防火墙"
-    divider
-    ufw allow ssh 2>/dev/null || true
-    ufw allow "${PORT}/tcp" 2>/dev/null || true
-    ufw allow "${PORT}/udp" 2>/dev/null || true
-    [ "$CERT_METHOD" = "letsencrypt-http" ] && ufw allow 80/tcp 2>/dev/null || true
-    ufw --force enable
-    success "防火墙已配置（端口 ${PORT} TCP+UDP 已放行）"
-
-    step "第 11 步：生成连接信息"
+    step "第 12 步：生成连接信息"
     divider
     build_client_links
     print_all_info
 
-    step "第 12 步：安装快捷命令"
+    step "第 13 步：安装快捷命令"
     divider
     install_shortcuts || true
 }
