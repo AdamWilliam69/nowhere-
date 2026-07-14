@@ -18,8 +18,11 @@ NC='\033[0m'
 
 REPO="NodePassProject/Nowhere"
 BIN_PATH="/usr/local/bin/nowhere"
+BIN_BACKUP_PATH="/usr/local/bin/nowhere.previous"
 CONFIG_DIR="/etc/nowhere"
 CONFIG_FILE="${CONFIG_DIR}/nowhere.env"
+VERSION_FILE="${CONFIG_DIR}/version.txt"
+PREV_VERSION_FILE="${CONFIG_DIR}/version.previous.txt"
 SERVICE_FILE="/etc/systemd/system/nowhere.service"
 ACME_HOME="/root/.acme.sh"
 MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
@@ -55,6 +58,69 @@ detect_binary() {
         LIBC="musl"
     fi
     BIN_NAME="nowhere-${ARCH_NAME}-unknown-linux-${LIBC}.tar.gz"
+}
+
+# 记录当前已安装的版本号（写入配置目录），供"查看版本"和"版本回退"使用
+record_installed_version() {
+    local tag="$1"
+    install -d -m 700 "$CONFIG_DIR"
+    echo "$tag" > "$VERSION_FILE"
+}
+
+read_installed_version() {
+    [ -f "$VERSION_FILE" ] && cat "$VERSION_FILE" || echo "未知"
+}
+
+read_previous_version() {
+    [ -f "$PREV_VERSION_FILE" ] && cat "$PREV_VERSION_FILE" || echo ""
+}
+
+# 下载并安装指定 tag 的 Nowhere 二进制，成功后把"当前正在跑的版本"备份为可回退版本
+# 供 do_update / do_select_version / do_rollback 共用
+install_nowhere_version() {
+    local target_tag="$1"
+    detect_binary
+
+    local url="https://github.com/${REPO}/releases/download/${target_tag}/${BIN_NAME}"
+    info "校验该版本是否发布了对应架构 (${ARCH_NAME}-${LIBC}) 的二进制..."
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -L "$url")
+    if [ "$http_code" != "200" ]; then
+        warn "版本 ${target_tag} 未找到对应架构的发布文件 (HTTP ${http_code})"
+        return 1
+    fi
+
+    info "下载 ${target_tag} ..."
+    curl -fL --retry 3 -o /tmp/nowhere.tar.gz "$url" || { warn "下载失败"; return 1; }
+    tar -xzf /tmp/nowhere.tar.gz -C /tmp/ || { warn "解压失败"; return 1; }
+    local binary_path
+    binary_path=$(find /tmp -type f -name nowhere | head -1)
+    if [ -z "$binary_path" ]; then
+        warn "解压后未找到 nowhere 二进制"
+        return 1
+    fi
+
+    # 把"即将被替换掉的"当前版本存为备份，支持之后一键回退
+    if [ -f "$BIN_PATH" ]; then
+        cp "$BIN_PATH" "$BIN_BACKUP_PATH"
+        read_installed_version > "$PREV_VERSION_FILE"
+    fi
+
+    systemctl stop nowhere 2>/dev/null || true
+    install -m 755 "$binary_path" "$BIN_PATH"
+    rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
+    record_installed_version "$target_tag"
+    systemctl start nowhere
+    sleep 2
+
+    if systemctl is-active --quiet nowhere; then
+        success "已切换到 ${target_tag}: $(${BIN_PATH} --version 2>&1 | head -1)"
+        return 0
+    else
+        warn "新版本启动失败，日志如下："
+        journalctl -u nowhere -n 20 --no-pager
+        return 1
+    fi
 }
 
 urlencode() {
@@ -296,7 +362,7 @@ show_menu() {
     echo -e "${NC}"
     echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
     echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
-    echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制"
+    echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
     echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
     echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
     echo -e "  ${BOLD}6)${NC} 查看服务状态"
@@ -304,13 +370,16 @@ show_menu() {
     echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
     echo -e "  ${BOLD}9)${NC} 重启服务"
     echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
+    echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
+    echo -e "  ${BOLD}12)${NC} 选择指定版本（版本切换/回退到历史版本）"
+    echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
         divider
     fi
-    read -p "请选择操作 [0-10]: " MENU_CHOICE
+    read -p "请选择操作 [0-13]: " MENU_CHOICE
 }
 
 ensure_ipv4_preference() {
@@ -624,6 +693,7 @@ HOOKEOF
     [ -z "$BINARY_PATH" ] && error "未找到 nowhere 二进制文件"
     install -m 755 "${BINARY_PATH}" "${BIN_PATH}"
     rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
+    record_installed_version "$LATEST"
     success "Nowhere $(${BIN_PATH} --version 2>&1 | head -1) 安装完成"
 
     step "第 8 步：保存配置"
@@ -880,22 +950,148 @@ do_uninstall() {
 }
 
 do_update() {
-    step "更新 Nowhere 二进制"
+    step "更新 Nowhere 二进制（更新到最新版）"
     divider
-    detect_binary
-    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-    [ -z "$LATEST" ] && error "无法获取版本号"
-    info "最新版本: ${LATEST}"
-    curl -fL --retry 3 -o /tmp/nowhere.tar.gz \
-        "https://github.com/${REPO}/releases/download/${LATEST}/${BIN_NAME}" || error "下载失败"
-    tar -xzf /tmp/nowhere.tar.gz -C /tmp/
-    BINARY_PATH=$(find /tmp -type f -name nowhere | head -1)
+    local current
+    current="$(read_installed_version)"
+    info "当前版本: ${current}"
+    info "正在获取最新版本号..."
+    local latest
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    [ -z "$latest" ] && error "无法获取版本号"
+    info "最新版本: ${latest}"
+
+    if [ "$current" = "$latest" ]; then
+        info "已经是最新版本，无需更新"
+        return
+    fi
+
+    install_nowhere_version "$latest" || error "更新失败"
+}
+
+do_show_version() {
+    step "版本信息"
+    divider
+    local current previous
+    current="$(read_installed_version)"
+    previous="$(read_previous_version)"
+
+    if [ -x "$BIN_PATH" ]; then
+        echo -e "  当前运行的二进制  : ${GREEN}$(${BIN_PATH} --version 2>&1 | head -1)${NC}"
+    else
+        warn "未检测到已安装的 Nowhere 二进制"
+    fi
+    echo -e "  记录的版本 tag    : ${GREEN}${current}${NC}"
+    [ -n "$previous" ] && echo -e "  上一个版本 tag    : ${YELLOW}${previous}${NC}（可用「版本回退」快速切回）"
+
+    echo ""
+    info "正在查询 GitHub 最新版本..."
+    local latest
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    if [ -n "$latest" ]; then
+        if [ "$current" = "$latest" ]; then
+            success "已是最新版本 (${latest})"
+        else
+            warn "有新版本可用: ${latest}（当前 ${current}），可选菜单「更新」升级"
+        fi
+    else
+        warn "无法查询最新版本，请检查网络"
+    fi
+}
+
+do_select_version() {
+    step "选择要安装的版本（支持回退到历史版本）"
+    divider
+    local current
+    current="$(read_installed_version)"
+    info "当前版本: ${current}"
+    info "正在获取版本列表..."
+
+    # 按发布时间倒序列出最近若干个 release 的 tag（不依赖 jq，和脚本其它地方保持同样的解析方式）
+    local tags=()
+    while IFS= read -r line; do
+        tags+=("$line")
+    done < <(curl -s "https://api.github.com/repos/${REPO}/releases?per_page=15" | grep '"tag_name"' | cut -d'"' -f4)
+
+    if [ "${#tags[@]}" -eq 0 ]; then
+        error "未能获取版本列表，请检查网络"
+    fi
+
+    echo ""
+    local i=1
+    for t in "${tags[@]}"; do
+        if [ "$t" = "$current" ]; then
+            echo -e "  ${BOLD}${i})${NC} ${t}  ${GREEN}← 当前版本${NC}"
+        else
+            echo -e "  ${BOLD}${i})${NC} ${t}"
+        fi
+        i=$((i+1))
+    done
+    echo -e "  ${BOLD}0)${NC} 取消"
+    divider
+    read -p "选择要切换到的版本序号: " VER_CHOICE
+
+    [[ "$VER_CHOICE" == "0" || -z "$VER_CHOICE" ]] && { info "已取消"; return; }
+    if ! [[ "$VER_CHOICE" =~ ^[0-9]+$ ]] || [ "$VER_CHOICE" -lt 1 ] || [ "$VER_CHOICE" -gt "${#tags[@]}" ]; then
+        warn "无效选择"
+        return
+    fi
+
+    local target="${tags[$((VER_CHOICE-1))]}"
+    if [ "$target" = "$current" ]; then
+        info "已经是该版本，无需切换"
+        return
+    fi
+
+    read -p "确认切换到 ${target} [y/N]: " CONFIRM
+    [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+
+    install_nowhere_version "$target" || error "切换失败，服务可能未正常启动，请检查日志"
+}
+
+do_rollback() {
+    step "版本回退"
+    divider
+    if [ ! -f "$BIN_BACKUP_PATH" ]; then
+        warn "没有可用于回退的本地备份版本"
+        info "备份仅在执行过「更新」或「选择版本」之后才会生成"
+        return
+    fi
+
+    local current previous
+    current="$(read_installed_version)"
+    previous="$(read_previous_version)"
+    echo -e "  当前版本 : ${GREEN}${current}${NC}"
+    echo -e "  回退目标 : ${YELLOW}${previous:-未知版本（本地备份二进制）}${NC}"
+    divider
+    read -p "确认回退 [y/N]: " CONFIRM
+    [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+
+    # 采用交换语义：回退后，现在的版本变成"可再次回退"的备份，方便反悔
+    local tmp_bin="/tmp/nowhere.swap"
+    cp "$BIN_PATH" "$tmp_bin"
+
     systemctl stop nowhere 2>/dev/null || true
-    install -m 755 "${BINARY_PATH}" "${BIN_PATH}"
-    rm -f /tmp/nowhere.tar.gz
+    install -m 755 "$BIN_BACKUP_PATH" "$BIN_PATH"
+    install -m 755 "$tmp_bin" "$BIN_BACKUP_PATH"
+    rm -f "$tmp_bin"
+
+    # 交换版本记录文件
+    echo "$current" > "$PREV_VERSION_FILE"
+    if [ -n "$previous" ]; then
+        echo "$previous" > "$VERSION_FILE"
+    else
+        echo "未知(本地备份)" > "$VERSION_FILE"
+    fi
+
     systemctl start nowhere
     sleep 2
-    systemctl is-active --quiet nowhere && success "更新完成: $(${BIN_PATH} --version 2>&1 | head -1)" || error "启动失败"
+    if systemctl is-active --quiet nowhere; then
+        success "已回退到: $(${BIN_PATH} --version 2>&1 | head -1)"
+    else
+        warn "回退后服务启动失败，日志如下："
+        journalctl -u nowhere -n 20 --no-pager
+    fi
 }
 
 do_reconfig() {
@@ -961,6 +1157,9 @@ run_interactive_menu() {
         8) do_fingerprint ;;
         9) do_restart ;;
         10) install_shortcuts ;;
+        11) do_show_version ;;
+        12) do_select_version ;;
+        13) do_rollback ;;
         0) exit 0 ;;
         *) error "无效选择" ;;
     esac
@@ -981,5 +1180,8 @@ case "$ACTION" in
     fingerprint) do_fingerprint ;;
     restart)    do_restart ;;
     shortcuts)  install_shortcuts ;;
-    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart）" ;;
+    version)    do_show_version ;;
+    select-version) do_select_version ;;
+    rollback)   do_rollback ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/version/select-version/rollback）" ;;
 esac
