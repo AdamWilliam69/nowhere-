@@ -4,6 +4,7 @@ set -e
 # ══════════════════════════════════════════════════════════════
 #   Adam Nowhere Portal 一键管理脚本
 #   合并证书自动申请（install版）+ 完整协议参数（vps版）
+#   适配 v1.5.0+ 协议，移除 Spec 参数，仅支持 Vector 客户端
 #   快捷命令：adam(菜单) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
 #   支持 Debian / Ubuntu · x86_64 / aarch64
 # ══════════════════════════════════════════════════════════════
@@ -30,7 +31,6 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_NET="mix"
 DEFAULT_ALPN="now/1"
 DEFAULT_LOG="info"
-DEFAULT_POOL="5"
 DEFAULT_SOCKS="none"
 DEFAULT_DIAL="auto"
 
@@ -43,7 +43,6 @@ divider() { echo -e "${CYAN}─────────────────�
 
 [ "$EUID" -ne 0 ] && error "请以 root 用户运行此脚本"
 
-# 支持命令行直接传参调用，例如: adam status / adam config
 ACTION="${1:-menu}"
 
 detect_binary() {
@@ -60,7 +59,10 @@ detect_binary() {
     BIN_NAME="nowhere-${ARCH_NAME}-unknown-linux-${LIBC}.tar.gz"
 }
 
-# 记录当前已安装的版本号（写入配置目录），供"查看版本"和"版本回退"使用
+find_latest_tag() {
+    curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4
+}
+
 record_installed_version() {
     local tag="$1"
     install -d -m 700 "$CONFIG_DIR"
@@ -75,8 +77,6 @@ read_previous_version() {
     [ -f "$PREV_VERSION_FILE" ] && cat "$PREV_VERSION_FILE" || echo ""
 }
 
-# 下载并安装指定 tag 的 Nowhere 二进制，成功后把"当前正在跑的版本"备份为可回退版本
-# 供 do_update / do_select_version / do_rollback 共用
 install_nowhere_version() {
     local target_tag="$1"
     detect_binary
@@ -100,7 +100,6 @@ install_nowhere_version() {
         return 1
     fi
 
-    # 把"即将被替换掉的"当前版本存为备份，支持之后一键回退
     if [ -f "$BIN_PATH" ]; then
         cp "$BIN_PATH" "$BIN_BACKUP_PATH"
         read_installed_version > "$PREV_VERSION_FILE"
@@ -209,15 +208,11 @@ validate_socks() {
 }
 
 build_portal_url() {
-    # 服务端启动 URL（Portal），仅包含 Portal 真正接受的参数。
-    # 明确不加入 pool —— 该参数是 Anywhere 客户端 TCP 导入链接专用，Portal 服务端不识别，
-    # 加进去会被服务端忽略或报错，因此这里永远不拼接 pool。
     local encoded_key host_part query
     encoded_key="$(urlencode "$SHARED_KEY")"
     host_part="$(format_host_for_url "${LISTEN_HOST:-}")"
     query="tls=${TLS_MODE}"
 
-    [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
     [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
     [[ "$NET" != "$DEFAULT_NET" ]] && query="${query}&net=${NET}"
     [[ -n "$DIAL" && "$DIAL" != "$DEFAULT_DIAL" ]] && query="${query}&dial=$(urlencode "$DIAL")"
@@ -233,38 +228,15 @@ build_portal_url() {
 }
 
 build_client_links() {
-    local host host_part encoded_key encoded_name base query
+    local host
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
-    host_part="$(format_host_for_url "$host")"
-    encoded_key="$(urlencode "$SHARED_KEY")"
-    encoded_name="$(urlencode "Nowhere-${DOMAIN}")"
-    base="nowhere://${encoded_key}@${host_part}:${PORT}"
 
-    UDP_LINK=""
-    TCP_LINK=""
-    IMPORT_UDP=""
-    IMPORT_TCP=""
-
-    # 服务端 net=mix 时 UDP/TCP 均可用；net=udp 只生成 UDP 链接；net=tcp 只生成 TCP 链接
-    # 这样客户端导入链接始终和服务端实际监听的协议匹配，不会生成连不通的链接
-    if [[ "$NET" == "mix" || "$NET" == "udp" ]]; then
-        query="net=udp"
-        [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
-        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-        UDP_LINK="${base}?${query}#${encoded_name}"
-        IMPORT_UDP="anywhere://add-proxy?link=$(urlencode "$UDP_LINK")"
-    fi
-
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        # 注意：pool 仅是 Anywhere 客户端 TLS/TCP 导入链接的参数，
-        # Portal（服务端）不接受该参数，因此绝不会出现在 build_portal_url() 生成的启动串里
-        query="net=tcp&pool=${POOL:-$DEFAULT_POOL}"
-        [[ -n "$SPEC" ]] && query="${query}&spec=$(urlencode "$SPEC")"
-        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-        TCP_LINK="${base}?${query}#${encoded_name}"
-        IMPORT_TCP="anywhere://add-proxy?link=$(urlencode "$TCP_LINK")"
-    fi
+    VECTOR_HINT="服务器: ${host}
+端口  : ${PORT}
+密钥  : ${SHARED_KEY}
+ALPN  : ${ALPN}
+（当前为 v1.5.0+ 协议，请使用官方 vector:// 客户端进行连接。精确的 URL 拼写请查阅 https://github.com/${REPO}/blob/main/docs/configuration.md）"
 }
 
 print_tls_fingerprint() {
@@ -291,10 +263,6 @@ print_tls_fingerprint() {
     warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100"
 }
 
-# ══════════════════════════════════════════════════════════════
-#  快捷命令安装：adam(菜单入口) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
-# ══════════════════════════════════════════════════════════════
-
 install_shortcuts() {
     step "安装快捷命令"
     divider
@@ -304,8 +272,6 @@ install_shortcuts() {
     if [ -z "$self_path" ] || [ ! -f "$self_path" ]; then
         warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
         warn "这种一次性管道运行方式下，脚本内容来自匿名管道，读取一次即耗尽，无法复制自身"
-        warn "快捷命令需要脚本先以文件形式保存到磁盘再运行，例如："
-        warn "  curl -fsSL <脚本地址> -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
         return 1
     fi
 
@@ -314,35 +280,17 @@ install_shortcuts() {
     fi
     chmod +x "$MANAGER_PATH"
 
-    cat > /usr/local/bin/adam << SHORTEOF
+    for cmd in adam zt pz cxpz cq; do
+        cat > "/usr/local/bin/${cmd}" << SHORTEOF
 #!/bin/bash
 exec "${MANAGER_PATH}" "\$@"
 SHORTEOF
-    chmod +x /usr/local/bin/adam
-
-    cat > /usr/local/bin/zt << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" status
-SHORTEOF
-    chmod +x /usr/local/bin/zt
-
-    cat > /usr/local/bin/pz << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" config
-SHORTEOF
-    chmod +x /usr/local/bin/pz
-
-    cat > /usr/local/bin/cxpz << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" reconfig
-SHORTEOF
-    chmod +x /usr/local/bin/cxpz
-
-    cat > /usr/local/bin/cq << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" restart
-SHORTEOF
-    chmod +x /usr/local/bin/cq
+        chmod +x "/usr/local/bin/${cmd}"
+    done
+    sed -i 's/"\$@"/status/' /usr/local/bin/zt
+    sed -i 's/"\$@"/config/' /usr/local/bin/pz
+    sed -i 's/"\$@"/reconfig/' /usr/local/bin/cxpz
+    sed -i 's/"\$@"/restart/' /usr/local/bin/cq
 
     success "快捷命令已安装完成"
     echo -e "  ${CYAN}adam${NC}   — 打开管理菜单"
@@ -356,7 +304,7 @@ show_menu() {
     clear
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
+    echo "║         Adam Nowhere Portal 一键管理脚本 (v1.5.0+)           ║"
     echo "║         加密隧道协议 · TLS/TCP + QUIC/UDP                    ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -364,7 +312,7 @@ show_menu() {
     echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
     echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
     echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
-    echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
+    echo -e "  ${BOLD}5)${NC} 查看连接信息"
     echo -e "  ${BOLD}6)${NC} 查看服务状态"
     echo -e "  ${BOLD}7)${NC} 查看实时日志"
     echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
@@ -383,9 +331,6 @@ show_menu() {
 }
 
 ensure_ipv4_preference() {
-    # 很多VPS配置了IPv6地址但实际不通外网(没正确路由)，
-    # 系统按RFC6724默认优先尝试IPv6，导致curl/certbot直接报错 Network unreachable，
-    # 且不会自动回退IPv4。这里做一次检测，问题存在就自动修正，而不是等报错再手动改。
     local has_ipv6_addr=false
     if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
         has_ipv6_addr=true
@@ -403,14 +348,14 @@ ensure_ipv4_preference() {
     warn "这会导致 curl/certbot 优先尝试 IPv6 而报错 'Network is unreachable'"
 
     if ! grep -q "^precedence ::ffff:0:0/96" /etc/gai.conf 2>/dev/null; then
-        info "写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）"
+        info "写入 /etc/gai.conf，让系统优先选用 IPv4"
         echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
     fi
 
     if curl -fsS --max-time 5 https://acme-v02.api.letsencrypt.org/directory >/dev/null 2>&1; then
         success "已修正为 IPv4 优先，现在可以正常连接 Let's Encrypt"
     else
-        warn "调整后仍无法连接，请检查 VPS 出网本身是否正常: ping -c 3 8.8.8.8"
+        warn "调整后仍无法连接，请检查 VPS 出网本身是否正常"
     fi
 }
 
@@ -448,7 +393,7 @@ do_install() {
     else
         info "自签模式无需域名，将自动探测公网 IP 作为客户端连接地址"
         DETECTED_IP="$(detect_public_host)"
-        read -p "公网 IP/域名（用于 Anywhere 导入链接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
+        read -p "公网 IP/域名（回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
         PUBLIC_HOST=${PUBLIC_HOST:-$DETECTED_IP}
         DOMAIN="$PUBLIC_HOST"
     fi
@@ -520,9 +465,6 @@ do_install() {
     read -p "共享密钥 Shared Key（回车自动生成）: " SHARED_KEY
     [ -z "$SHARED_KEY" ] && { SHARED_KEY="$(random_token 24)"; info "已生成密钥: ${SHARED_KEY}"; }
 
-    read -p "Spec Seed 协议种子（回车自动生成）: " SPEC
-    [ -z "$SPEC" ] && { SPEC="$(random_token 12)"; info "已生成 Spec: ${SPEC}"; }
-
     read -p "ALPN（回车默认 ${DEFAULT_ALPN}）: " ALPN
     ALPN=${ALPN:-$DEFAULT_ALPN}
 
@@ -555,17 +497,6 @@ do_install() {
         4) LOG="error" ;; 5) LOG="event" ;; 6) LOG="none" ;; *) LOG="info" ;;
     esac
 
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        echo ""
-        echo -e "${BOLD}Anywhere TCP Pool${NC}（${YELLOW}仅客户端 TLS/TCP 导入链接使用，Portal 服务端不接受此参数，不会写入启动命令${NC}）："
-        read -p "连接池大小 0-9（回车默认 ${DEFAULT_POOL}）: " POOL
-        POOL=${POOL:-$DEFAULT_POOL}
-        [[ "$POOL" =~ ^[0-9]$ ]] || { warn "Pool 值不合法，重置为默认"; POOL=$DEFAULT_POOL; }
-    else
-        POOL="$DEFAULT_POOL"
-        info "传输模式为 udp，不涉及 TCP 连接，跳过 Pool 设置"
-    fi
-
     echo ""
     divider
     echo -e "${BOLD}配置确认：${NC}"
@@ -578,15 +509,11 @@ do_install() {
     echo -e "  监听地址      : ${GREEN}$([ -z "$LISTEN_HOST" ] && echo "<空,全监听>" || echo "$LISTEN_HOST")${NC}"
     echo -e "  传输模式      : ${GREEN}${NET}${NC}"
     echo -e "  共享密钥      : ${GREEN}$(mask_secret "$SHARED_KEY")${NC}"
-    echo -e "  Spec          : ${GREEN}$(mask_secret "$SPEC")${NC}"
     echo -e "  ALPN          : ${GREEN}${ALPN}${NC}"
     echo -e "  上/下行限速   : ${GREEN}${RATE} / ${ETAR} Mbps${NC}"
     echo -e "  出站源IP      : ${GREEN}${DIAL}${NC}"
     echo -e "  SOCKS5出站    : ${GREEN}$(display_socks "$SOCKS")${NC}"
     echo -e "  日志级别      : ${GREEN}${LOG}${NC}"
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        echo -e "  TCP Pool      : ${GREEN}${POOL}${NC}（仅客户端参数）"
-    fi
     divider
     read -p "确认安装 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
@@ -622,7 +549,6 @@ do_install() {
                     error "证书申请失败：请检查域名解析和80端口"
                 success "证书申请成功"
             fi
-
         elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
             mkdir -p /etc/cloudflare
             if [ "$CF_AUTH_TYPE" = "1" ]; then
@@ -648,7 +574,6 @@ CFEOF
                     error "证书申请失败：请检查 CF API Key 和域名 DNS 是否在 Cloudflare 管理下"
                 success "证书申请成功"
             fi
-
         elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
             info "安装 acme.sh..."
             curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1
@@ -666,7 +591,6 @@ CFEOF
                 success "证书申请成功"
             fi
         fi
-
         info "证书链: ${CRT}"
         info "私钥  : ${KEY_PEM}"
 
@@ -681,9 +605,11 @@ HOOKEOF
     step "第 7 步：下载 Nowhere 二进制"
     divider
     detect_binary
-    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    info "正在获取最新版本..."
+    LATEST=$(find_latest_tag)
     [ -z "$LATEST" ] && error "无法获取版本号，请检查网络"
     info "最新版本: ${LATEST} (${ARCH_NAME}-${LIBC})"
+    
     curl -fL --retry 3 --connect-timeout 10 \
         -o /tmp/nowhere.tar.gz \
         "https://github.com/${REPO}/releases/download/${LATEST}/${BIN_NAME}" || error "下载失败"
@@ -707,7 +633,6 @@ PUBLIC_HOST_VALUE="${PUBLIC_HOST}"
 LISTEN_HOST_VALUE="${LISTEN_HOST}"
 PORT_VALUE="${PORT}"
 SHARED_KEY_VALUE="${SHARED_KEY}"
-SPEC_VALUE="${SPEC}"
 NET_VALUE="${NET}"
 ALPN_VALUE="${ALPN}"
 TLS_MODE_VALUE="${TLS_MODE}"
@@ -719,7 +644,6 @@ ETAR_VALUE="${ETAR}"
 DIAL_VALUE="${DIAL}"
 SOCKS_VALUE="${SOCKS}"
 LOG_VALUE="${LOG}"
-POOL_VALUE="${POOL}"
 ENVEOF
     chmod 600 "$CONFIG_FILE"
     success "配置已保存至 ${CONFIG_FILE}"
@@ -734,14 +658,14 @@ ENVEOF
     if [ -n "$EXISTING_PROC" ]; then
         warn "检测到端口 ${PORT} 已被其他进程占用："
         echo "$EXISTING_PROC"
-        warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启，客户端表现为一直 timeout"
+        warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启"
         read -p "仍要继续安装吗？[y/N]: " PORT_CONFIRM
         [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消安装"; return; }
     else
         success "端口 ${PORT} 空闲，可以使用"
     fi
 
-    step "第 10 步：配置防火墙（先于服务启动，避免中间态连不通）"
+    step "第 10 步：配置防火墙"
     divider
     ufw allow ssh 2>/dev/null || true
     ufw allow "${PORT}/tcp" 2>/dev/null || true
@@ -782,8 +706,6 @@ SVCEOF
     systemctl restart nowhere
     sleep 3
 
-    # 用是否真的在监听端口来判定，而不是只看 systemd 的 active 状态
-    # （Restart=on-failure 会在崩溃循环中短暂显示 active，制造"安装成功但连不上"的假象）
     LISTENING=""
     if command -v ss >/dev/null 2>&1; then
         LISTENING="$(ss -tlnp 2>/dev/null | grep nowhere || true)"
@@ -794,9 +716,7 @@ SVCEOF
         success "服务启动成功，且已确认端口 ${PORT} 正在监听"
     elif systemctl is-active --quiet nowhere && [ -z "$LISTENING" ]; then
         warn "systemd 显示服务 active，但未检测到端口 ${PORT} 实际在监听"
-        warn "常见原因：证书路径错误、端口被抢占后又被其他进程释放、TLS 参数不匹配"
         journalctl -u nowhere -n 30 --no-pager
-        warn "服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout"
     else
         warn "服务未能启动，查看日志排查："
         journalctl -u nowhere -n 30 --no-pager
@@ -814,74 +734,39 @@ SVCEOF
 }
 
 print_all_info() {
-    # 按服务端 net 模式，只拼接实际存在的链接段落，避免展示连不通的链接
-    local udp_section="" tcp_section=""
-
-    if [[ -n "$UDP_LINK" ]]; then
-        udp_section="
-【Anywhere App 导入 —— QUIC/UDP（推荐，延迟更低）】
-链接：
-${UDP_LINK}
-
-一键导入深链（手机点击）：
-${IMPORT_UDP}
-"
-    fi
-
-    if [[ -n "$TCP_LINK" ]]; then
-        tcp_section="
-【Anywhere App 导入 —— TLS/TCP（兼容性更好，pool=${POOL}，仅客户端参数，Portal 服务端不接受）】
-链接：
-${TCP_LINK}
-
-一键导入深链（手机点击）：
-${IMPORT_TCP}
-"
-    fi
-
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
-  Nowhere Portal 连接信息
-  更新时间: $(date '+%Y-%m-%d %H:%M:%S')
+  Nowhere Portal 连接信息 (v1.5.0+ 新协议)
+  更新时间: \$(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
-【服务端启动参数（Portal URL，用于 systemd ExecStart）】
+【服务端启动参数（Portal URL）】
 ${NOWHERE_PORTAL}
-※ 注意：pool 是 Anywhere 客户端 TCP 导入链接专用参数，Portal 服务端不识别该参数，
-   因此上面这条服务端启动串里不会出现 pool，这是正常且预期的行为。
 
 【客户端连接参数】
   域名/公网地址 : ${PUBLIC_HOST}
   端口          : ${PORT}
   共享密钥      : ${SHARED_KEY}
-  Spec          : ${SPEC}
   ALPN          : ${ALPN}
   传输模式      : ${NET}
   TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1)" || echo "真实证书(tls=2)")
-${udp_section}${tcp_section}
-【Anywhere 手动填写】
-  服务器 : ${PUBLIC_HOST}
-  端口   : ${PORT}
-  密钥   : ${SHARED_KEY}
-  Spec   : ${SPEC}
-  TLS    : 开启
-  SNI    : ${DOMAIN}
-  ALPN   : ${ALPN}
-$([[ "$NET" == "mix" || "$NET" == "tcp" ]] && echo "  Pool   : ${POOL}（仅 TLS/TCP 方式导入时需要，服务端不使用）")
+
+【Vector 客户端配置提示】
+${VECTOR_HINT}
 
 【防火墙提醒】
-$(case "$NET" in
+\$(case "$NET" in
     tcp) echo "  需放行: TCP ${PORT}" ;;
     udp) echo "  需放行: UDP ${PORT}" ;;
     *)   echo "  需放行: TCP ${PORT} 和 UDP ${PORT}" ;;
 esac)
-$([ "$TLS_MODE" = "1" ] && echo "
+\$([ "$TLS_MODE" = "1" ] && echo "
 【TLS 提示】
-  tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用
+  tls=1 为临时自签证书，每次重启指纹会变化
   生产环境请使用 tls=2 + 真实域名证书")
-$([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
+\$([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
 【SOCKS5 出站代理】
-  $(display_socks "$SOCKS")")
+  \$(display_socks "$SOCKS")")
 ════════════════════════════════════════════════════════════════
 CONFEOF
     chmod 600 "${CONFIG_DIR}/config.txt"
@@ -893,16 +778,6 @@ CONFEOF
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     cat "${CONFIG_DIR}/config.txt"
-    echo ""
-    if [[ -n "$IMPORT_UDP" ]]; then
-        echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP，推荐）：${NC}"
-        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
-        echo -e "${CYAN}${IMPORT_UDP}${NC}"
-    elif [[ -n "$IMPORT_TCP" ]]; then
-        echo -e "${BOLD}✅ 最快导入方式（TLS/TCP）：${NC}"
-        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
-        echo -e "${CYAN}${IMPORT_TCP}${NC}"
-    fi
     echo ""
     print_tls_fingerprint
     echo ""
@@ -922,7 +797,6 @@ load_saved_config() {
     LISTEN_HOST="$LISTEN_HOST_VALUE"
     PORT="$PORT_VALUE"
     SHARED_KEY="$SHARED_KEY_VALUE"
-    SPEC="$SPEC_VALUE"
     NET="$NET_VALUE"
     ALPN="$ALPN_VALUE"
     TLS_MODE="$TLS_MODE_VALUE"
@@ -934,7 +808,6 @@ load_saved_config() {
     DIAL="$DIAL_VALUE"
     SOCKS="$SOCKS_VALUE"
     LOG="$LOG_VALUE"
-    POOL="$POOL_VALUE"
 }
 
 do_uninstall() {
@@ -943,7 +816,7 @@ do_uninstall() {
     read -p "确认卸载 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
     systemctl disable --now nowhere 2>/dev/null || true
-    rm -f "$SERVICE_FILE" "$BIN_PATH"
+    rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH"
     systemctl daemon-reload
     warn "已保留 ${CONFIG_DIR}（含密钥配置），如需彻底清除请手动: rm -rf ${CONFIG_DIR}"
     success "Nowhere 已卸载"
@@ -952,21 +825,22 @@ do_uninstall() {
 do_update() {
     step "更新 Nowhere 二进制（更新到最新版）"
     divider
+    load_saved_config 2>/dev/null || true
     local current
     current="$(read_installed_version)"
     info "当前版本: ${current}"
-    info "正在获取最新版本号..."
+    
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-    [ -z "$latest" ] && error "无法获取版本号"
-    info "最新版本: ${latest}"
+    latest=$(find_latest_tag)
+    [ -z "$latest" ] && error "无法获取最新版本号"
+    info "GitHub 最新版本: ${latest}"
 
     if [ "$current" = "$latest" ]; then
         info "已经是最新版本，无需更新"
         return
     fi
 
-    install_nowhere_version "$latest" || error "更新失败"
+    install_nowhere_version "$latest"
 }
 
 do_show_version() {
@@ -985,17 +859,15 @@ do_show_version() {
     [ -n "$previous" ] && echo -e "  上一个版本 tag    : ${YELLOW}${previous}${NC}（可用「版本回退」快速切回）"
 
     echo ""
-    info "正在查询 GitHub 最新版本..."
+    info "正在查询最新版本..."
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    latest=$(find_latest_tag)
     if [ -n "$latest" ]; then
         if [ "$current" = "$latest" ]; then
             success "已是最新版本 (${latest})"
         else
-            warn "有新版本可用: ${latest}（当前 ${current}），可选菜单「更新」升级"
+            warn "有新版本: ${latest}（当前 ${current}），可选菜单「3) 更新」升级"
         fi
-    else
-        warn "无法查询最新版本，请检查网络"
     fi
 }
 
@@ -1007,7 +879,6 @@ do_select_version() {
     info "当前版本: ${current}"
     info "正在获取版本列表..."
 
-    # 按发布时间倒序列出最近若干个 release 的 tag（不依赖 jq，和脚本其它地方保持同样的解析方式）
     local tags=()
     while IFS= read -r line; do
         tags+=("$line")
@@ -1046,7 +917,9 @@ do_select_version() {
     read -p "确认切换到 ${target} [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
-    install_nowhere_version "$target" || error "切换失败，服务可能未正常启动，请检查日志"
+    if ! install_nowhere_version "$target"; then
+        error "切换失败，服务可能未正常启动，请检查日志"
+    fi
 }
 
 do_rollback() {
@@ -1067,7 +940,6 @@ do_rollback() {
     read -p "确认回退 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
-    # 采用交换语义：回退后，现在的版本变成"可再次回退"的备份，方便反悔
     local tmp_bin="/tmp/nowhere.swap"
     cp "$BIN_PATH" "$tmp_bin"
 
@@ -1076,7 +948,6 @@ do_rollback() {
     install -m 755 "$tmp_bin" "$BIN_BACKUP_PATH"
     rm -f "$tmp_bin"
 
-    # 交换版本记录文件
     echo "$current" > "$PREV_VERSION_FILE"
     if [ -n "$previous" ]; then
         echo "$previous" > "$VERSION_FILE"
@@ -1165,9 +1036,6 @@ run_interactive_menu() {
     esac
 }
 
-# 支持两种调用方式：
-#   1) bash nowhere-install.sh          → 打开交互菜单
-#   2) bash nowhere-install.sh status   → 直接执行（配合 adam/zt/pz/cxpz/cq 快捷命令）
 case "$ACTION" in
     menu)       run_interactive_menu ;;
     install)    do_install ;;
@@ -1183,5 +1051,5 @@ case "$ACTION" in
     version)    do_show_version ;;
     select-version) do_select_version ;;
     rollback)   do_rollback ;;
-    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/version/select-version/rollback）" ;;
+    *) error "未知操作: ${ACTION}" ;;
 esac
