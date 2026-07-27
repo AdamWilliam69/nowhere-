@@ -227,16 +227,39 @@ build_portal_url() {
     printf 'portal://%s@%s:%s?%s' "$encoded_key" "$host_part" "$PORT" "$query"
 }
 
+build_vector_url() {
+    local encoded_key host_part query
+    encoded_key="$(urlencode "$SHARED_KEY")"
+    host_part="$(format_host_for_url "${PUBLIC_HOST:-}")"
+    query="tls=${TLS_MODE}"
+
+    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+    [[ "$NET" != "$DEFAULT_NET" ]] && query="${query}&net=${NET}"
+    [[ -n "$DIAL" && "$DIAL" != "$DEFAULT_DIAL" ]] && query="${query}&dial=$(urlencode "$DIAL")"
+    [[ -n "$SOCKS" && "$SOCKS" != "$DEFAULT_SOCKS" ]] && query="${query}&socks=$(urlencode "$SOCKS")"
+    [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
+    [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
+    [[ "$LOG" != "$DEFAULT_LOG" ]] && query="${query}&log=${LOG}"
+
+    printf 'vector://%s@%s:%s?%s' "$encoded_key" "$host_part" "$PORT" "$query"
+}
+
 build_client_links() {
     local host
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
 
+    VECTOR_URL="$(build_vector_url)"
+
     VECTOR_HINT="服务器: ${host}
 端口  : ${PORT}
 密钥  : ${SHARED_KEY}
 ALPN  : ${ALPN}
-（当前为 v1.5.0+ 协议，请使用官方 vector:// 客户端进行连接。精确的 URL 拼写请查阅 https://github.com/${REPO}/blob/main/docs/configuration.md）"
+
+【一键导入链接（复制到 Anywhere/Vector 客户端）】
+${VECTOR_URL}
+
+（当前为 v1.5.0+ 协议，如客户端无法识别以上链接，请使用官方 vector:// 客户端手动填写，精确字段请查阅 https://github.com/${REPO}/blob/main/docs/configuration.md）"
 }
 
 print_tls_fingerprint() {
@@ -737,7 +760,7 @@ print_all_info() {
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
   Nowhere Portal 连接信息 (v1.5.0+ 新协议)
-  更新时间: \$(date '+%Y-%m-%d %H:%M:%S')
+  更新时间: $(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
 【服务端启动参数（Portal URL）】
@@ -755,18 +778,18 @@ ${NOWHERE_PORTAL}
 ${VECTOR_HINT}
 
 【防火墙提醒】
-\$(case "$NET" in
+$(case "$NET" in
     tcp) echo "  需放行: TCP ${PORT}" ;;
     udp) echo "  需放行: UDP ${PORT}" ;;
     *)   echo "  需放行: TCP ${PORT} 和 UDP ${PORT}" ;;
 esac)
-\$([ "$TLS_MODE" = "1" ] && echo "
+$([ "$TLS_MODE" = "1" ] && echo "
 【TLS 提示】
   tls=1 为临时自签证书，每次重启指纹会变化
   生产环境请使用 tls=2 + 真实域名证书")
-\$([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
+$([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
 【SOCKS5 出站代理】
-  \$(display_socks "$SOCKS")")
+  $(display_socks "$SOCKS")")
 ════════════════════════════════════════════════════════════════
 CONFEOF
     chmod 600 "${CONFIG_DIR}/config.txt"
