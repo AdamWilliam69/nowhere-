@@ -3,8 +3,10 @@ set -e
 
 # ══════════════════════════════════════════════════════════════
 #   Adam Nowhere Portal 一键管理脚本
-#   合并证书自动申请（install版）+ 完整协议参数（vps版）
-#   适配 v1.5.0+ 协议，移除 Spec 参数，仅支持 Vector 客户端
+#   已适配 Nowhere v1.5.0+ 破坏性更新：
+#     - spec 参数已移除，不再生成/询问
+#     - pool 上限由 9 调整为 256（官方：Vector 的 tcp/tcp 组合专用，默认 5）
+#     - 空/省略/none 的 SNI 会关闭证书校验，生产环境务必用真实域名+CA证书
 #   快捷命令：adam(菜单) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
 #   支持 Debian / Ubuntu · x86_64 / aarch64
 # ══════════════════════════════════════════════════════════════
@@ -31,8 +33,11 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_NET="mix"
 DEFAULT_ALPN="now/1"
 DEFAULT_LOG="info"
+DEFAULT_POOL="5"
 DEFAULT_SOCKS="none"
 DEFAULT_DIAL="auto"
+DEFAULT_MORPH="0"
+DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 
 info()    { echo -e "${BLUE}[信息]${NC} $1"; }
 success() { echo -e "${GREEN}[成功]${NC} $1"; }
@@ -57,10 +62,6 @@ detect_binary() {
         LIBC="musl"
     fi
     BIN_NAME="nowhere-${ARCH_NAME}-unknown-linux-${LIBC}.tar.gz"
-}
-
-find_latest_tag() {
-    curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4
 }
 
 record_installed_version() {
@@ -186,6 +187,10 @@ validate_nonneg_int() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+validate_pool() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 0 ] && [ "$1" -le 256 ]
+}
+
 validate_socks() {
     local socks="$1" endpoint userinfo host port
     [[ -z "$socks" || "$socks" == "none" ]] && return 0
@@ -219,6 +224,7 @@ build_portal_url() {
     [[ -n "$SOCKS" && "$SOCKS" != "$DEFAULT_SOCKS" ]] && query="${query}&socks=$(urlencode "$SOCKS")"
     [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
     [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
+    [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
     if [[ "$TLS_MODE" == "2" ]]; then
         query="${query}&crt=$(urlencode "$CRT")&key=$(urlencode "$KEY_PEM")"
     fi
@@ -227,47 +233,78 @@ build_portal_url() {
     printf 'portal://%s@%s:%s?%s' "$encoded_key" "$host_part" "$PORT" "$query"
 }
 
-build_vector_url() {
-    local encoded_key host_part query
-    encoded_key="$(urlencode "$SHARED_KEY")"
-    host_part="$(format_host_for_url "${PUBLIC_HOST:-}")"
-    query="tls=${TLS_MODE}"
-
-    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-    [[ "$NET" != "$DEFAULT_NET" ]] && query="${query}&net=${NET}"
-    [[ -n "$DIAL" && "$DIAL" != "$DEFAULT_DIAL" ]] && query="${query}&dial=$(urlencode "$DIAL")"
-    [[ -n "$SOCKS" && "$SOCKS" != "$DEFAULT_SOCKS" ]] && query="${query}&socks=$(urlencode "$SOCKS")"
-    [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
-    [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
-    [[ "$LOG" != "$DEFAULT_LOG" ]] && query="${query}&log=${LOG}"
-
-    printf 'vector://%s@%s:%s?%s' "$encoded_key" "$host_part" "$PORT" "$query"
-}
-
 build_client_links() {
-    local host
+    local host host_part encoded_key encoded_name base query
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
+    host_part="$(format_host_for_url "$host")"
+    encoded_key="$(urlencode "$SHARED_KEY")"
+    encoded_name="$(urlencode "Nowhere-${DOMAIN}")"
+    base="nowhere://${encoded_key}@${host_part}:${PORT}"
 
-    VECTOR_URL="$(build_vector_url)"
+    UDP_LINK=""
+    TCP_LINK=""
+    IMPORT_UDP=""
+    IMPORT_TCP=""
 
-    VECTOR_HINT="服务器: ${host}
-端口  : ${PORT}
-密钥  : ${SHARED_KEY}
-ALPN  : ${ALPN}
+    # morph 是链路两端都必须一致的 wire masking 开关，服务端开了客户端也要带，否则连不上
+    if [[ "$NET" == "mix" || "$NET" == "udp" ]]; then
+        query="net=udp"
+        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+        [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
+        UDP_LINK="${base}?${query}#${encoded_name}"
+        IMPORT_UDP="anywhere://add-proxy?link=$(urlencode "$UDP_LINK")"
+    fi
 
-【一键导入链接（复制到 Anywhere/Vector 客户端）】
-${VECTOR_URL}
-
-（当前为 v1.5.0+ 协议，如客户端无法识别以上链接，请使用官方 vector:// 客户端手动填写，精确字段请查阅 https://github.com/${REPO}/blob/main/docs/configuration.md）"
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        query="net=tcp&pool=${POOL:-$DEFAULT_POOL}"
+        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+        [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
+        TCP_LINK="${base}?${query}#${encoded_name}"
+        IMPORT_TCP="anywhere://add-proxy?link=$(urlencode "$TCP_LINK")"
+    fi
 }
 
-print_tls_fingerprint() {
-    if [[ "$TLS_MODE" != "1" ]]; then
-        return 0
+# 构建本地 Vector 客户端连接串（供在电脑/路由器上跑本地 SOCKS5 出口用）
+# 官方确认语法：vector://key@host:port?up=<tcp|udp>&down=<tcp|udp>&pool=n&socks=listen_addr&(sni=域名|pin=证书指纹)
+build_vector_info() {
+    [ "$GENERATE_VECTOR" != "1" ] && { VECTOR_URL=""; return; }
+
+    local host host_part encoded_key query fp pin_value
+    host="${PUBLIC_HOST:-}"
+    [[ -z "$host" ]] && host="$(detect_public_host)"
+    host_part="$(format_host_for_url "$host")"
+    encoded_key="$(urlencode "$SHARED_KEY")"
+
+    query="up=${VECTOR_UP}&down=${VECTOR_DOWN}"
+    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
+    if [[ "$VECTOR_UP" == "tcp" || "$VECTOR_DOWN" == "tcp" ]]; then
+        query="${query}&pool=${POOL:-$DEFAULT_POOL}"
     fi
-    echo
-    info "正在获取自签证书 SHA-256 指纹..."
+    [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
+    query="${query}&socks=$(urlencode "$VECTOR_SOCKS")"
+
+    if [ "$TLS_MODE" = "2" ]; then
+        # 真实证书：用 sni 走正常证书链校验
+        query="${query}&sni=$(urlencode "$DOMAIN")"
+        VECTOR_URL="vector://${encoded_key}@${host_part}:${PORT}?${query}"
+    else
+        # 自签证书：sni 校验必然失败，改用官方推荐的 pin=CERT_SHA256 指纹锁定
+        fp="$(get_tls_fingerprint)"
+        if [ -n "$fp" ]; then
+            pin_value=$(echo "$fp" | tr -d ':' | tr 'A-F' 'a-f')
+            query="${query}&pin=${pin_value}"
+            VECTOR_URL="vector://${encoded_key}@${host_part}:${PORT}?${query}"
+        else
+            VECTOR_URL=""
+            warn "未能获取自签证书指纹，无法生成带 pin 的 Vector 连接串（服务是否已启动？）"
+        fi
+    fi
+}
+
+# 纯获取指纹，不打印不警告，供 build_vector_info 拼 pin= 用
+get_tls_fingerprint() {
+    [[ "$TLS_MODE" != "1" ]] && return 1
     local connect_host="127.0.0.1"
     local sni="${PUBLIC_HOST:-localhost}"
     local fingerprint output
@@ -277,80 +314,28 @@ print_tls_fingerprint() {
             | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)"
         fingerprint="${output#*=}"
         if [[ -n "$fingerprint" && "$fingerprint" != "$output" ]]; then
-            echo -e "  ${GREEN}${fingerprint}${NC}"
-            warn "tls=1 证书存在内存中，Nowhere 每次重启后指纹都会变化"
+            echo "$fingerprint"
             return 0
         fi
         sleep 1
     done
-    warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100"
+    return 1
 }
 
-install_shortcuts() {
-    step "安装快捷命令"
-    divider
-    local self_path
-    self_path="$(readlink -f "$0" 2>/dev/null || true)"
-
-    if [ -z "$self_path" ] || [ ! -f "$self_path" ]; then
-        warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
-        warn "这种一次性管道运行方式下，脚本内容来自匿名管道，读取一次即耗尽，无法复制自身"
-        return 1
+print_tls_fingerprint() {
+    if [[ "$TLS_MODE" != "1" ]]; then
+        return 0
     fi
-
-    if [ "$self_path" != "$MANAGER_PATH" ]; then
-        cp "$self_path" "$MANAGER_PATH"
+    echo
+    info "正在获取自签证书 SHA-256 指纹..."
+    local fingerprint
+    fingerprint="$(get_tls_fingerprint)"
+    if [ -n "$fingerprint" ]; then
+        echo -e "  ${GREEN}${fingerprint}${NC}"
+        warn "tls=1 证书存在内存中，Nowhere 每次重启后指纹都会变化"
+    else
+        warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100"
     fi
-    chmod +x "$MANAGER_PATH"
-
-    for cmd in adam zt pz cxpz cq; do
-        cat > "/usr/local/bin/${cmd}" << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" "\$@"
-SHORTEOF
-        chmod +x "/usr/local/bin/${cmd}"
-    done
-    sed -i 's/"\$@"/status/' /usr/local/bin/zt
-    sed -i 's/"\$@"/config/' /usr/local/bin/pz
-    sed -i 's/"\$@"/reconfig/' /usr/local/bin/cxpz
-    sed -i 's/"\$@"/restart/' /usr/local/bin/cq
-
-    success "快捷命令已安装完成"
-    echo -e "  ${CYAN}adam${NC}   — 打开管理菜单"
-    echo -e "  ${CYAN}zt${NC}     — 查看服务状态"
-    echo -e "  ${CYAN}pz${NC}     — 查看节点/连接信息"
-    echo -e "  ${CYAN}cxpz${NC}   — 重新修改配置"
-    echo -e "  ${CYAN}cq${NC}     — 快速重启服务"
-}
-
-show_menu() {
-    clear
-    echo -e "${BOLD}${CYAN}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         Adam Nowhere Portal 一键管理脚本 (v1.5.0+)           ║"
-    echo "║         加密隧道协议 · TLS/TCP + QUIC/UDP                    ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-    echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
-    echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
-    echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
-    echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
-    echo -e "  ${BOLD}5)${NC} 查看连接信息"
-    echo -e "  ${BOLD}6)${NC} 查看服务状态"
-    echo -e "  ${BOLD}7)${NC} 查看实时日志"
-    echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
-    echo -e "  ${BOLD}9)${NC} 重启服务"
-    echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
-    echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
-    echo -e "  ${BOLD}12)${NC} 选择指定版本（版本切换/回退到历史版本）"
-    echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
-    echo -e "  ${BOLD}0)${NC} 退出"
-    divider
-    if [ -x /usr/local/bin/adam ]; then
-        echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
-        divider
-    fi
-    read -p "请选择操作 [0-13]: " MENU_CHOICE
 }
 
 ensure_ipv4_preference() {
@@ -371,15 +356,102 @@ ensure_ipv4_preference() {
     warn "这会导致 curl/certbot 优先尝试 IPv6 而报错 'Network is unreachable'"
 
     if ! grep -q "^precedence ::ffff:0:0/96" /etc/gai.conf 2>/dev/null; then
-        info "写入 /etc/gai.conf，让系统优先选用 IPv4"
+        info "写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）"
         echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
     fi
 
     if curl -fsS --max-time 5 https://acme-v02.api.letsencrypt.org/directory >/dev/null 2>&1; then
         success "已修正为 IPv4 优先，现在可以正常连接 Let's Encrypt"
     else
-        warn "调整后仍无法连接，请检查 VPS 出网本身是否正常"
+        warn "调整后仍无法连接，请检查 VPS 出网本身是否正常: ping -c 3 8.8.8.8"
     fi
+}
+
+install_shortcuts() {
+    step "安装快捷命令"
+    divider
+    local self_path
+    self_path="$(readlink -f "$0" 2>/dev/null || true)"
+
+    if [ -z "$self_path" ] || [ ! -f "$self_path" ]; then
+        warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
+        warn "这种一次性管道运行方式下，脚本内容来自匿名管道，读取一次即耗尽，无法复制自身"
+        warn "快捷命令需要脚本先以文件形式保存到磁盘再运行，例如："
+        warn "  curl -fsSL <脚本地址> -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
+        return 1
+    fi
+
+    if [ "$self_path" != "$MANAGER_PATH" ]; then
+        cp "$self_path" "$MANAGER_PATH"
+    fi
+    chmod +x "$MANAGER_PATH"
+
+    cat > /usr/local/bin/adam << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" "\$@"
+SHORTEOF
+    chmod +x /usr/local/bin/adam
+
+    cat > /usr/local/bin/zt << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" status
+SHORTEOF
+    chmod +x /usr/local/bin/zt
+
+    cat > /usr/local/bin/pz << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" config
+SHORTEOF
+    chmod +x /usr/local/bin/pz
+
+    cat > /usr/local/bin/cxpz << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" reconfig
+SHORTEOF
+    chmod +x /usr/local/bin/cxpz
+
+    cat > /usr/local/bin/cq << SHORTEOF
+#!/bin/bash
+exec "${MANAGER_PATH}" restart
+SHORTEOF
+    chmod +x /usr/local/bin/cq
+
+    success "快捷命令已安装完成"
+    echo -e "  ${CYAN}adam${NC}   — 打开管理菜单"
+    echo -e "  ${CYAN}zt${NC}     — 查看服务状态"
+    echo -e "  ${CYAN}pz${NC}     — 查看节点/连接信息"
+    echo -e "  ${CYAN}cxpz${NC}   — 重新修改配置"
+    echo -e "  ${CYAN}cq${NC}     — 快速重启服务"
+}
+
+show_menu() {
+    clear
+    echo -e "${BOLD}${CYAN}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
+    echo "║         已适配 v1.5.0+（无 spec）· TLS/TCP + QUIC/UDP        ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
+    echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
+    echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
+    echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
+    echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
+    echo -e "  ${BOLD}6)${NC} 查看服务状态"
+    echo -e "  ${BOLD}7)${NC} 查看实时日志"
+    echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
+    echo -e "  ${BOLD}9)${NC} 重启服务"
+    echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
+    echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
+    echo -e "  ${BOLD}12)${NC} 选择指定版本（版本切换/回退到历史版本）"
+    echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
+    echo -e "  ${BOLD}0)${NC} 退出"
+    divider
+    if [ -x /usr/local/bin/adam ]; then
+        echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
+        divider
+    fi
+    read -p "请选择操作 [0-13]: " MENU_CHOICE
 }
 
 do_install() {
@@ -401,6 +473,11 @@ do_install() {
         *) TLS_MODE=2; CERT_METHOD="cloudflare-dns" ;;
     esac
 
+    if [ "$TLS_MODE" = "1" ]; then
+        warn "提醒（v1.5.0+ 官方说明）：SNI 为空/省略/none 时会关闭证书校验"
+        warn "自签证书仅建议测试用，生产环境请用真实域名 + CA 签发证书（选 2/3/4）"
+    fi
+
     step "第 2 步：基础网络信息"
     divider
 
@@ -416,7 +493,7 @@ do_install() {
     else
         info "自签模式无需域名，将自动探测公网 IP 作为客户端连接地址"
         DETECTED_IP="$(detect_public_host)"
-        read -p "公网 IP/域名（回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
+        read -p "公网 IP/域名（用于 Anywhere 导入链接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
         PUBLIC_HOST=${PUBLIC_HOST:-$DETECTED_IP}
         DOMAIN="$PUBLIC_HOST"
     fi
@@ -482,7 +559,7 @@ do_install() {
         1) NET="mix" ;; 2) NET="tcp" ;; 3) NET="udp" ;; *) NET="mix" ;;
     esac
 
-    step "第 4 步：协议与安全参数（完整）"
+    step "第 4 步：协议与安全参数"
     divider
 
     read -p "共享密钥 Shared Key（回车自动生成）: " SHARED_KEY
@@ -490,6 +567,11 @@ do_install() {
 
     read -p "ALPN（回车默认 ${DEFAULT_ALPN}）: " ALPN
     ALPN=${ALPN:-$DEFAULT_ALPN}
+
+    echo ""
+    echo -e "${BOLD}Morph 流量乱形${NC}（${YELLOW}官方说明：仅做流量形态混淆，不提供额外加密/安全性；客户端必须同步开启，否则连不上${NC}）："
+    read -p "是否开启 [y/N]: " MORPH_CHOICE
+    if [[ "$MORPH_CHOICE" =~ ^[Yy]$ ]]; then MORPH="1"; else MORPH="$DEFAULT_MORPH"; fi
 
     echo ""
     echo -e "${BOLD}限速设置：${NC}"
@@ -520,6 +602,36 @@ do_install() {
         4) LOG="error" ;; 5) LOG="event" ;; 6) LOG="none" ;; *) LOG="info" ;;
     esac
 
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        echo ""
+        echo -e "${BOLD}Anywhere TCP Pool${NC}（${YELLOW}仅客户端 TLS/TCP 导入链接使用，Portal 服务端不接受此参数${NC}；范围 0-256）："
+        read -p "连接池大小（回车默认 ${DEFAULT_POOL}）: " POOL
+        POOL=${POOL:-$DEFAULT_POOL}
+        validate_pool "$POOL" || { warn "Pool 值不合法（需 0-256），重置为默认"; POOL=$DEFAULT_POOL; }
+    else
+        POOL="$DEFAULT_POOL"
+        info "传输模式为 udp，不涉及 TCP 连接，跳过 Pool 设置"
+    fi
+
+    echo ""
+    echo -e "${BOLD}本地 Vector 客户端连接信息${NC}（可选，用于在电脑/路由器上跑本地 SOCKS5 出口，独立选择上下行传输）："
+    read -p "是否生成 Vector 连接信息？[Y/n]: " GEN_VECTOR
+    GEN_VECTOR=${GEN_VECTOR:-y}
+    if [[ "$GEN_VECTOR" =~ ^[Yy]$ ]]; then
+        GENERATE_VECTOR="1"
+        echo "  上行传输（客户端→Portal）  1) tcp  2) udp"
+        read -p "  选择 [1/2，默认1]: " VUP_CHOICE
+        case ${VUP_CHOICE:-1} in 2) VECTOR_UP="udp" ;; *) VECTOR_UP="tcp" ;; esac
+        echo "  下行传输（Portal→客户端）  1) tcp  2) udp"
+        read -p "  选择 [1/2，默认1]: " VDOWN_CHOICE
+        case ${VDOWN_CHOICE:-1} in 2) VECTOR_DOWN="udp" ;; *) VECTOR_DOWN="tcp" ;; esac
+        read -p "  本地 SOCKS5 监听地址（回车默认 ${DEFAULT_VECTOR_SOCKS}）: " VECTOR_SOCKS
+        VECTOR_SOCKS=${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}
+    else
+        GENERATE_VECTOR="0"
+        VECTOR_UP="tcp"; VECTOR_DOWN="tcp"; VECTOR_SOCKS="$DEFAULT_VECTOR_SOCKS"
+    fi
+
     echo ""
     divider
     echo -e "${BOLD}配置确认：${NC}"
@@ -533,10 +645,17 @@ do_install() {
     echo -e "  传输模式      : ${GREEN}${NET}${NC}"
     echo -e "  共享密钥      : ${GREEN}$(mask_secret "$SHARED_KEY")${NC}"
     echo -e "  ALPN          : ${GREEN}${ALPN}${NC}"
+    echo -e "  Morph 乱形    : ${GREEN}$([ "$MORPH" = "1" ] && echo "开启" || echo "关闭")${NC}"
     echo -e "  上/下行限速   : ${GREEN}${RATE} / ${ETAR} Mbps${NC}"
     echo -e "  出站源IP      : ${GREEN}${DIAL}${NC}"
     echo -e "  SOCKS5出站    : ${GREEN}$(display_socks "$SOCKS")${NC}"
     echo -e "  日志级别      : ${GREEN}${LOG}${NC}"
+    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
+        echo -e "  TCP Pool      : ${GREEN}${POOL}${NC}（仅客户端参数）"
+    fi
+    if [ "$GENERATE_VECTOR" = "1" ]; then
+        echo -e "  Vector客户端  : ${GREEN}生成（up=${VECTOR_UP} down=${VECTOR_DOWN} socks=${VECTOR_SOCKS}）${NC}"
+    fi
     divider
     read -p "确认安装 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
@@ -566,12 +685,19 @@ do_install() {
             else
                 info "申请证书中（HTTP-01，需 80 端口）..."
                 ufw allow 80/tcp 2>/dev/null || true
-                certbot certonly --standalone --preferred-challenges http \
-                    --non-interactive --agree-tos --email "${EMAIL}" \
-                    -d "${DOMAIN}" --http-01-port 80 --http-01-address 0.0.0.0 || \
-                    error "证书申请失败：请检查域名解析和80端口"
+                certbot certonly \
+                    --standalone \
+                    --preferred-challenges http \
+                    --non-interactive \
+                    --agree-tos \
+                    --email "${EMAIL}" \
+                    -d "${DOMAIN}" \
+                    --http-01-port 80 --http-01-address 0.0.0.0 || {
+                    error "证书申请失败，请检查：1) 域名是否正确 2) 80 端口是否开放 3) 域名是否指向本 VPS"
+                }
                 success "证书申请成功"
             fi
+
         elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
             mkdir -p /etc/cloudflare
             if [ "$CF_AUTH_TYPE" = "1" ]; then
@@ -590,13 +716,19 @@ CFEOF
                 warn "证书已存在，跳过申请"
             else
                 info "申请证书中（Cloudflare DNS-01，约需30-60秒）..."
-                certbot certonly --dns-cloudflare \
+                certbot certonly \
+                    --dns-cloudflare \
                     --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
-                    --non-interactive --agree-tos --email "${EMAIL}" \
-                    -d "${DOMAIN}" --dns-cloudflare-propagation-seconds 30 || \
-                    error "证书申请失败：请检查 CF API Key 和域名 DNS 是否在 Cloudflare 管理下"
+                    --non-interactive \
+                    --agree-tos \
+                    --email "${EMAIL}" \
+                    -d "${DOMAIN}" \
+                    --dns-cloudflare-propagation-seconds 30 || {
+                    error "证书申请失败，请检查：1) CF API Key 是否正确 2) 域名是否在 CF 管理下"
+                }
                 success "证书申请成功"
             fi
+
         elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
             info "安装 acme.sh..."
             curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1
@@ -606,16 +738,18 @@ CFEOF
                 warn "证书已存在，跳过申请"
             else
                 info "申请证书中（DNS-01: ${DNS_API}）..."
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force || \
-                    error "证书申请失败：请检查 DNS API 凭据"
+                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force
                 "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                    --cert-file "${CRT}" --key-file "${KEY_PEM}" --fullchain-file "${CRT}" \
+                    --cert-file "${CRT}" \
+                    --key-file "${KEY_PEM}" \
+                    --fullchain-file "${CRT}" \
                     --reloadcmd "systemctl restart nowhere"
                 success "证书申请成功"
             fi
         fi
-        info "证书链: ${CRT}"
-        info "私钥  : ${KEY_PEM}"
+
+        info "证书路径: ${CRT}"
+        info "私钥路径: ${KEY_PEM}"
 
         mkdir -p /etc/letsencrypt/renewal-hooks/deploy
         cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << 'HOOKEOF'
@@ -628,11 +762,10 @@ HOOKEOF
     step "第 7 步：下载 Nowhere 二进制"
     divider
     detect_binary
-    info "正在获取最新版本..."
-    LATEST=$(find_latest_tag)
+    info "正在获取最新版本号..."
+    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
     [ -z "$LATEST" ] && error "无法获取版本号，请检查网络"
     info "最新版本: ${LATEST} (${ARCH_NAME}-${LIBC})"
-    
     curl -fL --retry 3 --connect-timeout 10 \
         -o /tmp/nowhere.tar.gz \
         "https://github.com/${REPO}/releases/download/${LATEST}/${BIN_NAME}" || error "下载失败"
@@ -667,6 +800,12 @@ ETAR_VALUE="${ETAR}"
 DIAL_VALUE="${DIAL}"
 SOCKS_VALUE="${SOCKS}"
 LOG_VALUE="${LOG}"
+POOL_VALUE="${POOL}"
+MORPH_VALUE="${MORPH}"
+GENERATE_VECTOR_VALUE="${GENERATE_VECTOR}"
+VECTOR_UP_VALUE="${VECTOR_UP}"
+VECTOR_DOWN_VALUE="${VECTOR_DOWN}"
+VECTOR_SOCKS_VALUE="${VECTOR_SOCKS}"
 ENVEOF
     chmod 600 "$CONFIG_FILE"
     success "配置已保存至 ${CONFIG_FILE}"
@@ -681,14 +820,14 @@ ENVEOF
     if [ -n "$EXISTING_PROC" ]; then
         warn "检测到端口 ${PORT} 已被其他进程占用："
         echo "$EXISTING_PROC"
-        warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启"
+        warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启，客户端表现为一直 timeout"
         read -p "仍要继续安装吗？[y/N]: " PORT_CONFIRM
         [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消安装"; return; }
     else
         success "端口 ${PORT} 空闲，可以使用"
     fi
 
-    step "第 10 步：配置防火墙"
+    step "第 10 步：配置防火墙（先于服务启动，避免中间态连不通）"
     divider
     ufw allow ssh 2>/dev/null || true
     ufw allow "${PORT}/tcp" 2>/dev/null || true
@@ -739,7 +878,9 @@ SVCEOF
         success "服务启动成功，且已确认端口 ${PORT} 正在监听"
     elif systemctl is-active --quiet nowhere && [ -z "$LISTENING" ]; then
         warn "systemd 显示服务 active，但未检测到端口 ${PORT} 实际在监听"
+        warn "常见原因：证书路径错误、端口被抢占后又被其他进程释放、TLS 参数不匹配"
         journalctl -u nowhere -n 30 --no-pager
+        warn "服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout"
     else
         warn "服务未能启动，查看日志排查："
         journalctl -u nowhere -n 30 --no-pager
@@ -749,6 +890,7 @@ SVCEOF
     step "第 12 步：生成连接信息"
     divider
     build_client_links
+    build_vector_info
     print_all_info
 
     step "第 13 步：安装快捷命令"
@@ -757,14 +899,61 @@ SVCEOF
 }
 
 print_all_info() {
+    local udp_section="" tcp_section="" vector_section=""
+
+    if [[ -n "$UDP_LINK" ]]; then
+        udp_section="
+【Anywhere App 导入 —— QUIC/UDP（推荐，延迟更低）】
+链接：
+${UDP_LINK}
+
+一键导入深链（手机点击）：
+${IMPORT_UDP}
+"
+    fi
+
+    if [[ -n "$TCP_LINK" ]]; then
+        tcp_section="
+【Anywhere App 导入 —— TLS/TCP（兼容性更好，pool=${POOL}，仅客户端参数，Portal 服务端不接受）】
+链接：
+${TCP_LINK}
+
+一键导入深链（手机点击）：
+${IMPORT_TCP}
+"
+    fi
+
+    if [ "$GENERATE_VECTOR" = "1" ]; then
+        if [[ -n "$VECTOR_URL" ]]; then
+            vector_section="
+【本地 Vector 客户端 —— 在电脑/路由器上跑本地 SOCKS5 出口】
+上行: ${VECTOR_UP}  下行: ${VECTOR_DOWN}  本地监听: ${VECTOR_SOCKS}
+连接串：
+${VECTOR_URL}
+
+启动命令：
+nowhere '${VECTOR_URL}'
+$([ "$TLS_MODE" = "1" ] && echo "
+※ 用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（菜单 5 或 pz 命令）")
+"
+        else
+            vector_section="
+【本地 Vector 客户端】
+生成失败：未能获取到有效的连接参数，可稍后通过菜单「5) 查看连接信息」重试
+"
+        fi
+    fi
+
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
-  Nowhere Portal 连接信息 (v1.5.0+ 新协议)
+  Nowhere Portal 连接信息
   更新时间: $(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
-【服务端启动参数（Portal URL）】
+【服务端启动参数（Portal URL，用于 systemd ExecStart）】
 ${NOWHERE_PORTAL}
+※ 注意：pool 是 Anywhere 客户端 TCP 导入链接专用参数，Portal 服务端不识别该参数，
+   因此上面这条服务端启动串里不会出现 pool，这是正常且预期的行为。
 
 【客户端连接参数】
   域名/公网地址 : ${PUBLIC_HOST}
@@ -772,10 +961,18 @@ ${NOWHERE_PORTAL}
   共享密钥      : ${SHARED_KEY}
   ALPN          : ${ALPN}
   传输模式      : ${NET}
+  Morph 乱形    : $([ "$MORPH" = "1" ] && echo "开启（客户端必须同步开启）" || echo "关闭")
   TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1)" || echo "真实证书(tls=2)")
-
-【Vector 客户端配置提示】
-${VECTOR_HINT}
+${udp_section}${tcp_section}${vector_section}
+【Anywhere 手动填写】
+  服务器 : ${PUBLIC_HOST}
+  端口   : ${PORT}
+  密钥   : ${SHARED_KEY}
+  TLS    : 开启
+  SNI    : ${DOMAIN}
+  ALPN   : ${ALPN}
+$([[ "$NET" == "mix" || "$NET" == "tcp" ]] && echo "  Pool   : ${POOL}（仅 TLS/TCP 方式导入时需要，服务端不使用）")
+$([ "$MORPH" = "1" ] && echo "  Morph  : 1（务必和服务端保持一致）")
 
 【防火墙提醒】
 $(case "$NET" in
@@ -785,8 +982,8 @@ $(case "$NET" in
 esac)
 $([ "$TLS_MODE" = "1" ] && echo "
 【TLS 提示】
-  tls=1 为临时自签证书，每次重启指纹会变化
-  生产环境请使用 tls=2 + 真实域名证书")
+  tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用
+  官方说明：SNI 为空/省略/none 会关闭证书校验，生产环境请用 tls=2 + 真实域名证书")
 $([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
 【SOCKS5 出站代理】
   $(display_socks "$SOCKS")")
@@ -801,6 +998,16 @@ CONFEOF
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     cat "${CONFIG_DIR}/config.txt"
+    echo ""
+    if [[ -n "$IMPORT_UDP" ]]; then
+        echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP，推荐）：${NC}"
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "${CYAN}${IMPORT_UDP}${NC}"
+    elif [[ -n "$IMPORT_TCP" ]]; then
+        echo -e "${BOLD}✅ 最快导入方式（TLS/TCP）：${NC}"
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "${CYAN}${IMPORT_TCP}${NC}"
+    fi
     echo ""
     print_tls_fingerprint
     echo ""
@@ -831,6 +1038,13 @@ load_saved_config() {
     DIAL="$DIAL_VALUE"
     SOCKS="$SOCKS_VALUE"
     LOG="$LOG_VALUE"
+    POOL="$POOL_VALUE"
+    # 兼容旧配置文件（升级脚本前装的）没有这些字段的情况
+    MORPH="${MORPH_VALUE:-$DEFAULT_MORPH}"
+    GENERATE_VECTOR="${GENERATE_VECTOR_VALUE:-0}"
+    VECTOR_UP="${VECTOR_UP_VALUE:-tcp}"
+    VECTOR_DOWN="${VECTOR_DOWN_VALUE:-tcp}"
+    VECTOR_SOCKS="${VECTOR_SOCKS_VALUE:-$DEFAULT_VECTOR_SOCKS}"
 }
 
 do_uninstall() {
@@ -848,22 +1062,21 @@ do_uninstall() {
 do_update() {
     step "更新 Nowhere 二进制（更新到最新版）"
     divider
-    load_saved_config 2>/dev/null || true
     local current
     current="$(read_installed_version)"
     info "当前版本: ${current}"
-    
+    info "正在获取最新版本号..."
     local latest
-    latest=$(find_latest_tag)
-    [ -z "$latest" ] && error "无法获取最新版本号"
-    info "GitHub 最新版本: ${latest}"
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    [ -z "$latest" ] && error "无法获取版本号"
+    info "最新版本: ${latest}"
 
     if [ "$current" = "$latest" ]; then
         info "已经是最新版本，无需更新"
         return
     fi
 
-    install_nowhere_version "$latest"
+    install_nowhere_version "$latest" || error "更新失败"
 }
 
 do_show_version() {
@@ -882,15 +1095,17 @@ do_show_version() {
     [ -n "$previous" ] && echo -e "  上一个版本 tag    : ${YELLOW}${previous}${NC}（可用「版本回退」快速切回）"
 
     echo ""
-    info "正在查询最新版本..."
+    info "正在查询 GitHub 最新版本..."
     local latest
-    latest=$(find_latest_tag)
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
     if [ -n "$latest" ]; then
         if [ "$current" = "$latest" ]; then
             success "已是最新版本 (${latest})"
         else
-            warn "有新版本: ${latest}（当前 ${current}），可选菜单「3) 更新」升级"
+            warn "有新版本可用: ${latest}（当前 ${current}），可选菜单「更新」升级"
         fi
+    else
+        warn "无法查询最新版本，请检查网络"
     fi
 }
 
@@ -905,7 +1120,7 @@ do_select_version() {
     local tags=()
     while IFS= read -r line; do
         tags+=("$line")
-    done < <(curl -s "https://api.github.com/repos/${REPO}/releases?per_page=15" | grep '"tag_name"' | cut -d'"' -f4)
+    done < <(curl -s "https://api.github.com/repos/${REPO}/releases?per_page=20" | grep '"tag_name"' | cut -d'"' -f4)
 
     if [ "${#tags[@]}" -eq 0 ]; then
         error "未能获取版本列表，请检查网络"
@@ -940,9 +1155,7 @@ do_select_version() {
     read -p "确认切换到 ${target} [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
-    if ! install_nowhere_version "$target"; then
-        error "切换失败，服务可能未正常启动，请检查日志"
-    fi
+    install_nowhere_version "$target" || error "切换失败，服务可能未正常启动，请检查日志"
 }
 
 do_rollback() {
@@ -1005,6 +1218,7 @@ do_show_config() {
     elif [ -f "$CONFIG_FILE" ]; then
         load_saved_config
         build_client_links
+        build_vector_info
         print_all_info
     else
         warn "未找到配置，请先安装"
@@ -1074,5 +1288,5 @@ case "$ACTION" in
     version)    do_show_version ;;
     select-version) do_select_version ;;
     rollback)   do_rollback ;;
-    *) error "未知操作: ${ACTION}" ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback）" ;;
 esac
