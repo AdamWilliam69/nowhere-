@@ -247,9 +247,11 @@ build_client_links() {
     IMPORT_UDP=""
     IMPORT_TCP=""
 
+    # Anywhere 官方 README 确认的当前格式是 up=/down= 独立上下行，而不是旧的 net=
+    # （例：nowhere://key@host:443?up=udp&down=udp），这里对齐该格式。
     # morph 是链路两端都必须一致的 wire masking 开关，服务端开了客户端也要带，否则连不上
     if [[ "$NET" == "mix" || "$NET" == "udp" ]]; then
-        query="net=udp"
+        query="up=udp&down=udp"
         [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
         [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
         UDP_LINK="${base}?${query}#${encoded_name}"
@@ -257,7 +259,8 @@ build_client_links() {
     fi
 
     if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        query="net=tcp&pool=${POOL:-$DEFAULT_POOL}"
+        # pool 仅在 tcp/tcp 组合下生效（官方规则），其余组合不带
+        query="up=tcp&down=tcp&pool=${POOL:-$DEFAULT_POOL}"
         [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
         [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
         TCP_LINK="${base}?${query}#${encoded_name}"
