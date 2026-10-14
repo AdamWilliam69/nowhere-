@@ -2,11 +2,27 @@
 set -e
 
 # ══════════════════════════════════════════════════════════════
-#   Adam Nowhere Portal 一键管理脚本
-#   已适配 Nowhere v1.5.0+ 破坏性更新：
-#     - spec 参数已移除，不再生成/询问
-#     - pool 上限由 9 调整为 256（官方：Vector 的 tcp/tcp 组合专用，默认 5）
-#     - 空/省略/none 的 SNI 会关闭证书校验，生产环境务必用真实域名+CA证书
+#   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.0.0 / NW3）
+#   已按 v3.0.0 官方文档 + 真实二进制实测重写，v1.5.x 旧配置不兼容：
+#     - 协议已换 NW3（ALPN 固定 nw3），v1/v2 的 Portal/Vector 无法
+#       与 v3 互通，升级必须 Portal、Vector、Anywhere 等对端一起升级
+#     - 共享密钥必须是恰好 32 位小写十六进制字符（nowhere generate-key），
+#       旧版任意字符串密钥（如 Base64）会被 v3 在启动时直接拒绝
+#     - 已移除的参数：alpn（固定 nw3）/ net / log / pool / next / mux /
+#       up / down / socks(Vector) —— v3 对未知参数是“忽略”而非报错，
+#       所以旧 URL 拼进 v3 也不会生效，只会静默跑偏
+#     - Portal 监听改用端点路径语法：portal://KEY@*:443（同端口双栈）、
+#       portal://KEY@*/tcp:443（仅TLS）、portal://KEY@*/udp:443（仅QUIC）、
+#       portal://KEY@*/tcp:2000/udp:2001（双端口）；空主机 :443 已非法，
+#       通配监听必须写 *；地址族可用 tcp4/tcp6/udp4/udp6
+#     - Portal 出口统一为 out=：direct（默认）/ egress / SOCKS5 地址，
+#       旧 socks= 已改名；Vector 本地入口改用 in=（旧 socks= 会被拒：
+#       实测报 "in parameter is required"）；Vector 不再有 pool
+#     - Morph 默认开启（morph=1），关闭必须两端显式 morph=0 且一致
+#     - 新增第三角色 Egress：Portal 配 out=egress + 远程机跑
+#       egress://KEY@host/udp:port 主动回连，无需出口机开放入站端口
+#     - 新增 CLI：nowhere generate-key / fingerprint / probe / status；
+#       无参数运行只显示帮助（v1.6 的 TUI 已在 v3 移除）
 #   快捷命令：adam(菜单) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
 #   支持 Debian / Ubuntu · x86_64 / aarch64
 # ══════════════════════════════════════════════════════════════
@@ -30,14 +46,9 @@ SERVICE_FILE="/etc/systemd/system/nowhere.service"
 ACME_HOME="/root/.acme.sh"
 MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 
-DEFAULT_NET="mix"
-DEFAULT_ALPN="now/1"
-DEFAULT_LOG="info"
-DEFAULT_POOL="5"
-DEFAULT_SOCKS="none"
-DEFAULT_DIAL="auto"
-DEFAULT_MORPH="0"
+DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
+DEFAULT_DIAL="auto"
 
 info()    { echo -e "${BLUE}[信息]${NC} $1"; }
 success() { echo -e "${GREEN}[成功]${NC} $1"; }
@@ -49,6 +60,8 @@ divider() { echo -e "${CYAN}─────────────────�
 [ "$EUID" -ne 0 ] && error "请以 root 用户运行此脚本"
 
 ACTION="${1:-menu}"
+
+# ── 架构 / 二进制 ─────────────────────────────────────────────
 
 detect_binary() {
     ARCH=$(uname -m)
@@ -78,9 +91,25 @@ read_previous_version() {
     [ -f "$PREV_VERSION_FILE" ] && cat "$PREV_VERSION_FILE" || echo ""
 }
 
+# 取 tag 的主版本号，如 v3.0.0 -> 3；解析不了返回空
+version_major() {
+    echo "$1" | sed -n 's/^v\?\([0-9][0-9]*\)\..*/\1/p'
+}
+
 install_nowhere_version() {
     local target_tag="$1"
     detect_binary
+
+    local major
+    major="$(version_major "$target_tag")"
+    if [ -n "$major" ] && [ "$major" -lt 3 ]; then
+        warn "目标版本 ${target_tag} 属于 NW${major} 协议代，与本脚本生成的 v3(NW3) 配置/对端不互通"
+        read -p "仍要安装该旧版本吗？[y/N]: " OLD_CONFIRM
+        if [[ ! "$OLD_CONFIRM" =~ ^[Yy]$ ]]; then
+            info "已取消"
+            return 1
+        fi
+    fi
 
     local url="https://github.com/${REPO}/releases/download/${target_tag}/${BIN_NAME}"
     info "校验该版本是否发布了对应架构 (${ARCH_NAME}-${LIBC}) 的二进制..."
@@ -123,10 +152,33 @@ install_nowhere_version() {
     fi
 }
 
+# ── 通用小工具 ────────────────────────────────────────────────
+
 urlencode() {
     local input="${1:-}"
     python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$input" 2>/dev/null \
         || echo -n "$input" | od -An -tx1 | tr ' ' % | tr -d '\n'
+}
+
+# 编码 SOCKS 地址（out=/in= 的值）：v3 按「最后一个 @」切主机、再按「第一个原文 :」切用户名/密码
+# （编码后的 %3A 不算分隔符），随后对用户名/密码各百分号解码一次。
+# 官方示例：out=a%3Ab:p%40ss@127.0.0.1:1080 表示用户名 a:b、密码 p@ss。
+# 实测结论：用户名/密码内部的原文 : 与 @ 都会被拒（reserved characters ... must be percent-encoded），
+# 只有那个分隔用的第一个原文 : 可以保留。主机:端口保持原文。
+# 所以：用户名全编码，密码全编码，拼接为 编码后用户名 + ":" + 编码后密码 + "@" + 主机:端口。
+encode_socks() {
+    local socks="$1" userinfo endpoint user pass
+    if [[ "$socks" == *@* ]]; then
+        userinfo="${socks%@*}"
+        endpoint="${socks##*@}"
+        if [[ "$userinfo" == *:* ]]; then
+            user="${userinfo%%:*}"
+            pass="${userinfo#*:}"
+            printf '%s:%s@%s' "$(urlencode "$user")" "$(urlencode "$pass")" "$endpoint"
+            return 0
+        fi
+    fi
+    printf '%s' "$socks"
 }
 
 format_host_for_url() {
@@ -142,12 +194,26 @@ format_host_for_url() {
     fi
 }
 
-random_token() {
-    local bytes="${1:-24}"
+# v3 密钥：恰好 32 位小写十六进制（nowhere generate-key 的输出格式）
+is_valid_key() {
+    [[ "$1" =~ ^[0-9a-f]{32}$ ]]
+}
+
+# 本地生成符合 v3 规范的密钥（16 随机字节 -> 32 位小写 hex）
+# 装好二进制后优先用官方 nowhere generate-key，两者格式一致
+gen_key() {
+    if [ -x "$BIN_PATH" ]; then
+        local k
+        k="$("$BIN_PATH" generate-key 2>/dev/null | tr -d ' \r\n' || true)"
+        if is_valid_key "$k"; then
+            printf '%s' "$k"
+            return 0
+        fi
+    fi
     if command -v openssl >/dev/null 2>&1; then
-        openssl rand -base64 "$bytes" | tr '+/' '-_' | tr -d '='
+        openssl rand -hex 16 | tr -d '\n'
     else
-        LC_ALL=C tr -dc 'A-Za-z0-9._~-' </dev/urandom | head -c $((bytes * 2))
+        od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
     fi
 }
 
@@ -168,6 +234,7 @@ mask_secret() {
     fi
 }
 
+# SOCKS5 地址展示（打码密码部分），v3 里它出现在 Portal 的 out= 或 Vector 的 in=（带认证时）
 display_socks() {
     local socks="${1:-none}"
     if [[ -z "$socks" || "$socks" == "none" ]]; then
@@ -185,10 +252,6 @@ validate_port() {
 
 validate_nonneg_int() {
     [[ "$1" =~ ^[0-9]+$ ]]
-}
-
-validate_pool() {
-    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 0 ] && [ "$1" -le 256 ]
 }
 
 validate_socks() {
@@ -212,112 +275,221 @@ validate_socks() {
     validate_port "$port"
 }
 
-build_portal_url() {
-    local encoded_key host_part query
-    encoded_key="$(urlencode "$SHARED_KEY")"
-    host_part="$(format_host_for_url "${LISTEN_HOST:-}")"
-    query="tls=${TLS_MODE}"
+# 证书信任参数（Vector/Egress 共用）：
+#   tls=2 真实证书：默认按端点主机名走系统 CA 校验；公网地址与证书域名不一致时补 sni=
+#   tls=1 自签证书：必须 pin=证书 SHA-256 指纹（64 位小写 hex），否则校验必然失败
+# 自签指纹取不到（服务未启动等）时返回 1，调用方应留空并提示稍后用菜单 5/8 重新生成
+append_trust_params() {
+    local query="$1"
+    if [ "$TLS_MODE" = "2" ]; then
+        if [[ -n "$DOMAIN" && "$PUBLIC_HOST" != "$DOMAIN" ]]; then
+            query="${query}&sni=$(urlencode "$DOMAIN")"
+        fi
+        printf '%s' "$query"
+        return 0
+    fi
+    local fp
+    fp="$(get_tls_fingerprint 2>/dev/null || true)"
+    if [ -n "$fp" ]; then
+        printf '%s&pin=%s' "$query" "$fp"
+        return 0
+    fi
+    printf '%s' "$query"
+    return 1
+}
 
-    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-    [[ "$NET" != "$DEFAULT_NET" ]] && query="${query}&net=${NET}"
-    [[ -n "$DIAL" && "$DIAL" != "$DEFAULT_DIAL" ]] && query="${query}&dial=$(urlencode "$DIAL")"
-    [[ -n "$SOCKS" && "$SOCKS" != "$DEFAULT_SOCKS" ]] && query="${query}&socks=$(urlencode "$SOCKS")"
+# ── URL 构建（v3 语法） ───────────────────────────────────────
+
+# Portal 监听端点：空/ * = 通配；mix 同端口写 HOST:PORT，分端口写 HOST/tcp:P/udp:P
+build_portal_endpoint() {
+    local host
+    if [[ -z "$LISTEN_HOST" || "$LISTEN_HOST" == "*" ]]; then
+        host="*"
+    else
+        host="$(format_host_for_url "$LISTEN_HOST")"
+    fi
+    if [[ "$PORT_MODE" == "split" ]]; then
+        printf '%s/tcp:%s/udp:%s' "$host" "$TCP_PORT" "$UDP_PORT"
+    else
+        case "$NET" in
+            tcp) printf '%s/tcp:%s' "$host" "$PORT" ;;
+            udp) printf '%s/udp:%s' "$host" "$PORT" ;;
+            *)   printf '%s:%s' "$host" "$PORT" ;;
+        esac
+    fi
+}
+
+# 实际生效的 TCP/UDP 端口（供防火墙、指纹、客户端链接使用）
+tcp_port() { if [[ "$PORT_MODE" == "split" ]]; then printf '%s' "$TCP_PORT"; else printf '%s' "$PORT"; fi }
+udp_port() { if [[ "$PORT_MODE" == "split" ]]; then printf '%s' "$UDP_PORT"; else printf '%s' "$PORT"; fi }
+has_tcp() { [[ "$PORT_MODE" == "split" || "$NET" == "mix" || "$NET" == "tcp" ]]; }
+has_udp() { [[ "$PORT_MODE" == "split" || "$NET" == "mix" || "$NET" == "udp" ]]; }
+
+build_portal_url() {
+    local query endpoint
+    endpoint="$(build_portal_endpoint)"
+    query="tls=${TLS_MODE}"
+    if [[ "$TLS_MODE" == "2" ]]; then
+        query="${query}&crt=${CRT}&key=${KEY_PEM}"
+    fi
+    query="${query}&morph=${MORPH}"
+    case "$OUT_TYPE" in
+        egress)
+            query="${query}&out=egress"
+            ;;
+        socks)
+            query="${query}&out=$(encode_socks "$SOCKS")"
+            ;;
+        *) : ;;
+    esac
+    if [[ "$OUT_TYPE" != "egress" ]]; then
+        if [[ "$DIAL_MODE" == "dual" ]]; then
+            [[ -n "$DIAL4" && "$DIAL4" != "auto" ]] && query="${query}&dial4=$(urlencode "$DIAL4")"
+            [[ -n "$DIAL6" && "$DIAL6" != "auto" ]] && query="${query}&dial6=$(urlencode "$DIAL6")"
+        elif [[ -n "$DIAL" && "$DIAL" != "auto" ]]; then
+            query="${query}&dial=$(urlencode "$DIAL")"
+        fi
+    fi
     [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
     [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
-    [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
-    if [[ "$TLS_MODE" == "2" ]]; then
-        query="${query}&crt=$(urlencode "$CRT")&key=$(urlencode "$KEY_PEM")"
-    fi
-    [[ "$LOG" != "$DEFAULT_LOG" ]] && query="${query}&log=${LOG}"
-
-    printf 'portal://%s@%s:%s?%s' "$encoded_key" "$host_part" "$PORT" "$query"
+    printf 'portal://%s@%s?%s' "$SHARED_KEY" "$endpoint" "$query"
 }
 
 build_client_links() {
-    local host host_part encoded_key encoded_name base query
+    local host host_part encoded_name base query port
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
     host_part="$(format_host_for_url "$host")"
-    encoded_key="$(urlencode "$SHARED_KEY")"
     encoded_name="$(urlencode "Nowhere-${DOMAIN}")"
-    base="nowhere://${encoded_key}@${host_part}:${PORT}"
+    base="nowhere://${SHARED_KEY}@${host_part}"
 
-    UDP_LINK=""
-    TCP_LINK=""
-    IMPORT_UDP=""
-    IMPORT_TCP=""
+    UDP_LINK=""; TCP_LINK=""; IMPORT_UDP=""; IMPORT_TCP=""
 
-    # Anywhere 官方 README 确认的当前格式是 up=/down= 独立上下行，而不是旧的 net=
-    # （例：nowhere://key@host:443?up=udp&down=udp），这里对齐该格式。
-    # morph 是链路两端都必须一致的 wire masking 开关，服务端开了客户端也要带，否则连不上
-    if [[ "$NET" == "mix" || "$NET" == "udp" ]]; then
-        query="up=udp&down=udp"
-        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-        [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
-        UDP_LINK="${base}?${query}#${encoded_name}"
+    # Anywhere 分享链接（v3 文档格式）：nowhere://KEY@HOST:PORT?net=tcp|udp&morph=0|1#名称
+    # net 默认 tcp；morph 默认 1。注意：需 Anywhere 已支持 NW3 才能真正连通（见文末说明）
+    if has_udp; then
+        port="$(udp_port)"
+        query="net=udp&morph=${MORPH}"
+        UDP_LINK="${base}:${port}?${query}#${encoded_name}"
         IMPORT_UDP="anywhere://add-proxy?link=$(urlencode "$UDP_LINK")"
     fi
-
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        # pool 仅在 tcp/tcp 组合下生效（官方规则），其余组合不带
-        query="up=tcp&down=tcp&pool=${POOL:-$DEFAULT_POOL}"
-        [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-        [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
-        TCP_LINK="${base}?${query}#${encoded_name}"
+    if has_tcp; then
+        port="$(tcp_port)"
+        if [[ "$MORPH" == "1" ]]; then
+            query="morph=1"
+        else
+            query="morph=0"
+        fi
+        TCP_LINK="${base}:${port}?${query}#${encoded_name}"
         IMPORT_TCP="anywhere://add-proxy?link=$(urlencode "$TCP_LINK")"
     fi
 }
 
-# 构建本地 Vector 客户端连接串（供在电脑/路由器上跑本地 SOCKS5 出口用）
-# 官方确认语法：vector://key@host:port?up=<tcp|udp>&down=<tcp|udp>&pool=n&socks=listen_addr&(sni=域名|pin=证书指纹)
+# 本地 Vector 客户端：vector://KEY@HOST/tcp:PORT 或 /udp:PORT，二选一载体 + in=本地SOCKS5
 build_vector_info() {
-    [ "$GENERATE_VECTOR" != "1" ] && { VECTOR_URL=""; return; }
+    VECTOR_URL=""
+    [ "$GENERATE_VECTOR" != "1" ] && return 0
 
-    local host host_part encoded_key query fp pin_value
+    local host host_part port carrier query
+    host="${PUBLIC_HOST:-}"
+    [[ -z "$host" ]] && host="$(detect_public_host)"
+    if [[ -z "$host" ]]; then
+        warn "未能确定公网地址，无法生成 Vector 连接串，可稍后通过菜单「5) 查看连接信息」重试"
+        return 0
+    fi
+    host_part="$(format_host_for_url "$host")"
+    carrier="$VECTOR_CARRIER"
+    if [[ "$carrier" == "udp" ]]; then
+        port="$(udp_port)"
+    else
+        port="$(tcp_port)"
+        carrier="tcp"
+    fi
+
+    query="in=$(encode_socks "$VECTOR_SOCKS")&morph=${MORPH}"
+    local trust_query
+    if trust_query="$(append_trust_params "$query")"; then
+        query="$trust_query"
+    else
+        warn "未能获取自签证书指纹，Vector 连接串暂缺 pin=（服务启动后可用菜单 5 重新生成）"
+    fi
+    VECTOR_URL="vector://${SHARED_KEY}@${host_part}/${carrier}:${port}?${query}"
+}
+
+# 远程 Egress 出口：egress://KEY@HOST/udp:PORT（仅 QUIC），在出口机上运行，无需其开放入站端口
+build_egress_info() {
+    EGRESS_URL=""
+    [ "$GENERATE_EGRESS" != "1" ] && return 0
+
+    local host host_part port query
+    host="${PUBLIC_HOST:-}"
+    [[ -z "$host" ]] && host="$(detect_public_host)"
+    if [[ -z "$host" ]]; then
+        warn "未能确定公网地址，无法生成 Egress 连接串，可稍后通过菜单「5) 查看连接信息」重试"
+        return 0
+    fi
+    host_part="$(format_host_for_url "$host")"
+    port="$(udp_port)"
+
+    query="morph=${MORPH}"
+    local trust_query
+    if trust_query="$(append_trust_params "$query")"; then
+        query="$trust_query"
+    else
+        warn "未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用菜单 5 重新生成）"
+    fi
+    EGRESS_URL="egress://${SHARED_KEY}@${host_part}/udp:${port}?${query}"
+}
+
+# 供 probe 使用的 Vector URL（不需要 in=）
+build_probe_vector_url() {
+    local host host_part port carrier query
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
     host_part="$(format_host_for_url "$host")"
-    encoded_key="$(urlencode "$SHARED_KEY")"
-
-    query="up=${VECTOR_UP}&down=${VECTOR_DOWN}"
-    [[ -n "$ALPN" && "$ALPN" != "$DEFAULT_ALPN" ]] && query="${query}&alpn=$(urlencode "$ALPN")"
-    if [[ "$VECTOR_UP" == "tcp" || "$VECTOR_DOWN" == "tcp" ]]; then
-        query="${query}&pool=${POOL:-$DEFAULT_POOL}"
-    fi
-    [[ "$MORPH" == "1" ]] && query="${query}&morph=1"
-    query="${query}&socks=$(urlencode "$VECTOR_SOCKS")"
-
-    if [ "$TLS_MODE" = "2" ]; then
-        # 真实证书：用 sni 走正常证书链校验
-        query="${query}&sni=$(urlencode "$DOMAIN")"
-        VECTOR_URL="vector://${encoded_key}@${host_part}:${PORT}?${query}"
+    carrier="${VECTOR_CARRIER:-tcp}"
+    if [[ "$carrier" == "udp" ]] && has_udp; then
+        port="$(udp_port)"
     else
-        # 自签证书：sni 校验必然失败，改用官方推荐的 pin=CERT_SHA256 指纹锁定
-        fp="$(get_tls_fingerprint)"
-        if [ -n "$fp" ]; then
-            pin_value=$(echo "$fp" | tr -d ':' | tr 'A-F' 'a-f')
-            query="${query}&pin=${pin_value}"
-            VECTOR_URL="vector://${encoded_key}@${host_part}:${PORT}?${query}"
-        else
-            VECTOR_URL=""
-            warn "未能获取自签证书指纹，无法生成带 pin 的 Vector 连接串（服务是否已启动？）"
-        fi
+        carrier="tcp"
+        port="$(tcp_port)"
     fi
+    query="morph=${MORPH}"
+    local trust_query
+    if trust_query="$(append_trust_params "$query")"; then
+        query="$trust_query"
+    fi
+    printf 'vector://%s@%s/%s:%s?%s' "$SHARED_KEY" "$host_part" "$carrier" "$port" "$query"
 }
 
-# 纯获取指纹，不打印不警告，供 build_vector_info 拼 pin= 用
+# 纯获取指纹（64 位小写 hex，无冒号），不打印不警告，供 pin= 拼接用
+# 优先用官方 nowhere fingerprint（自动处理 Morph），回退 openssl s_client
 get_tls_fingerprint() {
     [[ "$TLS_MODE" != "1" ]] && return 1
-    local connect_host="127.0.0.1"
+    if ! has_tcp; then
+        # fingerprint 只能走 TCP/TLS：纯 UDP Portal 没有 TLS 监听，取不到指纹
+        return 1
+    fi
+    local port
+    port="$(tcp_port)"
+    if [ -x "$BIN_PATH" ]; then
+        local out fp
+        out="$(timeout 8 "$BIN_PATH" fingerprint "nowhere://${SHARED_KEY}@127.0.0.1:${port}?morph=${MORPH}" 2>/dev/null || true)"
+        fp="$(echo "$out" | grep -oE '[0-9a-f]{64}' | head -1 || true)"
+        if [ -n "$fp" ]; then
+            echo "$fp"
+            return 0
+        fi
+    fi
     local sni="${PUBLIC_HOST:-localhost}"
     local fingerprint output
     for _ in 1 2 3 4 5; do
-        output="$(timeout 8 openssl s_client -connect "${connect_host}:${PORT}" \
+        output="$(timeout 8 openssl s_client -connect "127.0.0.1:${port}" \
             -servername "$sni" -showcerts </dev/null 2>/dev/null \
             | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)"
         fingerprint="${output#*=}"
         if [[ -n "$fingerprint" && "$fingerprint" != "$output" ]]; then
-            echo "$fingerprint"
+            echo "$fingerprint" | tr -d ':' | tr 'A-F' 'a-f'
             return 0
         fi
         sleep 1
@@ -329,15 +501,20 @@ print_tls_fingerprint() {
     if [[ "$TLS_MODE" != "1" ]]; then
         return 0
     fi
+    if ! has_tcp; then
+        warn "当前为纯 QUIC/UDP Portal，没有 TLS 监听，无法用 fingerprint 读取指纹"
+        warn "自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志的 'tls certificate fingerprint:' 一行获取"
+        return 0
+    fi
     echo
     info "正在获取自签证书 SHA-256 指纹..."
     local fingerprint
-    fingerprint="$(get_tls_fingerprint)"
+    fingerprint="$(get_tls_fingerprint || true)"
     if [ -n "$fingerprint" ]; then
         echo -e "  ${GREEN}${fingerprint}${NC}"
-        warn "tls=1 证书存在内存中，Nowhere 每次重启后指纹都会变化"
+        warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（菜单 5 或 pz 命令）"
     else
-        warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100"
+        warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100 | grep fingerprint"
     fi
 }
 
@@ -432,7 +609,7 @@ show_menu() {
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
-    echo "║         已适配 v1.5.0+（无 spec）· TLS/TCP + QUIC/UDP        ║"
+    echo "║         已适配 v3.0.0 / NW3 · Portal + Vector + Egress       ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
@@ -440,7 +617,7 @@ show_menu() {
     echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
     echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
     echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
-    echo -e "  ${BOLD}6)${NC} 查看服务状态"
+    echo -e "  ${BOLD}6)${NC} 查看服务状态（含 nowhere status）"
     echo -e "  ${BOLD}7)${NC} 查看实时日志"
     echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
     echo -e "  ${BOLD}9)${NC} 重启服务"
@@ -448,20 +625,22 @@ show_menu() {
     echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
     echo -e "  ${BOLD}12)${NC} 选择指定版本（版本切换/回退到历史版本）"
     echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
+    echo -e "  ${BOLD}14)${NC} 生成 v3 共享密钥（32 位十六进制）"
+    echo -e "  ${BOLD}15)${NC} 连通性探测 probe（真实 TCP Flow 测试）"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
         divider
     fi
-    read -p "请选择操作 [0-13]: " MENU_CHOICE
+    read -p "请选择操作 [0-15]: " MENU_CHOICE
 }
 
 do_install() {
     step "第 1 步：选择证书获取方式"
     divider
     echo -e "${BOLD}TLS 证书方式：${NC}"
-    echo "  1) 自签证书 tls=1  - 无需域名，快速测试（指纹会变化）"
+    echo "  1) 自签证书 tls=1  - 无需域名，快速测试（Vector/Egress 必须用 pin= 锁定指纹，指纹随重启变化）"
     echo "  2) Let's Encrypt HTTP-01 - 需要开放 80 端口（自动续期）"
     echo "  3) Let's Encrypt DNS-01 通用 - 支持多种 DNS 服务商（自动续期）"
     echo "  4) Cloudflare DNS-01 - 需要 CF API Key（自动续期，推荐）"
@@ -477,7 +656,7 @@ do_install() {
     esac
 
     if [ "$TLS_MODE" = "1" ]; then
-        warn "提醒（v1.5.0+ 官方说明）：SNI 为空/省略/none 时会关闭证书校验"
+        warn "提醒（v3 官方说明）：Vector/Egress 默认校验系统 CA + 主机名，自签证书必须改用 pin= 指纹锁定"
         warn "自签证书仅建议测试用，生产环境请用真实域名 + CA 签发证书（选 2/3/4）"
     fi
 
@@ -496,7 +675,7 @@ do_install() {
     else
         info "自签模式无需域名，将自动探测公网 IP 作为客户端连接地址"
         DETECTED_IP="$(detect_public_host)"
-        read -p "公网 IP/域名（用于 Anywhere 导入链接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
+        read -p "公网 IP/域名（用于 Anywhere/Vector/Egress 连接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
         PUBLIC_HOST=${PUBLIC_HOST:-$DETECTED_IP}
         DOMAIN="$PUBLIC_HOST"
     fi
@@ -546,93 +725,162 @@ do_install() {
 
     step "第 3 步：监听参数"
     divider
-    read -p "监听端口（回车默认443）: " PORT
-    PORT=${PORT:-443}
-    validate_port "$PORT" || { warn "端口不合法，重置为443"; PORT=443; }
-
-    read -p "监听地址（回车为空=IPv4/IPv6全监听，通常留空即可）: " LISTEN_HOST
-
-    echo ""
-    echo -e "${BOLD}传输模式：${NC}"
-    echo "  1) mix - TLS/TCP + QUIC/UDP 双栈（推荐）"
-    echo "  2) tcp - 仅 TLS/TCP"
-    echo "  3) udp - 仅 QUIC/UDP"
-    read -p "选择 [1/2/3，默认1]: " NET_CHOICE
-    case ${NET_CHOICE:-1} in
-        1) NET="mix" ;; 2) NET="tcp" ;; 3) NET="udp" ;; *) NET="mix" ;;
+    echo -e "${BOLD}端口模式（v3 端点路径语法）：${NC}"
+    echo "  1) TLS 与 QUIC 共用同一端口，如 *:443（推荐）"
+    echo "  2) TLS 与 QUIC 分开端口，如 */tcp:2000/udp:2001"
+    read -p "选择 [1/2，默认1]: " PORT_MODE_CHOICE
+    case ${PORT_MODE_CHOICE:-1} in
+        2) PORT_MODE="split" ;;
+        *) PORT_MODE="same" ;;
     esac
+
+    if [ "$PORT_MODE" = "split" ]; then
+        NET="mix"
+        read -p "TLS/TCP 端口（回车默认2000）: " TCP_PORT
+        TCP_PORT=${TCP_PORT:-2000}
+        validate_port "$TCP_PORT" || { warn "端口不合法，重置为2000"; TCP_PORT=2000; }
+        read -p "QUIC/UDP 端口（回车默认2001）: " UDP_PORT
+        UDP_PORT=${UDP_PORT:-2001}
+        validate_port "$UDP_PORT" || { warn "端口不合法，重置为2001"; UDP_PORT=2001; }
+        if [ "$TCP_PORT" = "$UDP_PORT" ]; then
+            warn "分端口模式下 TCP 与 UDP 端口不能相同，已将 UDP 端口改为 2001"
+            UDP_PORT=2001
+        fi
+        PORT="$TCP_PORT"
+    else
+        read -p "监听端口（回车默认443）: " PORT
+        PORT=${PORT:-443}
+        validate_port "$PORT" || { warn "端口不合法，重置为443"; PORT=443; }
+        TCP_PORT="$PORT"
+        UDP_PORT="$PORT"
+
+        echo ""
+        echo -e "${BOLD}传输模式（决定端点路径，TCP 与 UDP 都能承载 TCP/UDP 业务流）：${NC}"
+        echo "  1) mix - TLS/TCP + QUIC/UDP 双栈（HOST:PORT，推荐）"
+        echo "  2) tcp - 仅 TLS/TCP（HOST/tcp:PORT）"
+        echo "  3) udp - 仅 QUIC/UDP（HOST/udp:PORT）"
+        read -p "选择 [1/2/3，默认1]: " NET_CHOICE
+        case ${NET_CHOICE:-1} in
+            1) NET="mix" ;; 2) NET="tcp" ;; 3) NET="udp" ;; *) NET="mix" ;;
+        esac
+    fi
+
+    read -p "监听地址（回车= * 通配，全监听；也可填具体 IP）: " LISTEN_HOST
+    LISTEN_HOST=${LISTEN_HOST:-}
+    [[ "$LISTEN_HOST" == "*" ]] && LISTEN_HOST="*"
 
     step "第 4 步：协议与安全参数"
     divider
 
-    read -p "共享密钥 Shared Key（回车自动生成）: " SHARED_KEY
-    [ -z "$SHARED_KEY" ] && { SHARED_KEY="$(random_token 24)"; info "已生成密钥: ${SHARED_KEY}"; }
-
-    read -p "ALPN（回车默认 ${DEFAULT_ALPN}）: " ALPN
-    ALPN=${ALPN:-$DEFAULT_ALPN}
+    # v3 密钥必须是恰好 32 位小写十六进制，旧任意字符串密钥会被直接拒绝
+    while true; do
+        read -p "共享密钥 Shared Key（回车自动生成 32 位十六进制）: " SHARED_KEY
+        if [ -z "$SHARED_KEY" ]; then
+            SHARED_KEY="$(gen_key)"
+            info "已生成密钥: ${SHARED_KEY}"
+            break
+        fi
+        if is_valid_key "$SHARED_KEY"; then
+            break
+        fi
+        warn "该密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符（0-9a-f）"
+        warn "旧版任意字符串/Base64 密钥在 v3 会被拒绝启动，请重新输入或直接回车自动生成"
+    done
 
     echo ""
-    echo -e "${BOLD}Morph 流量乱形${NC}（${YELLOW}官方说明：仅做流量形态混淆，不提供额外加密/安全性；客户端必须同步开启，否则连不上${NC}）："
-    read -p "是否开启 [y/N]: " MORPH_CHOICE
-    if [[ "$MORPH_CHOICE" =~ ^[Yy]$ ]]; then MORPH="1"; else MORPH="$DEFAULT_MORPH"; fi
+    echo -e "${BOLD}Morph 流量乱形${NC}（${YELLOW}v3 默认开启 morph=1；仅做流量形态混淆，不提供额外加密；两端必须一致，没有协商/回退${NC}）："
+    read -p "是否开启 [Y/n]: " MORPH_CHOICE
+    if [[ "$MORPH_CHOICE" =~ ^[Nn]$ ]]; then MORPH="0"; else MORPH="$DEFAULT_MORPH"; fi
 
     echo ""
-    echo -e "${BOLD}限速设置：${NC}"
-    read -p "上行限速 Mbps，客户端→目标（0=不限速）: " RATE
+    echo -e "${BOLD}Portal 出口 out=（Portal 固定出口，运行期间不可变）：${NC}"
+    echo "  1) direct - Portal 直接访问目标（默认）"
+    echo "  2) SOCKS5 上游 - 经一层 SOCKS5 代理出站（链式代理）"
+    if has_udp; then
+        echo "  3) egress - 远程 Egress 出口（目标解析/拨号在另一台主动回连的机器上，该机无需开放入站端口）"
+        read -p "选择 [1/2/3，默认1]: " OUT_CHOICE
+        case ${OUT_CHOICE:-1} in
+            2) OUT_TYPE="socks" ;;
+            3) OUT_TYPE="egress" ;;
+            *) OUT_TYPE="direct" ;;
+        esac
+    else
+        warn "当前为纯 TCP 模式，没有 QUIC 监听，out=egress 不可用（Egress 只能走 QUIC 注册）"
+        read -p "选择 [1/2，默认1]: " OUT_CHOICE
+        case ${OUT_CHOICE:-1} in
+            2) OUT_TYPE="socks" ;;
+            *) OUT_TYPE="direct" ;;
+        esac
+    fi
+
+    SOCKS="none"
+    if [ "$OUT_TYPE" = "socks" ]; then
+        read -p "SOCKS5 地址，格式 host:port 或 user:pass@host:port: " SOCKS
+        SOCKS=${SOCKS:-none}
+        validate_socks "$SOCKS" || { warn "SOCKS5 格式不合法，已重置为 none 并改回 direct"; SOCKS="none"; OUT_TYPE="direct"; }
+    fi
+
+    DIAL_MODE="single"; DIAL="$DEFAULT_DIAL"; DIAL4="auto"; DIAL6="auto"
+    if [ "$OUT_TYPE" = "egress" ]; then
+        info "out=egress 时 Portal 不能再设置 dial/dial4/dial6（与官方约束一致），目标源地址请在 Egress 端配置"
+    else
+        echo ""
+        read -p "出站源 IP dial（回车默认 auto；填 IP 会限定地址族，绑定失败不回退）: " DIAL
+        DIAL=${DIAL:-$DEFAULT_DIAL}
+        read -p "是否改用 dial4/dial6 分别绑定 IPv4/IPv6 源地址？[y/N]: " DIAL46_CHOICE
+        if [[ "$DIAL46_CHOICE" =~ ^[Yy]$ ]]; then
+            DIAL_MODE="dual"
+            read -p "  dial4（IPv4 源地址，回车默认 auto）: " DIAL4
+            DIAL4=${DIAL4:-auto}
+            read -p "  dial6（IPv6 源地址，回车默认 auto）: " DIAL6
+            DIAL6=${DIAL6:-auto}
+            DIAL="auto"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BOLD}限速设置（Portal/Vector/Egress 通用语义，0=不限速）：${NC}"
+    read -p "上行限速 Mbps，Vector→目标（0=不限速）: " RATE
     RATE=${RATE:-0}
     validate_nonneg_int "$RATE" || { warn "输入不合法，重置为0"; RATE=0; }
 
-    read -p "下行限速 Mbps，目标→客户端（0=不限速）: " ETAR
+    read -p "下行限速 Mbps，目标→Vector（0=不限速）: " ETAR
     ETAR=${ETAR:-0}
     validate_nonneg_int "$ETAR" || { warn "输入不合法，重置为0"; ETAR=0; }
 
     echo ""
-    read -p "出站源 IP（回车默认 auto，即系统自动选择）: " DIAL
-    DIAL=${DIAL:-$DEFAULT_DIAL}
-
-    echo ""
-    echo -e "${BOLD}SOCKS5 出站代理（可选，用于链式代理）：${NC}"
-    read -p "格式 host:port 或 user:pass@host:port（回车跳过）: " SOCKS
-    SOCKS=${SOCKS:-$DEFAULT_SOCKS}
-    validate_socks "$SOCKS" || { warn "SOCKS5 格式不合法，已重置为 none"; SOCKS="none"; }
-
-    echo ""
-    echo -e "${BOLD}日志级别：${NC}"
-    echo "  1) info  2) debug  3) warn  4) error  5) event  6) none"
-    read -p "选择 [1-6，默认1]: " LOG_CHOICE
-    case ${LOG_CHOICE:-1} in
-        1) LOG="info" ;; 2) LOG="debug" ;; 3) LOG="warn" ;;
-        4) LOG="error" ;; 5) LOG="event" ;; 6) LOG="none" ;; *) LOG="info" ;;
-    esac
-
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        echo ""
-        echo -e "${BOLD}Anywhere TCP Pool${NC}（${YELLOW}仅客户端 TLS/TCP 导入链接使用，Portal 服务端不接受此参数${NC}；范围 0-256）："
-        read -p "连接池大小（回车默认 ${DEFAULT_POOL}）: " POOL
-        POOL=${POOL:-$DEFAULT_POOL}
-        validate_pool "$POOL" || { warn "Pool 值不合法（需 0-256），重置为默认"; POOL=$DEFAULT_POOL; }
-    else
-        POOL="$DEFAULT_POOL"
-        info "传输模式为 udp，不涉及 TCP 连接，跳过 Pool 设置"
-    fi
-
-    echo ""
-    echo -e "${BOLD}本地 Vector 客户端连接信息${NC}（可选，用于在电脑/路由器上跑本地 SOCKS5 出口，独立选择上下行传输）："
+    echo -e "${BOLD}本地 Vector 客户端连接信息${NC}（可选，在电脑/路由器上跑本地 SOCKS5 入口用 in=）："
     read -p "是否生成 Vector 连接信息？[Y/n]: " GEN_VECTOR
     GEN_VECTOR=${GEN_VECTOR:-y}
     if [[ "$GEN_VECTOR" =~ ^[Yy]$ ]]; then
         GENERATE_VECTOR="1"
-        echo "  上行传输（客户端→Portal）  1) tcp  2) udp"
-        read -p "  选择 [1/2，默认1]: " VUP_CHOICE
-        case ${VUP_CHOICE:-1} in 2) VECTOR_UP="udp" ;; *) VECTOR_UP="tcp" ;; esac
-        echo "  下行传输（Portal→客户端）  1) tcp  2) udp"
-        read -p "  选择 [1/2，默认1]: " VDOWN_CHOICE
-        case ${VDOWN_CHOICE:-1} in 2) VECTOR_DOWN="udp" ;; *) VECTOR_DOWN="tcp" ;; esac
-        read -p "  本地 SOCKS5 监听地址（回车默认 ${DEFAULT_VECTOR_SOCKS}）: " VECTOR_SOCKS
+        if has_tcp && has_udp; then
+            echo "  Vector 载体（二选一，v3 一条连接只用一种载体）  1) tcp/TLS  2) udp/QUIC"
+            read -p "  选择 [1/2，默认1]: " VCARRIER_CHOICE
+            case ${VCARRIER_CHOICE:-1} in 2) VECTOR_CARRIER="udp" ;; *) VECTOR_CARRIER="tcp" ;; esac
+        elif has_udp; then
+            VECTOR_CARRIER="udp"
+            info "  当前 Portal 仅 QUIC/UDP，Vector 载体自动选 udp"
+        else
+            VECTOR_CARRIER="tcp"
+            info "  当前 Portal 仅 TLS/TCP，Vector 载体自动选 tcp"
+        fi
+        read -p "  本地 SOCKS5 监听 in=（回车默认 ${DEFAULT_VECTOR_SOCKS}，可带 user:pass@）: " VECTOR_SOCKS
         VECTOR_SOCKS=${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}
     else
         GENERATE_VECTOR="0"
-        VECTOR_UP="tcp"; VECTOR_DOWN="tcp"; VECTOR_SOCKS="$DEFAULT_VECTOR_SOCKS"
+        VECTOR_CARRIER="tcp"; VECTOR_SOCKS="$DEFAULT_VECTOR_SOCKS"
+    fi
+
+    GENERATE_EGRESS="0"
+    if [ "$OUT_TYPE" = "egress" ]; then
+        echo ""
+        echo -e "${BOLD}远程 Egress 出口机连接信息${NC}（在出口机上运行 egress:// 主动回连本 Portal）："
+        read -p "是否生成 Egress 连接信息？[Y/n]: " GEN_EGRESS
+        GEN_EGRESS=${GEN_EGRESS:-y}
+        if [[ "$GEN_EGRESS" =~ ^[Yy]$ ]]; then
+            GENERATE_EGRESS="1"
+        fi
     fi
 
     echo ""
@@ -643,21 +891,26 @@ do_install() {
     echo -e "  公网地址      : ${GREEN}${PUBLIC_HOST}${NC}"
     echo -e "  邮箱          : ${GREEN}${EMAIL}${NC}"
     echo -e "  证书方式      : ${GREEN}${CERT_METHOD}${NC}"
-    echo -e "  监听端口      : ${GREEN}${PORT}${NC}"
-    echo -e "  监听地址      : ${GREEN}$([ -z "$LISTEN_HOST" ] && echo "<空,全监听>" || echo "$LISTEN_HOST")${NC}"
+    echo -e "  端口模式      : ${GREEN}${PORT_MODE}（TCP $(tcp_port) / UDP $(udp_port)）${NC}"
+    echo -e "  监听地址      : ${GREEN}$([ -z "$LISTEN_HOST" ] && echo "*（通配）" || echo "$LISTEN_HOST")${NC}"
     echo -e "  传输模式      : ${GREEN}${NET}${NC}"
-    echo -e "  共享密钥      : ${GREEN}$(mask_secret "$SHARED_KEY")${NC}"
-    echo -e "  ALPN          : ${GREEN}${ALPN}${NC}"
-    echo -e "  Morph 乱形    : ${GREEN}$([ "$MORPH" = "1" ] && echo "开启" || echo "关闭")${NC}"
-    echo -e "  上/下行限速   : ${GREEN}${RATE} / ${ETAR} Mbps${NC}"
-    echo -e "  出站源IP      : ${GREEN}${DIAL}${NC}"
-    echo -e "  SOCKS5出站    : ${GREEN}$(display_socks "$SOCKS")${NC}"
-    echo -e "  日志级别      : ${GREEN}${LOG}${NC}"
-    if [[ "$NET" == "mix" || "$NET" == "tcp" ]]; then
-        echo -e "  TCP Pool      : ${GREEN}${POOL}${NC}（仅客户端参数）"
+    echo -e "  Portal 端点   : ${GREEN}$(build_portal_endpoint)${NC}"
+    echo -e "  共享密钥      : ${GREEN}$(mask_secret "$SHARED_KEY")（32 位十六进制）${NC}"
+    echo -e "  Morph 乱形    : ${GREEN}$([ "$MORPH" = "1" ] && echo "开启 morph=1（默认）" || echo "关闭 morph=0")${NC}"
+    echo -e "  Portal 出口   : ${GREEN}${OUT_TYPE}$([ "$OUT_TYPE" = "socks" ] && echo " ($(display_socks "$SOCKS"))")${NC}"
+    if [ "$OUT_TYPE" != "egress" ]; then
+        if [ "$DIAL_MODE" = "dual" ]; then
+            echo -e "  出站源IP      : ${GREEN}dial4=${DIAL4} dial6=${DIAL6}${NC}"
+        else
+            echo -e "  出站源IP      : ${GREEN}dial=${DIAL}${NC}"
+        fi
     fi
+    echo -e "  上/下行限速   : ${GREEN}${RATE} / ${ETAR} Mbps${NC}"
     if [ "$GENERATE_VECTOR" = "1" ]; then
-        echo -e "  Vector客户端  : ${GREEN}生成（up=${VECTOR_UP} down=${VECTOR_DOWN} socks=${VECTOR_SOCKS}）${NC}"
+        echo -e "  Vector客户端  : ${GREEN}生成（carrier=${VECTOR_CARRIER} in=${VECTOR_SOCKS}）${NC}"
+    fi
+    if [ "$GENERATE_EGRESS" = "1" ]; then
+        echo -e "  Egress出口机  : ${GREEN}生成（udp:$(udp_port)）${NC}"
     fi
     divider
     read -p "确认安装 [y/N]: " CONFIRM
@@ -768,6 +1021,10 @@ HOOKEOF
     info "正在获取最新版本号..."
     LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
     [ -z "$LATEST" ] && error "无法获取版本号，请检查网络"
+    LATEST_MAJOR="$(version_major "$LATEST")"
+    if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -lt 3 ]; then
+        error "当前最新版为 ${LATEST}，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）"
+    fi
     info "最新版本: ${LATEST} (${ARCH_NAME}-${LIBC})"
     curl -fL --retry 3 --connect-timeout 10 \
         -o /tmp/nowhere.tar.gz \
@@ -790,25 +1047,29 @@ NOWHERE_PORTAL="${NOWHERE_PORTAL}"
 DOMAIN_VALUE="${DOMAIN}"
 PUBLIC_HOST_VALUE="${PUBLIC_HOST}"
 LISTEN_HOST_VALUE="${LISTEN_HOST}"
+PORT_MODE_VALUE="${PORT_MODE}"
 PORT_VALUE="${PORT}"
+TCP_PORT_VALUE="${TCP_PORT}"
+UDP_PORT_VALUE="${UDP_PORT}"
 SHARED_KEY_VALUE="${SHARED_KEY}"
 NET_VALUE="${NET}"
-ALPN_VALUE="${ALPN}"
 TLS_MODE_VALUE="${TLS_MODE}"
 CERT_METHOD_VALUE="${CERT_METHOD}"
 CRT_VALUE="${CRT:-}"
 KEY_PEM_VALUE="${KEY_PEM:-}"
+OUT_TYPE_VALUE="${OUT_TYPE}"
+SOCKS_VALUE="${SOCKS}"
+DIAL_MODE_VALUE="${DIAL_MODE}"
+DIAL_VALUE="${DIAL}"
+DIAL4_VALUE="${DIAL4}"
+DIAL6_VALUE="${DIAL6}"
 RATE_VALUE="${RATE}"
 ETAR_VALUE="${ETAR}"
-DIAL_VALUE="${DIAL}"
-SOCKS_VALUE="${SOCKS}"
-LOG_VALUE="${LOG}"
-POOL_VALUE="${POOL}"
 MORPH_VALUE="${MORPH}"
 GENERATE_VECTOR_VALUE="${GENERATE_VECTOR}"
-VECTOR_UP_VALUE="${VECTOR_UP}"
-VECTOR_DOWN_VALUE="${VECTOR_DOWN}"
+VECTOR_CARRIER_VALUE="${VECTOR_CARRIER}"
 VECTOR_SOCKS_VALUE="${VECTOR_SOCKS}"
+GENERATE_EGRESS_VALUE="${GENERATE_EGRESS}"
 ENVEOF
     chmod 600 "$CONFIG_FILE"
     success "配置已保存至 ${CONFIG_FILE}"
@@ -817,30 +1078,37 @@ ENVEOF
     divider
     EXISTING_PROC=""
     if command -v ss >/dev/null 2>&1; then
-        EXISTING_PROC="$(ss -tlnp 2>/dev/null | grep -E ":${PORT}\b" || true)"
-        [ -z "$EXISTING_PROC" ] && EXISTING_PROC="$(ss -ulnp 2>/dev/null | grep -E ":${PORT}\b" || true)"
+        if has_tcp; then
+            EXISTING_PROC="$(ss -tlnp 2>/dev/null | grep -E ":$(tcp_port)\b" || true)"
+        fi
+        if [ -z "$EXISTING_PROC" ] && has_udp; then
+            EXISTING_PROC="$(ss -ulnp 2>/dev/null | grep -E ":$(udp_port)\b" || true)"
+        fi
     fi
     if [ -n "$EXISTING_PROC" ]; then
-        warn "检测到端口 ${PORT} 已被其他进程占用："
+        warn "检测到目标端口已被其他进程占用："
         echo "$EXISTING_PROC"
         warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启，客户端表现为一直 timeout"
         read -p "仍要继续安装吗？[y/N]: " PORT_CONFIRM
         [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消安装"; return; }
     else
-        success "端口 ${PORT} 空闲，可以使用"
+        success "目标端口空闲，可以使用"
     fi
 
     step "第 10 步：配置防火墙（先于服务启动，避免中间态连不通）"
     divider
     ufw allow ssh 2>/dev/null || true
-    ufw allow "${PORT}/tcp" 2>/dev/null || true
-    ufw allow "${PORT}/udp" 2>/dev/null || true
+    if has_tcp; then ufw allow "$(tcp_port)/tcp" 2>/dev/null || true; fi
+    if has_udp; then ufw allow "$(udp_port)/udp" 2>/dev/null || true; fi
     [ "$CERT_METHOD" = "letsencrypt-http" ] && ufw allow 80/tcp 2>/dev/null || true
     ufw --force enable
-    success "防火墙已配置（端口 ${PORT} TCP+UDP 已放行）"
+    success "防火墙已配置"
 
     step "第 11 步：创建并启动系统服务"
     divider
+    # 注意：PrivateTmp 必须关闭。v3 的 nowhere status 靠系统临时目录下的
+    # 受保护 IPC 注册表发现实例，PrivateTmp 会让服务与外部命令看到不同的 /tmp，
+    # 导致 status 永远发现不到本服务（实测会报 namespace identity unavailable 一类问题时更难排查）
     cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
 Description=Nowhere Portal
@@ -856,7 +1124,7 @@ Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=full
 ProtectHome=read-only
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -878,10 +1146,10 @@ SVCEOF
     fi
 
     if systemctl is-active --quiet nowhere && [ -n "$LISTENING" ]; then
-        success "服务启动成功，且已确认端口 ${PORT} 正在监听"
+        success "服务启动成功，且已确认端口正在监听"
     elif systemctl is-active --quiet nowhere && [ -z "$LISTENING" ]; then
-        warn "systemd 显示服务 active，但未检测到端口 ${PORT} 实际在监听"
-        warn "常见原因：证书路径错误、端口被抢占后又被其他进程释放、TLS 参数不匹配"
+        warn "systemd 显示服务 active，但未检测到端口实际在监听"
+        warn "常见原因：证书路径错误、端口被抢占、密钥格式不合 v3 规范（必须 32 位小写十六进制）"
         journalctl -u nowhere -n 30 --no-pager
         warn "服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout"
     else
@@ -894,6 +1162,7 @@ SVCEOF
     divider
     build_client_links
     build_vector_info
+    build_egress_info
     print_all_info
 
     step "第 13 步：安装快捷命令"
@@ -902,26 +1171,26 @@ SVCEOF
 }
 
 print_all_info() {
-    local udp_section="" tcp_section="" vector_section=""
+    local udp_section="" tcp_section="" vector_section="" egress_section=""
 
     if [[ -n "$UDP_LINK" ]]; then
         udp_section="
-【Anywhere App 导入 —— QUIC/UDP（推荐，延迟更低）】
+【Anywhere 分享链接 —— QUIC/UDP（net=udp）】
 链接：
 ${UDP_LINK}
 
-一键导入深链（手机点击）：
+一键导入深链（手机点击，需 Anywhere 已支持 NW3）：
 ${IMPORT_UDP}
 "
     fi
 
     if [[ -n "$TCP_LINK" ]]; then
         tcp_section="
-【Anywhere App 导入 —— TLS/TCP（兼容性更好，pool=${POOL}，仅客户端参数，Portal 服务端不接受）】
+【Anywhere 分享链接 —— TLS/TCP（net=tcp，默认）】
 链接：
 ${TCP_LINK}
 
-一键导入深链（手机点击）：
+一键导入深链（手机点击，需 Anywhere 已支持 NW3）：
 ${IMPORT_TCP}
 "
     fi
@@ -929,8 +1198,8 @@ ${IMPORT_TCP}
     if [ "$GENERATE_VECTOR" = "1" ]; then
         if [[ -n "$VECTOR_URL" ]]; then
             vector_section="
-【本地 Vector 客户端 —— 在电脑/路由器上跑本地 SOCKS5 出口】
-上行: ${VECTOR_UP}  下行: ${VECTOR_DOWN}  本地监听: ${VECTOR_SOCKS}
+【本地 Vector 客户端 —— 在电脑/路由器上跑本地 SOCKS5 入口】
+载体: ${VECTOR_CARRIER}  本地监听 in=${VECTOR_SOCKS}
 连接串：
 ${VECTOR_URL}
 
@@ -947,49 +1216,67 @@ $([ "$TLS_MODE" = "1" ] && echo "
         fi
     fi
 
+    if [ "$GENERATE_EGRESS" = "1" ]; then
+        if [[ -n "$EGRESS_URL" ]]; then
+            egress_section="
+【远程 Egress 出口机 —— 在出口机上运行，主动回连本 Portal，无需出口机开放入站端口】
+连接串：
+${EGRESS_URL}
+
+出口机启动命令：
+nowhere '${EGRESS_URL}'
+※ 本 Portal 已固定 out=egress：Egress 离线时新连接会立即失败，不会回退直连；每台 Portal 只接受一个 Egress 注册
+$([ "$TLS_MODE" = "1" ] && echo "※ 同 Vector，pin= 指纹随 Portal 重启变化，重启后需同步更新出口机连接串")
+"
+        else
+            egress_section="
+【远程 Egress 出口机】
+生成失败：未能获取到有效的连接参数，可稍后通过菜单「5) 查看连接信息」重试
+"
+        fi
+    fi
+
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
-  Nowhere Portal 连接信息
+  Nowhere Portal 连接信息（v3.0.0 / NW3）
   更新时间: $(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
 【服务端启动参数（Portal URL，用于 systemd ExecStart）】
 ${NOWHERE_PORTAL}
-※ 注意：pool 是 Anywhere 客户端 TCP 导入链接专用参数，Portal 服务端不识别该参数，
-   因此上面这条服务端启动串里不会出现 pool，这是正常且预期的行为。
+※ v3 的 alpn/net/log/pool/up/down/socks(Vector旧名) 等旧参数均已移除或改名，
+  未知参数会被静默忽略，千万不要再往启动串里手动拼旧参数。
 
 【客户端连接参数】
   域名/公网地址 : ${PUBLIC_HOST}
-  端口          : ${PORT}
-  共享密钥      : ${SHARED_KEY}
-  ALPN          : ${ALPN}
-  传输模式      : ${NET}
-  Morph 乱形    : $([ "$MORPH" = "1" ] && echo "开启（客户端必须同步开启）" || echo "关闭")
-  TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1)" || echo "真实证书(tls=2)")
-${udp_section}${tcp_section}${vector_section}
+  TCP 端口      : $(tcp_port)
+  UDP 端口      : $(udp_port)
+  共享密钥      : ${SHARED_KEY}（32 位小写十六进制，两端必须完全一致）
+  传输模式      : ${NET}（端口模式 ${PORT_MODE}）
+  Morph 乱形    : $([ "$MORPH" = "1" ] && echo "开启 morph=1（v3 默认，客户端必须同步开启）" || echo "关闭 morph=0（客户端必须同步关闭）")
+  TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1，靠 pin= 指纹锁定)" || echo "真实证书(tls=2，系统 CA + 主机名校验)")
+  Portal 出口   : ${OUT_TYPE}
+${udp_section}${tcp_section}${vector_section}${egress_section}
 【Anywhere 手动填写】
   服务器 : ${PUBLIC_HOST}
-  端口   : ${PORT}
+  端口   : $(if has_tcp; then tcp_port; else udp_port; fi)
   密钥   : ${SHARED_KEY}
   TLS    : 开启
-  SNI    : ${DOMAIN}
-  ALPN   : ${ALPN}
-$([[ "$NET" == "mix" || "$NET" == "tcp" ]] && echo "  Pool   : ${POOL}（仅 TLS/TCP 方式导入时需要，服务端不使用）")
-$([ "$MORPH" = "1" ] && echo "  Morph  : 1（务必和服务端保持一致）")
+  ALPN   : nw3（v3 固定，不可改，App 内无需/无法填写 alpn 时忽略此项）
+  Morph  : ${MORPH}（务必和服务端保持一致）
 
 【防火墙提醒】
-$(case "$NET" in
-    tcp) echo "  需放行: TCP ${PORT}" ;;
-    udp) echo "  需放行: UDP ${PORT}" ;;
-    *)   echo "  需放行: TCP ${PORT} 和 UDP ${PORT}" ;;
-esac)
+$(if has_tcp && has_udp; then echo "  需放行: TCP $(tcp_port) 和 UDP $(udp_port)"; elif has_tcp; then echo "  需放行: TCP $(tcp_port)"; else echo "  需放行: UDP $(udp_port)"; fi)
 $([ "$TLS_MODE" = "1" ] && echo "
 【TLS 提示】
   tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用
-  官方说明：SNI 为空/省略/none 会关闭证书校验，生产环境请用 tls=2 + 真实域名证书")
-$([ -n "$SOCKS" ] && [ "$SOCKS" != "none" ] && echo "
-【SOCKS5 出站代理】
-  $(display_socks "$SOCKS")")
+  v3 客户端默认校验系统 CA 与主机名，自签场景必须用 pin= 锁定指纹")
+
+【版本兼容提醒】
+  本配置为 NW3 协议：v1/v2 的 Portal/Vector 以及未支持 NW3 的
+  Anywhere/第三方客户端无法与本服务端互通，升级需整条链路一起升。
+  分享链接与 anywhere:// 深链格式已按 v3 文档更新，但能否导入成功
+  取决于你手机上的 Anywhere 版本是否已支持 NW3，请以实测为准。
 ════════════════════════════════════════════════════════════════
 CONFEOF
     chmod 600 "${CONFIG_DIR}/config.txt"
@@ -1003,22 +1290,23 @@ CONFEOF
     cat "${CONFIG_DIR}/config.txt"
     echo ""
     if [[ -n "$IMPORT_UDP" ]]; then
-        echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP，推荐）：${NC}"
-        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "${BOLD}✅ 最快导入方式（QUIC/UDP）：${NC}"
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入（需 Anywhere 支持 NW3）："
         echo -e "${CYAN}${IMPORT_UDP}${NC}"
     elif [[ -n "$IMPORT_TCP" ]]; then
         echo -e "${BOLD}✅ 最快导入方式（TLS/TCP）：${NC}"
-        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入："
+        echo -e "在手机浏览器打开，自动跳转 Anywhere 导入（需 Anywhere 支持 NW3）："
         echo -e "${CYAN}${IMPORT_TCP}${NC}"
     fi
     echo ""
     print_tls_fingerprint
     echo ""
     echo -e "${BOLD}📋 常用命令：${NC}"
-    echo -e "  状态 : ${CYAN}systemctl status nowhere${NC}"
+    echo -e "  状态 : ${CYAN}systemctl status nowhere${NC} / ${CYAN}nowhere status${NC}"
     echo -e "  日志 : ${CYAN}journalctl -u nowhere -f${NC}"
     echo -e "  配置 : ${CYAN}cat ${CONFIG_DIR}/config.txt${NC}"
     echo -e "  重启 : ${CYAN}systemctl restart nowhere${NC}"
+    echo -e "  探测 : ${CYAN}${MANAGER_PATH} probe${NC}（真实 TCP Flow 连通性测试）"
     divider
 }
 
@@ -1027,27 +1315,50 @@ load_saved_config() {
     source "$CONFIG_FILE"
     DOMAIN="$DOMAIN_VALUE"
     PUBLIC_HOST="$PUBLIC_HOST_VALUE"
-    LISTEN_HOST="$LISTEN_HOST_VALUE"
+    LISTEN_HOST="${LISTEN_HOST_VALUE:-}"
+    PORT_MODE="${PORT_MODE_VALUE:-same}"
     PORT="$PORT_VALUE"
+    TCP_PORT="${TCP_PORT_VALUE:-$PORT}"
+    UDP_PORT="${UDP_PORT_VALUE:-$PORT}"
     SHARED_KEY="$SHARED_KEY_VALUE"
     NET="$NET_VALUE"
-    ALPN="$ALPN_VALUE"
     TLS_MODE="$TLS_MODE_VALUE"
     CERT_METHOD="$CERT_METHOD_VALUE"
     CRT="$CRT_VALUE"
     KEY_PEM="$KEY_PEM_VALUE"
+    # 兼容旧版（v1.5 脚本）配置文件：旧字段 ALPN/POOL/LOG/SOCKS含义已变，只做迁移提示不直接沿用
+    OUT_TYPE="${OUT_TYPE_VALUE:-}"
+    if [[ -z "$OUT_TYPE" ]]; then
+        if [[ -n "${SOCKS_VALUE:-}" && "${SOCKS_VALUE}" != "none" ]]; then
+            OUT_TYPE="socks"
+            SOCKS="$SOCKS_VALUE"
+            warn "检测到旧版配置：SOCKS5 已由 socks= 迁移为 Portal 的 out=，已自动沿用该地址"
+        else
+            OUT_TYPE="direct"
+            SOCKS="none"
+        fi
+        warn "检测到旧版（NW1）配置文件。v3 还要求：密钥改为 32 位十六进制、删除 alpn/net/log/pool 参数，建议用菜单「4) 重新配置」按 v3 向导重装一次"
+    else
+        SOCKS="${SOCKS_VALUE:-none}"
+    fi
+    DIAL_MODE="${DIAL_MODE_VALUE:-single}"
+    DIAL="${DIAL_VALUE:-auto}"
+    DIAL4="${DIAL4_VALUE:-auto}"
+    DIAL6="${DIAL6_VALUE:-auto}"
     RATE="$RATE_VALUE"
     ETAR="$ETAR_VALUE"
-    DIAL="$DIAL_VALUE"
-    SOCKS="$SOCKS_VALUE"
-    LOG="$LOG_VALUE"
-    POOL="$POOL_VALUE"
-    # 兼容旧配置文件（升级脚本前装的）没有这些字段的情况
     MORPH="${MORPH_VALUE:-$DEFAULT_MORPH}"
     GENERATE_VECTOR="${GENERATE_VECTOR_VALUE:-0}"
-    VECTOR_UP="${VECTOR_UP_VALUE:-tcp}"
-    VECTOR_DOWN="${VECTOR_DOWN_VALUE:-tcp}"
+    # 旧配置里存的是 VECTOR_UP/VECTOR_DOWN 双向载体，v3 Vector 只有单载体：优先取上行值
+    VECTOR_CARRIER="${VECTOR_CARRIER_VALUE:-${VECTOR_UP_VALUE:-tcp}}"
     VECTOR_SOCKS="${VECTOR_SOCKS_VALUE:-$DEFAULT_VECTOR_SOCKS}"
+    GENERATE_EGRESS="${GENERATE_EGRESS_VALUE:-0}"
+    NOWHERE_PORTAL="${NOWHERE_PORTAL:-$(build_portal_url)}"
+
+    if ! is_valid_key "$SHARED_KEY"; then
+        warn "当前保存的共享密钥不符合 v3 规范（必须是恰好 32 位小写十六进制字符）"
+        warn "v3 会直接拒绝用该密钥启动。请用菜单「4) 重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端"
+    fi
 }
 
 do_uninstall() {
@@ -1079,7 +1390,18 @@ do_update() {
         return
     fi
 
+    local cur_major latest_major
+    cur_major="$(version_major "$current")"
+    latest_major="$(version_major "$latest")"
+    if [[ -n "$cur_major" && -n "$latest_major" && "$cur_major" != "$latest_major" ]]; then
+        warn "这是跨协议代升级（NW${cur_major} -> NW${latest_major}）：新旧对端不互通，Vector/Egress/Anywhere 必须一起升级"
+        warn "且 v3 的密钥格式、URL 参数与旧版不兼容，仅换二进制不重配大概率启动失败或连不上"
+        read -p "确认跨代升级 [y/N]: " MAJOR_CONFIRM
+        [[ ! "$MAJOR_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+    fi
+
     install_nowhere_version "$latest" || error "更新失败"
+    warn "若这是从 v1/v2 跨代升到 v3，请接着用菜单「4) 重新配置」按 v3 向导重建配置（新密钥 + 新 URL），再同步更新所有对端"
 }
 
 do_show_version() {
@@ -1208,6 +1530,7 @@ do_reconfig() {
     step "重新配置"
     divider
     warn "将重新走一遍安装向导并覆盖当前配置"
+    warn "注意：v3 密钥与 URL 语法已变更，重新配置后务必把新的 Vector/Egress/Anywhere 连接信息同步到所有对端，旧链接无法继续使用"
     read -p "确认继续 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && return
     do_install
@@ -1216,13 +1539,16 @@ do_reconfig() {
 do_show_config() {
     step "连接信息"
     divider
-    if [ -f "${CONFIG_DIR}/config.txt" ]; then
-        cat "${CONFIG_DIR}/config.txt"
-    elif [ -f "$CONFIG_FILE" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
         load_saved_config
+        # 每次查看都按当前保存参数重新生成（含最新自签 pin），避免展示过期指纹的旧串
+        NOWHERE_PORTAL="$(build_portal_url)"
         build_client_links
         build_vector_info
+        build_egress_info
         print_all_info
+    elif [ -f "${CONFIG_DIR}/config.txt" ]; then
+        cat "${CONFIG_DIR}/config.txt"
     else
         warn "未找到配置，请先安装"
     fi
@@ -1233,6 +1559,11 @@ do_show_status() {
     divider
     systemctl status nowhere --no-pager
     divider
+    if [ -x "$BIN_PATH" ]; then
+        info "Nowhere 本地实例快照（nowhere status，v3 内置遥测）："
+        "$BIN_PATH" status 2>&1 || warn "nowhere status 未能读取到实例（服务未运行，或二进制版本低于 v2.1.2 无此命令）"
+        divider
+    fi
     info "最近日志（20行）："
     journalctl -u nowhere -n 20 --no-pager
 }
@@ -1253,6 +1584,37 @@ do_restart() {
     sleep 1
     systemctl is-active --quiet nowhere && success "已重启" || error "重启失败"
     load_saved_config 2>/dev/null && print_tls_fingerprint
+    if [[ "${TLS_MODE:-}" == "1" ]]; then
+        warn "自签证书指纹已随本次重启变化，请用 pz/菜单 5 重新生成带新 pin= 的 Vector/Egress 连接串并同步到对端"
+    fi
+}
+
+do_genkey() {
+    step "生成 v3 共享密钥"
+    divider
+    local k
+    k="$(gen_key)"
+    if is_valid_key "$k"; then
+        echo -e "  ${GREEN}${k}${NC}"
+        info "格式：32 位小写十六进制（16 随机字节）。Portal、Vector、Egress、Anywhere 四端必须填完全相同的这串字符"
+    else
+        error "生成失败：openssl 与 nowhere 二进制均不可用"
+    fi
+}
+
+do_probe() {
+    step "连通性探测 probe（真实 TCP Flow，不发送业务数据）"
+    divider
+    [ -x "$BIN_PATH" ] || error "未找到 Nowhere 二进制，请先安装"
+    load_saved_config
+    is_valid_key "$SHARED_KEY" || error "当前密钥不符合 v3 规范，无法探测，请先用菜单 4 重新配置"
+    local vector_url target
+    vector_url="$(build_probe_vector_url)"
+    read -p "目标地址 host:port（回车默认 example.com:443）: " target
+    target=${target:-example.com:443}
+    info "Vector: ${vector_url}"
+    info "Target: ${target}"
+    "$BIN_PATH" probe "$vector_url" "$target" || warn "探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、Egress 离线、对端 Morph/pin/密钥不一致、目标本身不可达"
 }
 
 run_interactive_menu() {
@@ -1271,6 +1633,8 @@ run_interactive_menu() {
         11) do_show_version ;;
         12) do_select_version ;;
         13) do_rollback ;;
+        14) do_genkey ;;
+        15) do_probe ;;
         0) exit 0 ;;
         *) error "无效选择" ;;
     esac
@@ -1291,5 +1655,7 @@ case "$ACTION" in
     version)    do_show_version ;;
     select-version) do_select_version ;;
     rollback)   do_rollback ;;
-    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback）" ;;
+    generate-key) do_genkey ;;
+    probe)      do_probe ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback/generate-key/probe）" ;;
 esac
