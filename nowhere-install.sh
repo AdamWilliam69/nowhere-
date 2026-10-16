@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 # ══════════════════════════════════════════════════════════════
 #   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.0.0 / NW3）
@@ -25,6 +26,16 @@ set -e
 #       无参数运行只显示帮助（v1.6 的 TUI 已在 v3 移除）
 #   快捷命令：adam(菜单) · zt(状态) · pz(配置) · cxpz(重新配置) · cq(重启)
 #   支持 Debian / Ubuntu · x86_64 / aarch64
+#   ── v2 升级（2026-10-16）：证书申请与自动续期重构 + 全面加固 ──
+#     证书链路：新增 cert_is_valid（存在/剩余>30天/域名匹配/私钥匹配），有效则跳过、无效才重签；
+#       新增 verify_issued_cert，签发后用 openssl 复核（防“有文件但不可用”）；
+#       新增 check_domain_dns，HTTP-01 前做 DNS 预检；
+#       新增 setup_certbot_renewal：deploy hook + 确保 certbot.timer 生效（缺失时 cron 兜底）+
+#       可选 --dry-run 续期演练；新增 setup_acmesh_renewal 确认 acme.sh cron 就绪；
+#       acme.sh 分支：安装失败显式报错、去掉 --issue --force（防 LE 频率限制）、校验签发结果；
+#       「其他/手动」DNS 改为明确不支持并指引改选；新增菜单 16「检查证书状态 / 手动续期」。
+#     通用加固：下载改用 mktemp 独立目录（防并发冲突、自动清理）；发布包 SHA256 机会性校验；
+#       GitHub API 解析加 || true 适配 pipefail；gai.conf 追加防粘连；卸载时清理续期 hook。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -121,10 +132,13 @@ install_nowhere_version() {
     fi
 
     info "下载 ${target_tag} ..."
-    curl -fL --retry 3 -o /tmp/nowhere.tar.gz "$url" || { warn "下载失败"; return 1; }
-    tar -xzf /tmp/nowhere.tar.gz -C /tmp/ || { warn "解压失败"; return 1; }
-    local binary_path
-    binary_path=$(find /tmp -type f -name nowhere | head -1)
+    local workdir binary_path
+    workdir="$(mktemp -d /tmp/nowhere-dl.XXXXXX)"
+    trap "rm -rf $workdir" RETURN
+    curl -fL --retry 3 -o "$workdir/nowhere.tar.gz" "$url" || { warn "下载失败"; return 1; }
+    verify_release_checksum "$target_tag" "$workdir" || { warn "校验失败，已中止安装"; return 1; }
+    tar -xzf "$workdir/nowhere.tar.gz" -C "$workdir/" || { warn "解压失败"; return 1; }
+    binary_path=$(find "$workdir" -type f -name nowhere | head -1)
     if [ -z "$binary_path" ]; then
         warn "解压后未找到 nowhere 二进制"
         return 1
@@ -137,7 +151,6 @@ install_nowhere_version() {
 
     systemctl stop nowhere 2>/dev/null || true
     install -m 755 "$binary_path" "$BIN_PATH"
-    rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
     record_installed_version "$target_tag"
     systemctl start nowhere
     sleep 2
@@ -537,6 +550,7 @@ ensure_ipv4_preference() {
 
     if ! grep -q "^precedence ::ffff:0:0/96" /etc/gai.conf 2>/dev/null; then
         info "写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）"
+        [ -n "$(tail -c 1 /etc/gai.conf 2>/dev/null)" ] && echo >> /etc/gai.conf
         echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
     fi
 
@@ -604,6 +618,146 @@ SHORTEOF
     echo -e "  ${CYAN}cq${NC}     — 快速重启服务"
 }
 
+# ── 证书申请与自动续期（v2 新增/重构） ──────────────────────────
+
+# 证书有效性：文件存在、私钥匹配、SAN/CN 含域名、剩余有效期 > 30 天
+cert_is_valid() {
+    local domain="$1" crt="$2" key="$3"
+    [ -n "$domain" ] && [ -f "$crt" ] && [ -f "$key" ] || return 1
+    openssl x509 -in "$crt" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
+    openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | \
+        cmp -s - <(openssl pkey -in "$key" -pubout 2>/dev/null) || return 1
+    openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:${domain}" && return 0
+    openssl x509 -in "$crt" -noout -subject 2>/dev/null | grep -q "CN *= *${domain}" && return 0
+    return 1
+}
+
+# 证书剩余有效天数（整数）；取不到返回非 0
+cert_expiry_days() {
+    local crt="$1" end_s now_s
+    end_s="$(date -d "$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null | cut -d= -f2-)" +%s 2>/dev/null)" || return 1
+    [ -n "$end_s" ] || return 1
+    now_s="$(date +%s)"
+    echo $(( (end_s - now_s) / 86400 ))
+}
+
+# 签发后校验：文件存在、未过期、私钥匹配、SAN 含域名
+verify_issued_cert() {
+    local domain="$1" crt="$2" key="$3" days
+    [ -f "$crt" ] && [ -f "$key" ] || { warn "证书文件未生成：${crt}"; return 1; }
+    openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1 || { warn "证书已过期或无法解析"; return 1; }
+    if ! openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | \
+            cmp -s - <(openssl pkey -in "$key" -pubout 2>/dev/null); then
+        warn "证书与私钥不匹配"
+        return 1
+    fi
+    if ! openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:${domain}"; then
+        warn "证书 SAN 中不包含域名 ${domain}（可能签发了错误的域名）"
+        openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null || true
+        return 1
+    fi
+    days="$(cert_expiry_days "$crt" || echo "?")"
+    success "证书校验通过：${domain}，剩余有效期约 ${days} 天"
+    return 0
+}
+
+# HTTP-01 前的 DNS 预检：只告警不中断（DNS 可能正在传播）
+check_domain_dns() {
+    local domain="$1" myip resolved=""
+    myip="$(detect_public_host)"
+    if command -v dig >/dev/null 2>&1; then
+        resolved="$(dig +short "$domain" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)"
+    else
+        resolved="$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9.]+$' | head -1 || true)"
+    fi
+    if [ -z "$resolved" ]; then
+        warn "域名 ${domain} 当前解析不到任何 A 记录（DNS 未生效或拼写错误），HTTP-01 很可能失败"
+        return 1
+    fi
+    if [ -n "$myip" ] && [ "$resolved" != "$myip" ]; then
+        warn "域名 ${domain} 解析到 ${resolved}，但本机公网 IP 疑似 ${myip}：两者不一致时 HTTP-01 会失败"
+        warn "若刚修改 DNS，请确认已传播：dig +short ${domain}（或等待 10-30 分钟后重试）"
+        return 1
+    fi
+    success "DNS 预检通过：${domain} -> ${resolved}"
+    return 0
+}
+
+# 发布包 SHA256 机会性校验：仓库若提供校验文件则必校验通过，否则告警跳过（不阻断）
+verify_release_checksum() {
+    local tag="$1" workdir="$2" sumfile url entry
+    for sumfile in "SHA256SUMS" "sha256sums.txt" "checksums.txt"; do
+        url="https://github.com/${REPO}/releases/download/${tag}/${sumfile}"
+        curl -fsSL --max-time 15 -o "${workdir}/${sumfile}" "$url" 2>/dev/null || continue
+        entry="$(grep "nowhere-${ARCH_NAME}-unknown-linux-${LIBC}.tar.gz" "${workdir}/${sumfile}" | head -1 || true)"
+        if [ -z "$entry" ]; then
+            warn "校验文件 ${sumfile} 中没有本架构条目，跳过校验"
+            return 0
+        fi
+        info "正在用 ${sumfile} 校验安装包..."
+        if echo "$entry" | (cd "$workdir" && sha256sum -c - >/dev/null 2>&1); then
+            success "SHA256 校验通过"
+            return 0
+        else
+            warn "SHA256 校验失败：安装包可能被篡改或下载损坏"
+            return 1
+        fi
+    done
+    warn "该版本未提供可识别的校验文件，跳过校验（本次经 HTTPS 直连 GitHub 下载）"
+    return 0
+}
+
+# certbot 续期链路：deploy hook + 确保 timer 生效（缺失时 cron 兜底）+ 可选 dry-run 演练
+setup_certbot_renewal() {
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << 'HOOKEOF'
+#!/bin/bash
+# certbot 续期成功后自动重启 nowhere，使新证书生效
+systemctl restart nowhere
+HOOKEOF
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
+    info "已安装续期 hook：证书更新后自动 restart nowhere"
+
+    if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
+        systemctl enable --now certbot.timer 2>/dev/null || warn "certbot.timer 启用失败，请手动执行：systemctl enable --now certbot.timer"
+        if systemctl is-active --quiet certbot.timer 2>/dev/null; then
+            success "自动续期已就绪：certbot.timer 运行中（每天两次检查续期）"
+        else
+            warn "certbot.timer 未在运行，自动续期可能不工作，请手动检查"
+        fi
+    else
+        warn "未找到 certbot.timer，改用 cron 兜底（每天 3:00 / 15:00 检查续期）"
+        (crontab -l 2>/dev/null | grep -v 'certbot renew' || true; \
+         echo '0 3,15 * * * certbot renew --quiet --deploy-hook "systemctl restart nowhere"') | crontab -
+        success "cron 续期任务已写入"
+    fi
+
+    echo ""
+    read -p "是否立即做一次续期演练（certbot renew --dry-run，不消耗 LE 配额）？[Y/n]: " DRYRUN
+    if [[ ! "${DRYRUN:-y}" =~ ^[Nn]$ ]]; then
+        info "演练中（约需 30-90 秒）..."
+        if certbot renew --dry-run 2>&1 | tail -5; then
+            success "续期演练通过，自动续期链路可信"
+        else
+            warn "续期演练未通过：请根据上方报错排查（如 80 端口被占、DNS 凭证失效），否则证书到期后服务会中断"
+        fi
+    else
+        warn "已跳过演练：建议 90 天内用菜单「16) 检查证书状态 / 手动续期」验证一次"
+    fi
+}
+
+# acme.sh 续期链路：确认其自带的 cron 定时任务已就绪
+setup_acmesh_renewal() {
+    if crontab -l 2>/dev/null | grep -q 'acme.sh.*--cron'; then
+        success "自动续期已就绪：acme.sh 的 cron 定时任务存在（每天检查，到期自动续签并执行 --reloadcmd 重启 nowhere）"
+    else
+        warn "未在 root 的 crontab 中找到 acme.sh 定时任务，自动续期可能不工作"
+        warn "可手动补加：(crontab -l 2>/dev/null; echo '0 0 * * * \"${ACME_HOME}/acme.sh\" --cron --home \"${ACME_HOME}\"') | crontab -"
+    fi
+    info "当前该域名的证书状态："
+    "${ACME_HOME}/acme.sh" --list 2>/dev/null | grep -E "Main_Domain|${DOMAIN}" || true
+}
+
 show_menu() {
     clear
     echo -e "${BOLD}${CYAN}"
@@ -627,13 +781,14 @@ show_menu() {
     echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
     echo -e "  ${BOLD}14)${NC} 生成 v3 共享密钥（32 位十六进制）"
     echo -e "  ${BOLD}15)${NC} 连通性探测 probe（真实 TCP Flow 测试）"
+    echo -e "  ${BOLD}16)${NC} 检查证书状态 / 手动续期"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
         divider
     fi
-    read -p "请选择操作 [0-15]: " MENU_CHOICE
+    read -p "请选择操作 [0-16]: " MENU_CHOICE
 }
 
 do_install() {
@@ -719,7 +874,7 @@ do_install() {
                read -p "阿里云 AccessKey Secret: " ALI_SECRET
                export Ali_Key="${ALI_ID}" Ali_Secret="${ALI_SECRET}"
                DNS_API="dns_ali" ;;
-            *) warn "请手动配置 acme.sh DNS 环境变量"; DNS_API="dns_manual" ;;
+            *) warn "「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3"; DNS_API="unsupported" ;;
         esac
     fi
 
@@ -933,11 +1088,12 @@ do_install() {
         ensure_ipv4_preference
         step "第 6 步：申请 TLS 证书"
         divider
-        mkdir -p "/etc/letsencrypt/live/${DOMAIN}"
 
         if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
-            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
-                warn "证书已存在，跳过申请"
+            # HTTP-01 前先做 DNS 预检：域名必须解析到本机，否则 certbot 必败
+            check_domain_dns "$DOMAIN" || true
+            if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
+                info "检测到有效证书（剩余 $(cert_expiry_days "$CRT") 天，域名匹配），跳过申请"
             else
                 info "申请证书中（HTTP-01，需 80 端口）..."
                 ufw allow 80/tcp 2>/dev/null || true
@@ -949,10 +1105,12 @@ do_install() {
                     --email "${EMAIL}" \
                     -d "${DOMAIN}" \
                     --http-01-port 80 --http-01-address 0.0.0.0 || {
-                    error "证书申请失败，请检查：1) 域名是否正确 2) 80 端口是否开放 3) 域名是否指向本 VPS"
+                    error "证书申请失败，请检查：1) 域名是否正确 2) 80 端口是否对外开放 3) 域名是否已指向本 VPS（见上方 DNS 预检结果）"
                 }
+                verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "证书签发后校验未通过，请看上方告警"
                 success "证书申请成功"
             fi
+            setup_certbot_renewal
 
         elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
             mkdir -p /etc/cloudflare
@@ -968,10 +1126,10 @@ CFEOF
             fi
             chmod 600 /etc/cloudflare/credentials.ini
 
-            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
-                warn "证书已存在，跳过申请"
+            if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
+                info "检测到有效证书（剩余 $(cert_expiry_days "$CRT") 天，域名匹配），跳过申请"
             else
-                info "申请证书中（Cloudflare DNS-01，约需30-60秒）..."
+                info "申请证书中（Cloudflare DNS-01，约需 30-60 秒）..."
                 certbot certonly \
                     --dns-cloudflare \
                     --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
@@ -980,61 +1138,71 @@ CFEOF
                     --email "${EMAIL}" \
                     -d "${DOMAIN}" \
                     --dns-cloudflare-propagation-seconds 30 || {
-                    error "证书申请失败，请检查：1) CF API Key 是否正确 2) 域名是否在 CF 管理下"
+                    error "证书申请失败，请检查：1) CF API Key/Token 是否正确 2) 域名是否在该 CF 账号下 3) Token 是否有 Zone:DNS:Edit 权限"
                 }
+                verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "证书签发后校验未通过，请看上方告警"
                 success "证书申请成功"
             fi
+            setup_certbot_renewal
 
         elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
+            if [ "${DNS_API}" = "unsupported" ]; then
+                error "您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云"
+            fi
             info "安装 acme.sh..."
-            curl -s https://get.acme.sh | bash -s email="${EMAIL}" > /dev/null 2>&1
+            if ! curl -fsSL https://get.acme.sh | bash -s email="${EMAIL}"; then
+                error "acme.sh 安装失败，请检查网络后重试"
+            fi
+            [ -x "${ACME_HOME}/acme.sh" ] || error "acme.sh 安装后仍找不到可执行文件（${ACME_HOME}/acme.sh）"
             . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
 
-            if [ -f "$CRT" ] && [ -f "$KEY_PEM" ]; then
-                warn "证书已存在，跳过申请"
+            if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
+                info "检测到有效证书（剩余 $(cert_expiry_days "$CRT") 天，域名匹配），跳过申请"
             else
-                info "申请证书中（DNS-01: ${DNS_API}）..."
-                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" --force
+                info "申请证书中（DNS-01: ${DNS_API}；不加 --force，避免重复签发触发 LE 频率限制）..."
+                "${ACME_HOME}/acme.sh" --issue -d "${DOMAIN}" --dns "${DNS_API}" || {
+                    error "证书签发失败：请检查 DNS API 凭证是否正确、域名 DNS 是否由所选服务商托管"
+                }
                 "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
-                    --cert-file "${CRT}" \
                     --key-file "${KEY_PEM}" \
                     --fullchain-file "${CRT}" \
-                    --reloadcmd "systemctl restart nowhere"
+                    --reloadcmd "systemctl restart nowhere" || {
+                    error "证书安装（install-cert）失败"
+                }
+                verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "证书签发后校验未通过，请看上方告警"
                 success "证书申请成功"
             fi
+            setup_acmesh_renewal
         fi
 
         info "证书路径: ${CRT}"
         info "私钥路径: ${KEY_PEM}"
-
-        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-        cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << 'HOOKEOF'
-#!/bin/bash
-systemctl restart nowhere
-HOOKEOF
-        chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
     fi
+
 
     step "第 7 步：下载 Nowhere 二进制"
     divider
     detect_binary
     info "正在获取最新版本号..."
-    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     [ -z "$LATEST" ] && error "无法获取版本号，请检查网络"
     LATEST_MAJOR="$(version_major "$LATEST")"
     if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -lt 3 ]; then
         error "当前最新版为 ${LATEST}，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）"
     fi
     info "最新版本: ${LATEST} (${ARCH_NAME}-${LIBC})"
+    local workdir_dl
+    workdir_dl="$(mktemp -d /tmp/nowhere-dl.XXXXXX)"
+    trap "rm -rf $workdir_dl" RETURN
     curl -fL --retry 3 --connect-timeout 10 \
-        -o /tmp/nowhere.tar.gz \
+        -o "$workdir_dl/nowhere.tar.gz" \
         "https://github.com/${REPO}/releases/download/${LATEST}/${BIN_NAME}" || error "下载失败"
-    tar -xzf /tmp/nowhere.tar.gz -C /tmp/ || error "解压失败"
-    BINARY_PATH=$(find /tmp -type f -name nowhere -perm -u+x | head -1)
-    [ -z "$BINARY_PATH" ] && BINARY_PATH=$(find /tmp -type f -name nowhere | head -1)
+    verify_release_checksum "$LATEST" "$workdir_dl" || error "安装包 SHA256 校验失败，已中止"
+    tar -xzf "$workdir_dl/nowhere.tar.gz" -C "$workdir_dl/" || error "解压失败"
+    BINARY_PATH=$(find "$workdir_dl" -type f -name nowhere -perm -u+x | head -1)
+    [ -z "$BINARY_PATH" ] && BINARY_PATH=$(find "$workdir_dl" -type f -name nowhere | head -1)
     [ -z "$BINARY_PATH" ] && error "未找到 nowhere 二进制文件"
     install -m 755 "${BINARY_PATH}" "${BIN_PATH}"
-    rm -f /tmp/nowhere.tar.gz /tmp/nowhere 2>/dev/null || true
     record_installed_version "$LATEST"
     success "Nowhere $(${BIN_PATH} --version 2>&1 | head -1) 安装完成"
 
@@ -1368,6 +1536,7 @@ do_uninstall() {
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
     systemctl disable --now nowhere 2>/dev/null || true
     rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH"
+    rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
     systemctl daemon-reload
     warn "已保留 ${CONFIG_DIR}（含密钥配置），如需彻底清除请手动: rm -rf ${CONFIG_DIR}"
     success "Nowhere 已卸载"
@@ -1381,7 +1550,7 @@ do_update() {
     info "当前版本: ${current}"
     info "正在获取最新版本号..."
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     [ -z "$latest" ] && error "无法获取版本号"
     info "最新版本: ${latest}"
 
@@ -1422,7 +1591,7 @@ do_show_version() {
     echo ""
     info "正在查询 GitHub 最新版本..."
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     if [ -n "$latest" ]; then
         if [ "$current" = "$latest" ]; then
             success "已是最新版本 (${latest})"
@@ -1617,6 +1786,70 @@ do_probe() {
     "$BIN_PATH" probe "$vector_url" "$target" || warn "探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、Egress 离线、对端 Morph/pin/密钥不一致、目标本身不可达"
 }
 
+do_cert_status() {
+    step "证书状态与续期"
+    divider
+    [ -f "$CONFIG_FILE" ] || error "未找到配置文件，请先执行安装"
+    load_saved_config
+    if [ "$TLS_MODE" != "2" ]; then
+        info "当前为自签模式（tls=1），证书只存在内存中、无需续期"
+        return
+    fi
+    echo -e "  域名       : ${GREEN}${DOMAIN}${NC}"
+    echo -e "  证书路径   : ${GREEN}${CRT}${NC}"
+    echo -e "  申请方式   : ${GREEN}${CERT_METHOD}${NC}"
+    local days
+    days="$(cert_expiry_days "$CRT" 2>/dev/null || echo "")"
+    if [ -n "$days" ]; then
+        if [ "$days" -lt 0 ]; then
+            warn "证书已过期 $((-days)) 天！请立即手动续期"
+        elif [ "$days" -le 30 ]; then
+            warn "证书剩余 ${days} 天（30 天内到期），建议立即手动续期"
+        else
+            success "证书有效，剩余约 ${days} 天"
+        fi
+    else
+        warn "无法读取证书有效期（文件缺失或损坏），建议重新签发"
+    fi
+    echo ""
+    info "自动续期链路检查："
+    case "$CERT_METHOD" in
+        letsencrypt-http|cloudflare-dns)
+            if systemctl is-active --quiet certbot.timer 2>/dev/null; then
+                success "certbot.timer 运行中"
+            elif crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+                success "cron 兜底续期任务存在"
+            else
+                warn "未发现有效的自动续期任务！"
+            fi
+            [ -x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh ] \
+                && success "续期 deploy hook 存在（续期后自动重启 nowhere）" \
+                || warn "续期 deploy hook 缺失（续期后不会自动重启 nowhere）"
+            ;;
+        letsencrypt-dns)
+            if crontab -l 2>/dev/null | grep -q 'acme.sh.*--cron'; then
+                success "acme.sh cron 续期任务存在"
+            else
+                warn "未发现 acme.sh 自动续期任务！"
+            fi
+            ;;
+    esac
+    echo ""
+    read -p "是否立即手动触发一次续期检查？（仅当证书满足续期条件时才会真的续签）[y/N]: " DO_RENEW
+    if [[ "$DO_RENEW" =~ ^[Yy]$ ]]; then
+        case "$CERT_METHOD" in
+            letsencrypt-http|cloudflare-dns)
+                certbot renew && systemctl restart nowhere && success "续期检查完成" \
+                    || warn "续期失败，请看上方报错"
+                ;;
+            letsencrypt-dns)
+                "${ACME_HOME}/acme.sh" --renew -d "${DOMAIN}" && success "续期检查完成（acme.sh 的 --reloadcmd 会自动重启 nowhere）" \
+                    || warn "续期失败，请看上方报错"
+                ;;
+        esac
+    fi
+}
+
 run_interactive_menu() {
     show_menu
     case $MENU_CHOICE in
@@ -1635,6 +1868,7 @@ run_interactive_menu() {
         13) do_rollback ;;
         14) do_genkey ;;
         15) do_probe ;;
+        16) do_cert_status ;;
         0) exit 0 ;;
         *) error "无效选择" ;;
     esac
@@ -1657,5 +1891,6 @@ case "$ACTION" in
     rollback)   do_rollback ;;
     generate-key) do_genkey ;;
     probe)      do_probe ;;
-    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback/generate-key/probe）" ;;
+    cert-status) do_cert_status ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback/generate-key/probe/cert-status）" ;;
 esac
