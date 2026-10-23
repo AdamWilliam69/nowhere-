@@ -3,8 +3,8 @@ set -e
 set -o pipefail
 
 # ══════════════════════════════════════════════════════════════
-#   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.0.0 / NW3）
-#   已按 v3.0.0 官方文档 + 真实二进制实测重写，v1.5.x 旧配置不兼容：
+#   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.0.1 / NW3）
+#   已按 v3.0.1 官方文档 + 真实二进制实测重写（协议线仍为 NW3，配置与 v3.0.0 兼容），v1.5.x 旧配置不兼容：
 #     - 协议已换 NW3（ALPN 固定 nw3），v1/v2 的 Portal/Vector 无法
 #       与 v3 互通，升级必须 Portal、Vector、Anywhere 等对端一起升级
 #     - 共享密钥必须是恰好 32 位小写十六进制字符（nowhere generate-key），
@@ -36,6 +36,19 @@ set -o pipefail
 #       「其他/手动」DNS 改为明确不支持并指引改选；新增菜单 16「检查证书状态 / 手动续期」。
 #     通用加固：下载改用 mktemp 独立目录（防并发冲突、自动清理）；发布包 SHA256 机会性校验；
 #       GitHub API 解析加 || true 适配 pipefail；gai.conf 追加防粘连；卸载时清理续期 hook。
+#   ── 脚本 v3 修订（2026-10-23，跟随 Nowhere v3.0.1）──
+#     - 跟随 v3.0.1：新增 NOW_MORPH_TCP_PRELUDE 策略选择（默认 fade，v3.0.0 为 full8；
+#       该设置只影响本机发起端、接收端通吃、不进分享链接，无需迁移密钥/URL）；
+#     - 下载校验改为强制：优先用 GitHub Release API 的资产 sha256 digest 比对，
+#       修复旧逻辑按校验文件名 sha256sum -c 而下载文件名为 nowhere.tar.gz、永远对不上的问题；
+#     - 更新/切换版本启动失败时自动用本地备份二进制回滚，不再把服务留在宕机状态；
+#     - 补齐地址族载体 tcp4/tcp6/udp4/udp6（旧版头部声称支持但向导从未提供）；
+#     - Egress 连接串可带 dial=/rate=/etar=，Vector 连接串补 rate=/etar=；
+#     - 安全：密钥/API Token/含密码项改 read -s 不回显、全部 read 加 -r；probe 输出打码密钥；
+#       rate/etar 增加官方上限 2147483647 校验，dial 增加 IP 字面量校验；
+#       防火墙启用前先放行实际 SSH 端口（防自定义 SSH 端口被 ufw 锁死）；env 写出对 SOCKS 凭证转义；
+#     - 体验：重装前自动备份旧配置目录；连接信息可输出二维码（qrencode）；tls=2 也可查看证书指纹；
+#       卸载时可一并清理快捷命令；GitHub API 调用统一加超时。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -60,6 +73,11 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
+SCRIPT_VERSION="3.0"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1默认)/full8/low7，仅影响本机发起的 Morph TCP 连接
+TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
+UDP_FAMILY=""             # 同上 -> udp/udp4/udp6
+EGRESS_DIAL="auto"        # Egress 端目标出站源地址（在出口机上生效）
 
 info()    { echo -e "${BLUE}[信息]${NC} $1"; }
 success() { echo -e "${GREEN}[成功]${NC} $1"; }
@@ -115,7 +133,7 @@ install_nowhere_version() {
     major="$(version_major "$target_tag")"
     if [ -n "$major" ] && [ "$major" -lt 3 ]; then
         warn "目标版本 ${target_tag} 属于 NW${major} 协议代，与本脚本生成的 v3(NW3) 配置/对端不互通"
-        read -p "仍要安装该旧版本吗？[y/N]: " OLD_CONFIRM
+        read -rp "仍要安装该旧版本吗？[y/N]: " OLD_CONFIRM
         if [[ ! "$OLD_CONFIRM" =~ ^[Yy]$ ]]; then
             info "已取消"
             return 1
@@ -125,7 +143,7 @@ install_nowhere_version() {
     local url="https://github.com/${REPO}/releases/download/${target_tag}/${BIN_NAME}"
     info "校验该版本是否发布了对应架构 (${ARCH_NAME}-${LIBC}) 的二进制..."
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -L "$url")
+    http_code=$(curl -sI --max-time 20 -o /dev/null -w "%{http_code}" -L "$url" || true)
     if [ "$http_code" != "200" ]; then
         warn "版本 ${target_tag} 未找到对应架构的发布文件 (HTTP ${http_code})"
         return 1
@@ -157,12 +175,29 @@ install_nowhere_version() {
 
     if systemctl is-active --quiet nowhere; then
         success "已切换到 ${target_tag}: $(${BIN_PATH} --version 2>&1 | head -1)"
+        info "提示：v3.0.1 起 NOW_MORPH_TCP_PRELUDE 未显式设置时默认 fade（v3.0.0 为 full8）；接收端兼容全部策略，密钥与 URL 无需迁移"
         return 0
-    else
-        warn "新版本启动失败，日志如下："
-        journalctl -u nowhere -n 20 --no-pager
-        return 1
     fi
+
+    warn "新版本启动失败，日志如下："
+    journalctl -u nowhere -n 20 --no-pager
+    # v3 修订：旧实现失败后直接返回，坏二进制留在原地、服务保持宕机；改为自动回滚备份
+    if [ -f "$BIN_BACKUP_PATH" ]; then
+        local prev_tag
+        prev_tag="$(read_previous_version)"
+        warn "正在自动回滚到备份二进制${prev_tag:+（${prev_tag}）}..."
+        systemctl stop nowhere 2>/dev/null || true
+        install -m 755 "$BIN_BACKUP_PATH" "$BIN_PATH"
+        [ -n "$prev_tag" ] && record_installed_version "$prev_tag"
+        systemctl start nowhere 2>/dev/null || true
+        sleep 2
+        if systemctl is-active --quiet nowhere; then
+            success "已自动回滚，服务恢复运行: $(${BIN_PATH} --version 2>&1 | head -1)"
+        else
+            warn "回滚后服务仍未启动，请立即查看日志: journalctl -u nowhere -n 50 --no-pager"
+        fi
+    fi
+    return 1
 }
 
 # ── 通用小工具 ────────────────────────────────────────────────
@@ -267,6 +302,35 @@ validate_nonneg_int() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+# rate/etar 官方取值范围 0..=2147483647（Mbps），超出会被 v3 在启动时直接拒绝
+validate_rate() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -le 2147483647 ]
+}
+
+# dial/dial4/dial6 只接受 IP 字面量或 auto；fam: any/4/6，IPv6 时拒绝 IPv4-mapped 地址
+validate_ip_or_auto() {
+    local v="${1:-}" fam="${2:-any}"
+    [ "$v" = "auto" ] && return 0
+    [ -n "$v" ] || return 1
+    python3 -c 'import ipaddress,sys
+try: ip = ipaddress.ip_address(sys.argv[1])
+except Exception: sys.exit(1)
+fam = sys.argv[2]
+if fam == "4" and ip.version != 4: sys.exit(1)
+if fam == "6" and (ip.version != 6 or ip.ipv4_mapped is not None): sys.exit(1)
+sys.exit(0)' "$v" "$fam" 2>/dev/null
+}
+
+# 把值安全地写进双引号 env 行：转义 \ " $ `，避免 source 配置文件时被展开/截断
+dq_escape() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    v="${v//$/\\$}"
+    v="${v//\`/\\\`}"
+    printf '%s' "$v"
+}
+
 validate_socks() {
     local socks="$1" endpoint userinfo host port
     [[ -z "$socks" || "$socks" == "none" ]] && return 0
@@ -315,19 +379,26 @@ append_trust_params() {
 
 # Portal 监听端点：空/ * = 通配；mix 同端口写 HOST:PORT，分端口写 HOST/tcp:P/udp:P
 build_portal_endpoint() {
-    local host
+    local host tcp_seg udp_seg
     if [[ -z "$LISTEN_HOST" || "$LISTEN_HOST" == "*" ]]; then
         host="*"
     else
         host="$(format_host_for_url "$LISTEN_HOST")"
     fi
+    tcp_seg="tcp${TCP_FAMILY:-}"
+    udp_seg="udp${UDP_FAMILY:-}"
     if [[ "$PORT_MODE" == "split" ]]; then
-        printf '%s/tcp:%s/udp:%s' "$host" "$TCP_PORT" "$UDP_PORT"
+        printf '%s/%s:%s/%s:%s' "$host" "$tcp_seg" "$TCP_PORT" "$udp_seg" "$UDP_PORT"
     else
         case "$NET" in
-            tcp) printf '%s/tcp:%s' "$host" "$PORT" ;;
-            udp) printf '%s/udp:%s' "$host" "$PORT" ;;
-            *)   printf '%s:%s' "$host" "$PORT" ;;
+            tcp) printf '%s/%s:%s' "$host" "$tcp_seg" "$PORT" ;;
+            udp) printf '%s/%s:%s' "$host" "$udp_seg" "$PORT" ;;
+            *)   # 同端口双栈：地址族受限时不能用紧凑形 HOST:PORT，必须写显式载体路径
+                 if [[ -n "${TCP_FAMILY:-}" || -n "${UDP_FAMILY:-}" ]]; then
+                     printf '%s/%s:%s/%s:%s' "$host" "$tcp_seg" "$PORT" "$udp_seg" "$PORT"
+                 else
+                     printf '%s:%s' "$host" "$PORT"
+                 fi ;;
         esac
     fi
 }
@@ -414,12 +485,15 @@ build_vector_info() {
     carrier="$VECTOR_CARRIER"
     if [[ "$carrier" == "udp" ]]; then
         port="$(udp_port)"
+        carrier="udp${UDP_FAMILY:-}"
     else
         port="$(tcp_port)"
-        carrier="tcp"
+        carrier="tcp${TCP_FAMILY:-}"
     fi
 
     query="in=$(encode_socks "$VECTOR_SOCKS")&morph=${MORPH}"
+    [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
+    [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
     local trust_query
     if trust_query="$(append_trust_params "$query")"; then
         query="$trust_query"
@@ -445,13 +519,18 @@ build_egress_info() {
     port="$(udp_port)"
 
     query="morph=${MORPH}"
+    if [[ -n "${EGRESS_DIAL:-}" && "$EGRESS_DIAL" != "auto" ]]; then
+        query="${query}&dial=$(urlencode "$EGRESS_DIAL")"
+    fi
+    [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
+    [[ -n "$ETAR" && "$ETAR" != "0" ]] && query="${query}&etar=${ETAR}"
     local trust_query
     if trust_query="$(append_trust_params "$query")"; then
         query="$trust_query"
     else
         warn "未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用菜单 5 重新生成）"
     fi
-    EGRESS_URL="egress://${SHARED_KEY}@${host_part}/udp:${port}?${query}"
+    EGRESS_URL="egress://${SHARED_KEY}@${host_part}/udp${UDP_FAMILY:-}:${port}?${query}"
 }
 
 # 供 probe 使用的 Vector URL（不需要 in=）
@@ -463,8 +542,9 @@ build_probe_vector_url() {
     carrier="${VECTOR_CARRIER:-tcp}"
     if [[ "$carrier" == "udp" ]] && has_udp; then
         port="$(udp_port)"
+        carrier="udp${UDP_FAMILY:-}"
     else
-        carrier="tcp"
+        carrier="tcp${TCP_FAMILY:-}"
         port="$(tcp_port)"
     fi
     query="morph=${MORPH}"
@@ -511,6 +591,19 @@ get_tls_fingerprint() {
 }
 
 print_tls_fingerprint() {
+    if [[ "$TLS_MODE" == "2" ]]; then
+        # tls=2：直接对证书文件算指纹（需要 pin= 的对端在证书续期后要同步更新）
+        if [[ -n "${CRT:-}" && -f "$CRT" ]]; then
+            local fp2
+            fp2="$(openssl x509 -in "$CRT" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f' || true)"
+            if [ -n "$fp2" ]; then
+                echo
+                info "当前 tls=2 证书 SHA-256 指纹（续期后会变化）："
+                echo -e "  ${GREEN}${fp2}${NC}"
+            fi
+        fi
+        return 0
+    fi
     if [[ "$TLS_MODE" != "1" ]]; then
         return 0
     fi
@@ -683,27 +776,51 @@ check_domain_dns() {
     return 0
 }
 
-# 发布包 SHA256 机会性校验：仓库若提供校验文件则必校验通过，否则告警跳过（不阻断）
+# 发布包 SHA256 校验（v3 修订：改为“能取到官方校验值就必须通过”）：
+# 1) 首选 GitHub Release API 返回的资产 digest（sha256:...，官方发布即带，所有版本可查）；
+# 2) 兜底仓库校验文件——旧实现用 sha256sum -c 按校验文件里的原名找文件，
+#    而下载到本地的文件名是 nowhere.tar.gz，永远对不上（且上游根本未提供校验文件，旧逻辑恒跳过）；
+#    新实现提取哈希字段与本地实算值直接比对，不依赖文件名；
+# 3) 两者都取不到时才告警跳过。
 verify_release_checksum() {
-    local tag="$1" workdir="$2" sumfile url entry
+    local tag="$1" workdir="$2"
+    local tarball="${workdir}/nowhere.tar.gz"
+    [ -f "$tarball" ] || { warn "校验时找不到已下载的安装包"; return 1; }
+    local actual
+    actual="$(sha256sum "$tarball" | awk '{print $1}')"
+
+    local digest=""
+    digest="$(curl -fsS --max-time 20 "https://api.github.com/repos/${REPO}/releases/tags/${tag}" 2>/dev/null \
+        | BIN_NAME="$BIN_NAME" python3 -c 'import json,os,sys
+try: data = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for a in data.get("assets", []):
+    if a.get("name") == os.environ.get("BIN_NAME"):
+        print((a.get("digest") or "").removeprefix("sha256:"))
+        break' 2>/dev/null || true)"
+    if [ -n "$digest" ]; then
+        if [ "$digest" = "$actual" ]; then
+            success "SHA256 校验通过（GitHub 官方资产 digest）"
+            return 0
+        fi
+        warn "SHA256 校验失败：官方 digest=${digest}，本地实算=${actual}，安装包可能被篡改或下载损坏"
+        return 1
+    fi
+
+    local sumfile url expected
     for sumfile in "SHA256SUMS" "sha256sums.txt" "checksums.txt"; do
         url="https://github.com/${REPO}/releases/download/${tag}/${sumfile}"
         curl -fsSL --max-time 15 -o "${workdir}/${sumfile}" "$url" 2>/dev/null || continue
-        entry="$(grep "nowhere-${ARCH_NAME}-unknown-linux-${LIBC}.tar.gz" "${workdir}/${sumfile}" | head -1 || true)"
-        if [ -z "$entry" ]; then
-            warn "校验文件 ${sumfile} 中没有本架构条目，跳过校验"
+        expected="$(grep "${BIN_NAME}" "${workdir}/${sumfile}" 2>/dev/null | head -1 | awk '{print $1}' || true)"
+        [ -n "$expected" ] || continue
+        if [ "$expected" = "$actual" ]; then
+            success "SHA256 校验通过（${sumfile}）"
             return 0
         fi
-        info "正在用 ${sumfile} 校验安装包..."
-        if echo "$entry" | (cd "$workdir" && sha256sum -c - >/dev/null 2>&1); then
-            success "SHA256 校验通过"
-            return 0
-        else
-            warn "SHA256 校验失败：安装包可能被篡改或下载损坏"
-            return 1
-        fi
+        warn "SHA256 校验失败（${sumfile}）：期望 ${expected}，实算 ${actual}"
+        return 1
     done
-    warn "该版本未提供可识别的校验文件，跳过校验（本次经 HTTPS 直连 GitHub 下载）"
+    warn "无法取得官方校验值（API digest 与校验文件均不可用），跳过校验（本次经 HTTPS 直连 GitHub 下载）"
     return 0
 }
 
@@ -733,7 +850,7 @@ HOOKEOF
     fi
 
     echo ""
-    read -p "是否立即做一次续期演练（certbot renew --dry-run，不消耗 LE 配额）？[Y/n]: " DRYRUN
+    read -rp "是否立即做一次续期演练（certbot renew --dry-run，不消耗 LE 配额）？[Y/n]: " DRYRUN
     if [[ ! "${DRYRUN:-y}" =~ ^[Nn]$ ]]; then
         info "演练中（约需 30-90 秒）..."
         if certbot renew --dry-run 2>&1 | tail -5; then
@@ -763,9 +880,10 @@ show_menu() {
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
-    echo "║         已适配 v3.0.0 / NW3 · Portal + Vector + Egress       ║"
+    echo "║         已适配 v3.0.1 / NW3 · Portal + Vector + Egress       ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
+    echo -e "  管理脚本版本: ${SCRIPT_VERSION}（目标协议线 NW3，已适配 Nowhere v3.0.1）"
     echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
     echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
     echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
@@ -773,7 +891,7 @@ show_menu() {
     echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
     echo -e "  ${BOLD}6)${NC} 查看服务状态（含 nowhere status）"
     echo -e "  ${BOLD}7)${NC} 查看实时日志"
-    echo -e "  ${BOLD}8)${NC} 查看自签证书指纹（tls=1）"
+    echo -e "  ${BOLD}8)${NC} 查看证书指纹（tls=1 自签 / tls=2 文件证书）"
     echo -e "  ${BOLD}9)${NC} 重启服务"
     echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
     echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
@@ -788,7 +906,7 @@ show_menu() {
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
         divider
     fi
-    read -p "请选择操作 [0-16]: " MENU_CHOICE
+    read -rp "请选择操作 [0-16]: " MENU_CHOICE
 }
 
 do_install() {
@@ -799,7 +917,7 @@ do_install() {
     echo "  2) Let's Encrypt HTTP-01 - 需要开放 80 端口（自动续期）"
     echo "  3) Let's Encrypt DNS-01 通用 - 支持多种 DNS 服务商（自动续期）"
     echo "  4) Cloudflare DNS-01 - 需要 CF API Key（自动续期，推荐）"
-    read -p "请选择 [1/2/3/4，默认4]: " CERT_CHOICE
+    read -rp "请选择 [1/2/3/4，默认4]: " CERT_CHOICE
     CERT_CHOICE=${CERT_CHOICE:-4}
 
     case $CERT_CHOICE in
@@ -820,7 +938,7 @@ do_install() {
 
     if [ "$TLS_MODE" = "2" ]; then
         while true; do
-            read -p "请输入域名（如: nhk.example.com）: " DOMAIN
+            read -rp "请输入域名（如: nhk.example.com）: " DOMAIN
             DOMAIN=$(echo "$DOMAIN" | tr -d ' \r\n')
             [[ -z "$DOMAIN" ]] && { echo -e "${RED}域名不能为空${NC}"; continue; }
             [[ "$DOMAIN" != *.* ]] && { echo -e "${RED}域名格式不正确${NC}"; continue; }
@@ -830,13 +948,13 @@ do_install() {
     else
         info "自签模式无需域名，将自动探测公网 IP 作为客户端连接地址"
         DETECTED_IP="$(detect_public_host)"
-        read -p "公网 IP/域名（用于 Anywhere/Vector/Egress 连接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
+        read -rp "公网 IP/域名（用于 Anywhere/Vector/Egress 连接，回车使用探测值 ${DETECTED_IP}）: " PUBLIC_HOST
         PUBLIC_HOST=${PUBLIC_HOST:-$DETECTED_IP}
         DOMAIN="$PUBLIC_HOST"
     fi
 
     while true; do
-        read -p "请输入邮箱（用于证书申请/找回）: " EMAIL
+        read -rp "请输入邮箱（用于证书申请/找回）: " EMAIL
         EMAIL=$(echo "$EMAIL" | tr -d ' \r\n')
         [[ "$EMAIL" != *@*.* ]] && { echo -e "${RED}邮箱格式不正确${NC}"; continue; }
         break
@@ -847,31 +965,31 @@ do_install() {
         echo -e "${BOLD}Cloudflare 认证方式：${NC}"
         echo "  1) Global API Key"
         echo "  2) API Token"
-        read -p "选择 [1/2，默认1]: " CF_AUTH_TYPE
+        read -rp "选择 [1/2，默认1]: " CF_AUTH_TYPE
         CF_AUTH_TYPE=${CF_AUTH_TYPE:-1}
         if [ "$CF_AUTH_TYPE" = "1" ]; then
-            read -p "Cloudflare Email: " CF_EMAIL
-            read -p "Cloudflare Global API Key: " CF_API_KEY
+            read -rp "Cloudflare Email: " CF_EMAIL
+            read -rsp "Cloudflare Global API Key（输入不回显）: " CF_API_KEY; echo
         else
-            read -p "Cloudflare API Token: " CF_TOKEN
+            read -rsp "Cloudflare API Token（输入不回显）: " CF_TOKEN; echo
         fi
     elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
         echo ""
         echo -e "${BOLD}DNS 服务商：${NC}"
         echo "  1) Cloudflare  2) DNSPod  3) 阿里云  4) 其他/手动"
-        read -p "选择 [1-4，默认1]: " DNS_PROVIDER
+        read -rp "选择 [1-4，默认1]: " DNS_PROVIDER
         DNS_PROVIDER=${DNS_PROVIDER:-1}
         case $DNS_PROVIDER in
-            1) read -p "Cloudflare Email: " CF_EMAIL
-               read -p "Cloudflare API Key: " CF_API_KEY
+            1) read -rp "Cloudflare Email: " CF_EMAIL
+               read -rsp "Cloudflare API Key（输入不回显）: " CF_API_KEY; echo
                export CF_Email="${CF_EMAIL}" CF_Key="${CF_API_KEY}"
                DNS_API="dns_cf" ;;
-            2) read -p "DNSPod ID: " DNSPOD_ID
-               read -p "DNSPod Token: " DNSPOD_TOKEN
+            2) read -rp "DNSPod ID: " DNSPOD_ID
+               read -rsp "DNSPod Token（输入不回显）: " DNSPOD_TOKEN; echo
                export DP_Id="${DNSPOD_ID}" DP_Key="${DNSPOD_TOKEN}"
                DNS_API="dns_dp" ;;
-            3) read -p "阿里云 AccessKey ID: " ALI_ID
-               read -p "阿里云 AccessKey Secret: " ALI_SECRET
+            3) read -rp "阿里云 AccessKey ID: " ALI_ID
+               read -rsp "阿里云 AccessKey Secret（输入不回显）: " ALI_SECRET; echo
                export Ali_Key="${ALI_ID}" Ali_Secret="${ALI_SECRET}"
                DNS_API="dns_ali" ;;
             *) warn "「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3"; DNS_API="unsupported" ;;
@@ -883,7 +1001,7 @@ do_install() {
     echo -e "${BOLD}端口模式（v3 端点路径语法）：${NC}"
     echo "  1) TLS 与 QUIC 共用同一端口，如 *:443（推荐）"
     echo "  2) TLS 与 QUIC 分开端口，如 */tcp:2000/udp:2001"
-    read -p "选择 [1/2，默认1]: " PORT_MODE_CHOICE
+    read -rp "选择 [1/2，默认1]: " PORT_MODE_CHOICE
     case ${PORT_MODE_CHOICE:-1} in
         2) PORT_MODE="split" ;;
         *) PORT_MODE="same" ;;
@@ -891,10 +1009,10 @@ do_install() {
 
     if [ "$PORT_MODE" = "split" ]; then
         NET="mix"
-        read -p "TLS/TCP 端口（回车默认2000）: " TCP_PORT
+        read -rp "TLS/TCP 端口（回车默认2000）: " TCP_PORT
         TCP_PORT=${TCP_PORT:-2000}
         validate_port "$TCP_PORT" || { warn "端口不合法，重置为2000"; TCP_PORT=2000; }
-        read -p "QUIC/UDP 端口（回车默认2001）: " UDP_PORT
+        read -rp "QUIC/UDP 端口（回车默认2001）: " UDP_PORT
         UDP_PORT=${UDP_PORT:-2001}
         validate_port "$UDP_PORT" || { warn "端口不合法，重置为2001"; UDP_PORT=2001; }
         if [ "$TCP_PORT" = "$UDP_PORT" ]; then
@@ -903,7 +1021,7 @@ do_install() {
         fi
         PORT="$TCP_PORT"
     else
-        read -p "监听端口（回车默认443）: " PORT
+        read -rp "监听端口（回车默认443）: " PORT
         PORT=${PORT:-443}
         validate_port "$PORT" || { warn "端口不合法，重置为443"; PORT=443; }
         TCP_PORT="$PORT"
@@ -914,13 +1032,26 @@ do_install() {
         echo "  1) mix - TLS/TCP + QUIC/UDP 双栈（HOST:PORT，推荐）"
         echo "  2) tcp - 仅 TLS/TCP（HOST/tcp:PORT）"
         echo "  3) udp - 仅 QUIC/UDP（HOST/udp:PORT）"
-        read -p "选择 [1/2/3，默认1]: " NET_CHOICE
+        read -rp "选择 [1/2/3，默认1]: " NET_CHOICE
         case ${NET_CHOICE:-1} in
             1) NET="mix" ;; 2) NET="tcp" ;; 3) NET="udp" ;; *) NET="mix" ;;
         esac
     fi
 
-    read -p "监听地址（回车= * 通配，全监听；也可填具体 IP）: " LISTEN_HOST
+    TCP_FAMILY=""; UDP_FAMILY=""
+    read -rp "是否限制监听地址族？（默认不限；IPv6 未真正开通的 VPS 可选仅 IPv4）[y/N]: " FAM_CHOICE
+    if [[ "$FAM_CHOICE" =~ ^[Yy]$ ]]; then
+        if has_tcp; then
+            read -rp "  TCP 地址族 [4=仅IPv4 / 6=仅IPv6 / 回车=不限]: " TCP_FAMILY_IN
+            case "$TCP_FAMILY_IN" in 4) TCP_FAMILY="4" ;; 6) TCP_FAMILY="6" ;; *) TCP_FAMILY="" ;; esac
+        fi
+        if has_udp; then
+            read -rp "  UDP 地址族 [4=仅IPv4 / 6=仅IPv6 / 回车=不限]: " UDP_FAMILY_IN
+            case "$UDP_FAMILY_IN" in 4) UDP_FAMILY="4" ;; 6) UDP_FAMILY="6" ;; *) UDP_FAMILY="" ;; esac
+        fi
+    fi
+
+    read -rp "监听地址（回车= * 通配，全监听；也可填具体 IP）: " LISTEN_HOST
     LISTEN_HOST=${LISTEN_HOST:-}
     [[ "$LISTEN_HOST" == "*" ]] && LISTEN_HOST="*"
 
@@ -929,7 +1060,7 @@ do_install() {
 
     # v3 密钥必须是恰好 32 位小写十六进制，旧任意字符串密钥会被直接拒绝
     while true; do
-        read -p "共享密钥 Shared Key（回车自动生成 32 位十六进制）: " SHARED_KEY
+        read -rsp "共享密钥 Shared Key（输入不回显，回车自动生成 32 位十六进制）: " SHARED_KEY; echo
         if [ -z "$SHARED_KEY" ]; then
             SHARED_KEY="$(gen_key)"
             info "已生成密钥: ${SHARED_KEY}"
@@ -944,8 +1075,23 @@ do_install() {
 
     echo ""
     echo -e "${BOLD}Morph 流量乱形${NC}（${YELLOW}v3 默认开启 morph=1；仅做流量形态混淆，不提供额外加密；两端必须一致，没有协商/回退${NC}）："
-    read -p "是否开启 [Y/n]: " MORPH_CHOICE
+    read -rp "是否开启 [Y/n]: " MORPH_CHOICE
     if [[ "$MORPH_CHOICE" =~ ^[Nn]$ ]]; then MORPH="0"; else MORPH="$DEFAULT_MORPH"; fi
+
+    MORPH_TCP_PRELUDE="fade"
+    if [ "$MORPH" = "1" ]; then
+        echo ""
+        echo -e "${BOLD}Morph TCP Prelude 策略${NC}（${YELLOW}NOW_MORPH_TCP_PRELUDE；v3.0.1 新默认 fade。仅决定本机作为发起端时的前导字节分布，接收端三种通吃、两端无需一致、不进分享链接${NC}）："
+        echo "  1) fade  - ASCII→低7位→全8位渐变（v3.0.1 默认，推荐）"
+        echo "  2) full8 - 全程全 8 位随机（v3.0.0 的默认行为）"
+        echo "  3) low7  - 全程低 7 位随机"
+        read -rp "选择 [1/2/3，默认1]: " PRELUDE_CHOICE
+        case ${PRELUDE_CHOICE:-1} in
+            2) MORPH_TCP_PRELUDE="full8" ;;
+            3) MORPH_TCP_PRELUDE="low7" ;;
+            *) MORPH_TCP_PRELUDE="fade" ;;
+        esac
+    fi
 
     echo ""
     echo -e "${BOLD}Portal 出口 out=（Portal 固定出口，运行期间不可变）：${NC}"
@@ -953,7 +1099,7 @@ do_install() {
     echo "  2) SOCKS5 上游 - 经一层 SOCKS5 代理出站（链式代理）"
     if has_udp; then
         echo "  3) egress - 远程 Egress 出口（目标解析/拨号在另一台主动回连的机器上，该机无需开放入站端口）"
-        read -p "选择 [1/2/3，默认1]: " OUT_CHOICE
+        read -rp "选择 [1/2/3，默认1]: " OUT_CHOICE
         case ${OUT_CHOICE:-1} in
             2) OUT_TYPE="socks" ;;
             3) OUT_TYPE="egress" ;;
@@ -961,7 +1107,7 @@ do_install() {
         esac
     else
         warn "当前为纯 TCP 模式，没有 QUIC 监听，out=egress 不可用（Egress 只能走 QUIC 注册）"
-        read -p "选择 [1/2，默认1]: " OUT_CHOICE
+        read -rp "选择 [1/2，默认1]: " OUT_CHOICE
         case ${OUT_CHOICE:-1} in
             2) OUT_TYPE="socks" ;;
             *) OUT_TYPE="direct" ;;
@@ -970,7 +1116,7 @@ do_install() {
 
     SOCKS="none"
     if [ "$OUT_TYPE" = "socks" ]; then
-        read -p "SOCKS5 地址，格式 host:port 或 user:pass@host:port: " SOCKS
+        read -rsp "SOCKS5 地址，格式 user:pass@host:port（输入不回显）: " SOCKS; echo
         SOCKS=${SOCKS:-none}
         validate_socks "$SOCKS" || { warn "SOCKS5 格式不合法，已重置为 none 并改回 direct"; SOCKS="none"; OUT_TYPE="direct"; }
     fi
@@ -980,38 +1126,41 @@ do_install() {
         info "out=egress 时 Portal 不能再设置 dial/dial4/dial6（与官方约束一致），目标源地址请在 Egress 端配置"
     else
         echo ""
-        read -p "出站源 IP dial（回车默认 auto；填 IP 会限定地址族，绑定失败不回退）: " DIAL
+        read -rp "出站源 IP dial（回车默认 auto；填 IP 会限定地址族，绑定失败不回退）: " DIAL
         DIAL=${DIAL:-$DEFAULT_DIAL}
-        read -p "是否改用 dial4/dial6 分别绑定 IPv4/IPv6 源地址？[y/N]: " DIAL46_CHOICE
+        validate_ip_or_auto "$DIAL" any || { warn "dial 不是合法 IP 字面量，已重置为 auto"; DIAL="auto"; }
+        read -rp "是否改用 dial4/dial6 分别绑定 IPv4/IPv6 源地址？[y/N]: " DIAL46_CHOICE
         if [[ "$DIAL46_CHOICE" =~ ^[Yy]$ ]]; then
             DIAL_MODE="dual"
-            read -p "  dial4（IPv4 源地址，回车默认 auto）: " DIAL4
+            read -rp "  dial4（IPv4 源地址，回车默认 auto）: " DIAL4
             DIAL4=${DIAL4:-auto}
-            read -p "  dial6（IPv6 源地址，回车默认 auto）: " DIAL6
+            read -rp "  dial6（IPv6 源地址，回车默认 auto）: " DIAL6
             DIAL6=${DIAL6:-auto}
+            validate_ip_or_auto "$DIAL4" 4 || { warn "dial4 不是合法 IPv4 字面量，已重置为 auto"; DIAL4="auto"; }
+            validate_ip_or_auto "$DIAL6" 6 || { warn "dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto"; DIAL6="auto"; }
             DIAL="auto"
         fi
     fi
 
     echo ""
     echo -e "${BOLD}限速设置（Portal/Vector/Egress 通用语义，0=不限速）：${NC}"
-    read -p "上行限速 Mbps，Vector→目标（0=不限速）: " RATE
+    read -rp "上行限速 Mbps，Vector→目标（0=不限速）: " RATE
     RATE=${RATE:-0}
-    validate_nonneg_int "$RATE" || { warn "输入不合法，重置为0"; RATE=0; }
+    validate_rate "$RATE" || { warn "输入不合法（须为 0..2147483647 的整数），重置为0"; RATE=0; }
 
-    read -p "下行限速 Mbps，目标→Vector（0=不限速）: " ETAR
+    read -rp "下行限速 Mbps，目标→Vector（0=不限速）: " ETAR
     ETAR=${ETAR:-0}
-    validate_nonneg_int "$ETAR" || { warn "输入不合法，重置为0"; ETAR=0; }
+    validate_rate "$ETAR" || { warn "输入不合法（须为 0..2147483647 的整数），重置为0"; ETAR=0; }
 
     echo ""
     echo -e "${BOLD}本地 Vector 客户端连接信息${NC}（可选，在电脑/路由器上跑本地 SOCKS5 入口用 in=）："
-    read -p "是否生成 Vector 连接信息？[Y/n]: " GEN_VECTOR
+    read -rp "是否生成 Vector 连接信息？[Y/n]: " GEN_VECTOR
     GEN_VECTOR=${GEN_VECTOR:-y}
     if [[ "$GEN_VECTOR" =~ ^[Yy]$ ]]; then
         GENERATE_VECTOR="1"
         if has_tcp && has_udp; then
             echo "  Vector 载体（二选一，v3 一条连接只用一种载体）  1) tcp/TLS  2) udp/QUIC"
-            read -p "  选择 [1/2，默认1]: " VCARRIER_CHOICE
+            read -rp "  选择 [1/2，默认1]: " VCARRIER_CHOICE
             case ${VCARRIER_CHOICE:-1} in 2) VECTOR_CARRIER="udp" ;; *) VECTOR_CARRIER="tcp" ;; esac
         elif has_udp; then
             VECTOR_CARRIER="udp"
@@ -1020,7 +1169,7 @@ do_install() {
             VECTOR_CARRIER="tcp"
             info "  当前 Portal 仅 TLS/TCP，Vector 载体自动选 tcp"
         fi
-        read -p "  本地 SOCKS5 监听 in=（回车默认 ${DEFAULT_VECTOR_SOCKS}，可带 user:pass@）: " VECTOR_SOCKS
+        read -rp "  本地 SOCKS5 监听 in=（回车默认 ${DEFAULT_VECTOR_SOCKS}，可带 user:pass@）: " VECTOR_SOCKS
         VECTOR_SOCKS=${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}
     else
         GENERATE_VECTOR="0"
@@ -1031,10 +1180,13 @@ do_install() {
     if [ "$OUT_TYPE" = "egress" ]; then
         echo ""
         echo -e "${BOLD}远程 Egress 出口机连接信息${NC}（在出口机上运行 egress:// 主动回连本 Portal）："
-        read -p "是否生成 Egress 连接信息？[Y/n]: " GEN_EGRESS
+        read -rp "是否生成 Egress 连接信息？[Y/n]: " GEN_EGRESS
         GEN_EGRESS=${GEN_EGRESS:-y}
         if [[ "$GEN_EGRESS" =~ ^[Yy]$ ]]; then
             GENERATE_EGRESS="1"
+            read -rp "  Egress 端出站源 IP dial（在出口机上绑定目标连接源地址，回车默认 auto）: " EGRESS_DIAL
+            EGRESS_DIAL=${EGRESS_DIAL:-auto}
+            validate_ip_or_auto "$EGRESS_DIAL" any || { warn "Egress dial 不是合法 IP 字面量，已重置为 auto"; EGRESS_DIAL="auto"; }
         fi
     fi
 
@@ -1052,6 +1204,7 @@ do_install() {
     echo -e "  Portal 端点   : ${GREEN}$(build_portal_endpoint)${NC}"
     echo -e "  共享密钥      : ${GREEN}$(mask_secret "$SHARED_KEY")（32 位十六进制）${NC}"
     echo -e "  Morph 乱形    : ${GREEN}$([ "$MORPH" = "1" ] && echo "开启 morph=1（默认）" || echo "关闭 morph=0")${NC}"
+    [ "$MORPH" = "1" ] && echo -e "  Prelude 策略  : ${GREEN}${MORPH_TCP_PRELUDE}（NOW_MORPH_TCP_PRELUDE，本机发起端生效）${NC}"
     echo -e "  Portal 出口   : ${GREEN}${OUT_TYPE}$([ "$OUT_TYPE" = "socks" ] && echo " ($(display_socks "$SOCKS"))")${NC}"
     if [ "$OUT_TYPE" != "egress" ]; then
         if [ "$DIAL_MODE" = "dual" ]; then
@@ -1068,16 +1221,23 @@ do_install() {
         echo -e "  Egress出口机  : ${GREEN}生成（udp:$(udp_port)）${NC}"
     fi
     divider
-    read -p "确认安装 [y/N]: " CONFIRM
+    read -rp "确认安装 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
     CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
     KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 
+    if [ -f "$CONFIG_FILE" ]; then
+        local backup_dir="${CONFIG_DIR}.bak.$(date +%Y%m%d-%H%M%S)"
+        if cp -a "$CONFIG_DIR" "$backup_dir"; then
+            info "检测到已有配置，已备份到 ${backup_dir}（本次安装中途失败时可手动恢复）"
+        fi
+    fi
+
     step "第 5 步：安装系统依赖"
     divider
     apt-get update -qq
-    apt-get install -y -qq curl wget tar ufw socat openssl python3
+    apt-get install -y -qq curl wget tar ufw socat openssl python3 qrencode
     if [ "$TLS_MODE" = "2" ]; then
         apt-get install -y -qq certbot
         [ "$CERT_METHOD" = "cloudflare-dns" ] && apt-get install -y -qq python3-certbot-dns-cloudflare
@@ -1184,7 +1344,7 @@ CFEOF
     divider
     detect_binary
     info "正在获取最新版本号..."
-    LATEST=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
+    LATEST=$(curl -s --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     [ -z "$LATEST" ] && error "无法获取版本号，请检查网络"
     LATEST_MAJOR="$(version_major "$LATEST")"
     if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -lt 3 ]; then
@@ -1226,7 +1386,7 @@ CERT_METHOD_VALUE="${CERT_METHOD}"
 CRT_VALUE="${CRT:-}"
 KEY_PEM_VALUE="${KEY_PEM:-}"
 OUT_TYPE_VALUE="${OUT_TYPE}"
-SOCKS_VALUE="${SOCKS}"
+SOCKS_VALUE="$(dq_escape "$SOCKS")"
 DIAL_MODE_VALUE="${DIAL_MODE}"
 DIAL_VALUE="${DIAL}"
 DIAL4_VALUE="${DIAL4}"
@@ -1234,9 +1394,13 @@ DIAL6_VALUE="${DIAL6}"
 RATE_VALUE="${RATE}"
 ETAR_VALUE="${ETAR}"
 MORPH_VALUE="${MORPH}"
+MORPH_TCP_PRELUDE_VALUE="${MORPH_TCP_PRELUDE}"
+TCP_FAMILY_VALUE="${TCP_FAMILY}"
+UDP_FAMILY_VALUE="${UDP_FAMILY}"
+EGRESS_DIAL_VALUE="${EGRESS_DIAL}"
 GENERATE_VECTOR_VALUE="${GENERATE_VECTOR}"
 VECTOR_CARRIER_VALUE="${VECTOR_CARRIER}"
-VECTOR_SOCKS_VALUE="${VECTOR_SOCKS}"
+VECTOR_SOCKS_VALUE="$(dq_escape "$VECTOR_SOCKS")"
 GENERATE_EGRESS_VALUE="${GENERATE_EGRESS}"
 ENVEOF
     chmod 600 "$CONFIG_FILE"
@@ -1257,7 +1421,7 @@ ENVEOF
         warn "检测到目标端口已被其他进程占用："
         echo "$EXISTING_PROC"
         warn "如果这不是本次要替换的旧 Nowhere 实例，请先停止占用该端口的服务，否则新服务会反复崩溃重启，客户端表现为一直 timeout"
-        read -p "仍要继续安装吗？[y/N]: " PORT_CONFIRM
+        read -rp "仍要继续安装吗？[y/N]: " PORT_CONFIRM
         [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消安装"; return; }
     else
         success "目标端口空闲，可以使用"
@@ -1266,6 +1430,16 @@ ENVEOF
     step "第 10 步：配置防火墙（先于服务启动，避免中间态连不通）"
     divider
     ufw allow ssh 2>/dev/null || true
+    # 自定义 SSH 端口保护：启用 ufw 前先放行 sshd 的实际端口，否则非 22 端口会被直接锁死
+    local ssh_port_detected=""
+    ssh_port_detected="$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')"
+    if ! validate_port "${ssh_port_detected:-0}" 2>/dev/null && command -v sshd >/dev/null 2>&1; then
+        ssh_port_detected="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+    fi
+    if validate_port "${ssh_port_detected:-0}" && [ "$ssh_port_detected" != "22" ]; then
+        warn "检测到 SSH 实际端口为 ${ssh_port_detected}（非默认 22），已先放行该端口再启用防火墙"
+        ufw allow "${ssh_port_detected}/tcp" 2>/dev/null || true
+    fi
     if has_tcp; then ufw allow "$(tcp_port)/tcp" 2>/dev/null || true; fi
     if has_udp; then ufw allow "$(udp_port)/udp" 2>/dev/null || true; fi
     [ "$CERT_METHOD" = "letsencrypt-http" ] && ufw allow 80/tcp 2>/dev/null || true
@@ -1287,6 +1461,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=${CONFIG_FILE}
+Environment=NOW_MORPH_TCP_PRELUDE=${MORPH_TCP_PRELUDE}
 ExecStart=${BIN_PATH} \${NOWHERE_PORTAL}
 Restart=on-failure
 RestartSec=3
@@ -1372,7 +1547,7 @@ ${IMPORT_TCP}
 ${VECTOR_URL}
 
 启动命令：
-nowhere '${VECTOR_URL}'
+NOW_MORPH_TCP_PRELUDE=${MORPH_TCP_PRELUDE} nowhere '${VECTOR_URL}'
 $([ "$TLS_MODE" = "1" ] && echo "
 ※ 用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（菜单 5 或 pz 命令）")
 "
@@ -1406,7 +1581,7 @@ $([ "$TLS_MODE" = "1" ] && echo "※ 同 Vector，pin= 指纹随 Portal 重启�
 
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
-  Nowhere Portal 连接信息（v3.0.0 / NW3）
+  Nowhere Portal 连接信息（v3.0.1 / NW3）
   更新时间: $(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
@@ -1422,6 +1597,7 @@ ${NOWHERE_PORTAL}
   共享密钥      : ${SHARED_KEY}（32 位小写十六进制，两端必须完全一致）
   传输模式      : ${NET}（端口模式 ${PORT_MODE}）
   Morph 乱形    : $([ "$MORPH" = "1" ] && echo "开启 morph=1（v3 默认，客户端必须同步开启）" || echo "关闭 morph=0（客户端必须同步关闭）")
+  Prelude 策略  : ${MORPH_TCP_PRELUDE}（NOW_MORPH_TCP_PRELUDE，仅本机发起端生效；v3.0.1 默认 fade，接收端通吃、两端无需一致）
   TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1，靠 pin= 指纹锁定)" || echo "真实证书(tls=2，系统 CA + 主机名校验)")
   Portal 出口   : ${OUT_TYPE}
 ${udp_section}${tcp_section}${vector_section}${egress_section}
@@ -1465,6 +1641,18 @@ CONFEOF
         echo -e "${BOLD}✅ 最快导入方式（TLS/TCP）：${NC}"
         echo -e "在手机浏览器打开，自动跳转 Anywhere 导入（需 Anywhere 支持 NW3）："
         echo -e "${CYAN}${IMPORT_TCP}${NC}"
+    fi
+    if command -v qrencode >/dev/null 2>&1; then
+        if [[ -n "$UDP_LINK" ]]; then
+            echo ""
+            echo -e "${BOLD}📱 扫码导入 Anywhere（QUIC/UDP）：${NC}"
+            qrencode -t ANSIUTF8 "$UDP_LINK" || true
+        fi
+        if [[ -n "$TCP_LINK" ]]; then
+            echo ""
+            echo -e "${BOLD}📱 扫码导入 Anywhere（TLS/TCP）：${NC}"
+            qrencode -t ANSIUTF8 "$TCP_LINK" || true
+        fi
     fi
     echo ""
     print_tls_fingerprint
@@ -1516,6 +1704,11 @@ load_saved_config() {
     RATE="$RATE_VALUE"
     ETAR="$ETAR_VALUE"
     MORPH="${MORPH_VALUE:-$DEFAULT_MORPH}"
+    MORPH_TCP_PRELUDE="${MORPH_TCP_PRELUDE_VALUE:-fade}"
+    case "$MORPH_TCP_PRELUDE" in fade|full8|low7) : ;; *) MORPH_TCP_PRELUDE="fade" ;; esac
+    TCP_FAMILY="${TCP_FAMILY_VALUE:-}"
+    UDP_FAMILY="${UDP_FAMILY_VALUE:-}"
+    EGRESS_DIAL="${EGRESS_DIAL_VALUE:-auto}"
     GENERATE_VECTOR="${GENERATE_VECTOR_VALUE:-0}"
     # 旧配置里存的是 VECTOR_UP/VECTOR_DOWN 双向载体，v3 Vector 只有单载体：优先取上行值
     VECTOR_CARRIER="${VECTOR_CARRIER_VALUE:-${VECTOR_UP_VALUE:-tcp}}"
@@ -1532,11 +1725,16 @@ load_saved_config() {
 do_uninstall() {
     step "卸载 Nowhere"
     divider
-    read -p "确认卸载 [y/N]: " CONFIRM
+    read -rp "确认卸载 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
     systemctl disable --now nowhere 2>/dev/null || true
     rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH"
     rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
+    read -rp "是否同时删除快捷命令 adam/zt/pz/cxpz/cq？[y/N]: " RM_SHORTCUTS
+    if [[ "$RM_SHORTCUTS" =~ ^[Yy]$ ]]; then
+        rm -f /usr/local/bin/adam /usr/local/bin/zt /usr/local/bin/pz /usr/local/bin/cxpz /usr/local/bin/cq
+        info "快捷命令已删除（管理脚本副本 ${MANAGER_PATH} 已保留，如需清除请手动删除）"
+    fi
     systemctl daemon-reload
     warn "已保留 ${CONFIG_DIR}（含密钥配置），如需彻底清除请手动: rm -rf ${CONFIG_DIR}"
     success "Nowhere 已卸载"
@@ -1550,7 +1748,7 @@ do_update() {
     info "当前版本: ${current}"
     info "正在获取最新版本号..."
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
+    latest=$(curl -s --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     [ -z "$latest" ] && error "无法获取版本号"
     info "最新版本: ${latest}"
 
@@ -1565,7 +1763,7 @@ do_update() {
     if [[ -n "$cur_major" && -n "$latest_major" && "$cur_major" != "$latest_major" ]]; then
         warn "这是跨协议代升级（NW${cur_major} -> NW${latest_major}）：新旧对端不互通，Vector/Egress/Anywhere 必须一起升级"
         warn "且 v3 的密钥格式、URL 参数与旧版不兼容，仅换二进制不重配大概率启动失败或连不上"
-        read -p "确认跨代升级 [y/N]: " MAJOR_CONFIRM
+        read -rp "确认跨代升级 [y/N]: " MAJOR_CONFIRM
         [[ ! "$MAJOR_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
     fi
 
@@ -1591,7 +1789,7 @@ do_show_version() {
     echo ""
     info "正在查询 GitHub 最新版本..."
     local latest
-    latest=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
+    latest=$(curl -s --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
     if [ -n "$latest" ]; then
         if [ "$current" = "$latest" ]; then
             success "已是最新版本 (${latest})"
@@ -1614,7 +1812,7 @@ do_select_version() {
     local tags=()
     while IFS= read -r line; do
         tags+=("$line")
-    done < <(curl -s "https://api.github.com/repos/${REPO}/releases?per_page=20" | grep '"tag_name"' | cut -d'"' -f4)
+    done < <(curl -s --max-time 20 "https://api.github.com/repos/${REPO}/releases?per_page=20" | grep '"tag_name"' | cut -d'"' -f4)
 
     if [ "${#tags[@]}" -eq 0 ]; then
         error "未能获取版本列表，请检查网络"
@@ -1632,7 +1830,7 @@ do_select_version() {
     done
     echo -e "  ${BOLD}0)${NC} 取消"
     divider
-    read -p "选择要切换到的版本序号: " VER_CHOICE
+    read -rp "选择要切换到的版本序号: " VER_CHOICE
 
     [[ "$VER_CHOICE" == "0" || -z "$VER_CHOICE" ]] && { info "已取消"; return; }
     if ! [[ "$VER_CHOICE" =~ ^[0-9]+$ ]] || [ "$VER_CHOICE" -lt 1 ] || [ "$VER_CHOICE" -gt "${#tags[@]}" ]; then
@@ -1646,7 +1844,7 @@ do_select_version() {
         return
     fi
 
-    read -p "确认切换到 ${target} [y/N]: " CONFIRM
+    read -rp "确认切换到 ${target} [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
     install_nowhere_version "$target" || error "切换失败，服务可能未正常启动，请检查日志"
@@ -1667,7 +1865,7 @@ do_rollback() {
     echo -e "  当前版本 : ${GREEN}${current}${NC}"
     echo -e "  回退目标 : ${YELLOW}${previous:-未知版本（本地备份二进制）}${NC}"
     divider
-    read -p "确认回退 [y/N]: " CONFIRM
+    read -rp "确认回退 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
 
     local tmp_bin="/tmp/nowhere.swap"
@@ -1700,7 +1898,7 @@ do_reconfig() {
     divider
     warn "将重新走一遍安装向导并覆盖当前配置"
     warn "注意：v3 密钥与 URL 语法已变更，重新配置后务必把新的 Vector/Egress/Anywhere 连接信息同步到所有对端，旧链接无法继续使用"
-    read -p "确认继续 [y/N]: " CONFIRM
+    read -rp "确认继续 [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && return
     do_install
 }
@@ -1779,10 +1977,11 @@ do_probe() {
     is_valid_key "$SHARED_KEY" || error "当前密钥不符合 v3 规范，无法探测，请先用菜单 4 重新配置"
     local vector_url target
     vector_url="$(build_probe_vector_url)"
-    read -p "目标地址 host:port（回车默认 example.com:443）: " target
+    read -rp "目标地址 host:port（回车默认 example.com:443）: " target
     target=${target:-example.com:443}
-    info "Vector: ${vector_url}"
+    info "Vector: ${vector_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
     info "Target: ${target}"
+    export NOW_MORPH_TCP_PRELUDE="${MORPH_TCP_PRELUDE:-fade}"
     "$BIN_PATH" probe "$vector_url" "$target" || warn "探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、Egress 离线、对端 Morph/pin/密钥不一致、目标本身不可达"
 }
 
@@ -1835,7 +2034,7 @@ do_cert_status() {
             ;;
     esac
     echo ""
-    read -p "是否立即手动触发一次续期检查？（仅当证书满足续期条件时才会真的续签）[y/N]: " DO_RENEW
+    read -rp "是否立即手动触发一次续期检查？（仅当证书满足续期条件时才会真的续签）[y/N]: " DO_RENEW
     if [[ "$DO_RENEW" =~ ^[Yy]$ ]]; then
         case "$CERT_METHOD" in
             letsencrypt-http|cloudflare-dns)
