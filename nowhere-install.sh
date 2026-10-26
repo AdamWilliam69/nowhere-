@@ -3,8 +3,8 @@ set -e
 set -o pipefail
 
 # ══════════════════════════════════════════════════════════════
-#   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.0.1 / NW3）
-#   已按 v3.0.1 官方文档 + 真实二进制实测重写（协议线仍为 NW3，配置与 v3.0.0 兼容），v1.5.x 旧配置不兼容：
+#   Adam Nowhere Portal 一键管理脚本（适配 Nowhere v3.1.0 / NW3）
+#   已按 v3.1.0 官方文档 + 真实二进制实测重写（协议线仍为 NW3，配置与 v3.0.x 兼容），v1.5.x 旧配置不兼容：
 #     - 协议已换 NW3（ALPN 固定 nw3），v1/v2 的 Portal/Vector 无法
 #       与 v3 互通，升级必须 Portal、Vector、Anywhere 等对端一起升级
 #     - 共享密钥必须是恰好 32 位小写十六进制字符（nowhere generate-key），
@@ -49,6 +49,27 @@ set -o pipefail
 #       防火墙启用前先放行实际 SSH 端口（防自定义 SSH 端口被 ufw 锁死）；env 写出对 SOCKS 凭证转义；
 #     - 体验：重装前自动备份旧配置目录；连接信息可输出二维码（qrencode）；tls=2 也可查看证书指纹；
 #       卸载时可一并清理快捷命令；GitHub API 调用统一加超时。
+#   ── 脚本 v3.1 修订（2026-10-26，跟随 Nowhere v3.1.0，协议线仍为 NW3）──
+#     - 版本文案：头部/菜单/连接信息由 v3.0.1 更新为 v3.1.0；v3.1.0 官方升级说明为“无需迁移，
+#       URL/密钥/证书继续有效，3.0.x 与 3.1.0 可混跑”，NOW_MORPH_TCP_PRELUDE 仍为 fade 默认，
+#       故旧配置无需重建，菜单 3 更新二进制即可升到 v3.1.0；
+#     - v3.1.0 过渡警告：3.1.0 仍接受传统 Morph Prelude，但官方说明该兼容为过渡行为，
+#       未来版本将强制 Authenticated Prelude，届时旧 3.0.x 对端会断连，故对端也应尽早同升；
+#     - Egress：Portal 生成的 egress:// 补 dial4/dial6 双栈绑定（与 Portal dial 互斥规则一致：
+#       dial 与 dial4/dial6 二选一，只影响 Egress 到目标的出站源地址，不影响回连 Portal 的 QUIC）；
+#       新增菜单 17「本机安装为 Egress 服务」，可在出口机上直接装成 systemd 服务，无需手动跑连接串；
+#     - 指纹兜底：get_tls_fingerprint 在纯 UDP（无 TCP 监听）或 TCP 探测失败时，改从当前
+#       nowhere 主进程（systemctl MainPID）的 journalctl 启动日志提取指纹，兼容无冒号与冒号分隔
+#       两种打印形式；取不到时仍返回失败，不伪造、不取旧进程的过期指纹（MainPID 优先，-u 兜底取最后一条）；
+#     - crt=/key= 编码：build_portal_url 改用 encode_path（保留 /，只编码空格/&/#/% 等会切断 URL
+#       的字符），默认 Let's Encrypt 路径输出与旧版完全一致，特殊路径不再被 & 截断；
+#     - Vector 紧凑语法说明：官方端点表规定 HOST:PORT 对 Vector 只代表 TLS（对 Egress 只代表 QUIC），
+#       故本脚本继续显式写 /tcp: 或 /udp:，不把 udp 载体误写成紧凑形；同端口双栈 Portal 用紧凑形
+#       的 Vector 等价于 tcp 载体，已在注释中说明，不做破坏性改动；
+#     - 管道安装自救：install_shortcuts 在 bash <(curl ...) 等无法定位自身文件时，
+#       改从 SCRIPT_URL 重新下载一份到管理脚本路径再建快捷命令，并校验下载内容；前提是新版
+#       已先推送到该 raw 地址，否则下载到的仍是旧版（此时会打印警告）。这使简短安装命令可用，
+#       但交互向导仍必须用 bash <(...) 而不能用 curl | bash（后者会把脚本本身当作 read 的输入）。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -73,11 +94,17 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="3.0"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
-MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1默认)/full8/low7，仅影响本机发起的 Morph TCP 连接
+SCRIPT_VERSION="3.1"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
 UDP_FAMILY=""             # 同上 -> udp/udp4/udp6
 EGRESS_DIAL="auto"        # Egress 端目标出站源地址（在出口机上生效）
+EGRESS_DIAL_MODE="single"   # Egress dial 模式：single 用 dial=，dual 用 dial4=/dial6=，二选一
+EGRESS_DIAL4="auto"       # Egress 端 IPv4 目标出站源地址
+EGRESS_DIAL6="auto"       # Egress 端 IPv6 目标出站源地址
+SCRIPT_URL="https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/nowhere-install.sh"
+EGRESS_CONFIG_FILE="${CONFIG_DIR}/egress.env"
+EGRESS_CONFIG_TXT="${CONFIG_DIR}/egress-config.txt"
 
 info()    { echo -e "${BLUE}[信息]${NC} $1"; }
 success() { echo -e "${GREEN}[成功]${NC} $1"; }
@@ -175,7 +202,7 @@ install_nowhere_version() {
 
     if systemctl is-active --quiet nowhere; then
         success "已切换到 ${target_tag}: $(${BIN_PATH} --version 2>&1 | head -1)"
-        info "提示：v3.0.1 起 NOW_MORPH_TCP_PRELUDE 未显式设置时默认 fade（v3.0.0 为 full8）；接收端兼容全部策略，密钥与 URL 无需迁移"
+        info "提示：v3.0.1 起 NOW_MORPH_TCP_PRELUDE 未显式设置时默认 fade（v3.0.0 为 full8），v3.1.0 仍默认 fade；接收端兼容全部策略，密钥与 URL 无需迁移"
         return 0
     fi
 
@@ -206,6 +233,15 @@ urlencode() {
     local input="${1:-}"
     python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$input" 2>/dev/null \
         || echo -n "$input" | od -An -tx1 | tr ' ' % | tr -d '\n'
+}
+
+# 编码文件路径（crt=/key= 的值）：保留 / 不编码，只编码空格、&、#、% 等会切断 URL 查询串
+# 的字符。默认 Let's Encrypt 路径不含这些字符，输出与旧版逐字相同；特殊路径不再被 & 截断。
+# 注意：不能用 urlencode（safe=""）把 / 编成 %2F，那会改变路径原意。
+encode_path() {
+    local input="${1:-}"
+    python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$input" 2>/dev/null \
+        || printf '%s' "$input"
 }
 
 # 编码 SOCKS 地址（out=/in= 的值）：v3 按「最后一个 @」切主机、再按「第一个原文 :」切用户名/密码
@@ -414,7 +450,7 @@ build_portal_url() {
     endpoint="$(build_portal_endpoint)"
     query="tls=${TLS_MODE}"
     if [[ "$TLS_MODE" == "2" ]]; then
-        query="${query}&crt=${CRT}&key=${KEY_PEM}"
+        query="${query}&crt=$(encode_path "$CRT")&key=$(encode_path "$KEY_PEM")"
     fi
     query="${query}&morph=${MORPH}"
     case "$OUT_TYPE" in
@@ -470,6 +506,9 @@ build_client_links() {
 }
 
 # 本地 Vector 客户端：vector://KEY@HOST/tcp:PORT 或 /udp:PORT，二选一载体 + in=本地SOCKS5
+# 注意：官方端点表规定 HOST:PORT 紧凑形对 Vector 只代表 TLS（对 Egress 只代表 QUIC），
+# 不是“双栈自动选”，所以这里不把 udp 载体写成紧凑形；同端口双栈 Portal 的紧凑形 Vector
+# 等价于 tcp 载体，显式写法与之一致且更明确。
 build_vector_info() {
     VECTOR_URL=""
     [ "$GENERATE_VECTOR" != "1" ] && return 0
@@ -519,7 +558,11 @@ build_egress_info() {
     port="$(udp_port)"
 
     query="morph=${MORPH}"
-    if [[ -n "${EGRESS_DIAL:-}" && "$EGRESS_DIAL" != "auto" ]]; then
+    # dial 与 dial4/dial6 互斥（官方配置表）：dual 时只出 dial4/dial6，single 时只出 dial
+    if [[ "${EGRESS_DIAL_MODE:-single}" == "dual" ]]; then
+        [[ -n "${EGRESS_DIAL4:-}" && "$EGRESS_DIAL4" != "auto" ]] && query="${query}&dial4=$(urlencode "$EGRESS_DIAL4")"
+        [[ -n "${EGRESS_DIAL6:-}" && "$EGRESS_DIAL6" != "auto" ]] && query="${query}&dial6=$(urlencode "$EGRESS_DIAL6")"
+    elif [[ -n "${EGRESS_DIAL:-}" && "$EGRESS_DIAL" != "auto" ]]; then
         query="${query}&dial=$(urlencode "$EGRESS_DIAL")"
     fi
     [[ -n "$RATE" && "$RATE" != "0" ]] && query="${query}&rate=${RATE}"
@@ -555,12 +598,50 @@ build_probe_vector_url() {
     printf 'vector://%s@%s/%s:%s?%s' "$SHARED_KEY" "$host_part" "$carrier" "$port" "$query"
 }
 
+# 从当前 nowhere 服务的启动日志提取指纹（供纯 UDP / TCP 探测失败时兜底）。
+# 关键点：优先用 systemctl 的 MainPID 过滤，只取当前进程的日志，避免取到上一次重启
+# （tls=1 指纹每次重启都会变）的过期指纹；MainPID 取不到时才用 -u 取最后一条。
+# 日志里指纹可能是不带冒号的 64 位 hex，也可能是 AA:BB:... 冒号分隔形，两种都兼容，
+# 统一输出为不带冒号的小写 hex。取不到返回 1，不输出、不伪造。
+get_fingerprint_from_journal() {
+    local log fp
+    local main_pid
+    main_pid="$(systemctl show -p MainPID --value nowhere 2>/dev/null | tr -d ' \r\n' || true)"
+    if [[ "$main_pid" =~ ^[0-9]+$ ]] && [ "$main_pid" != "0" ]; then
+        log="$(journalctl -u nowhere _PID="$main_pid" --no-pager 2>/dev/null || true)"
+        fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '[0-9a-fA-F]{64}' | tail -1 | tr 'A-F' 'a-f' || true)"
+        if [ -z "$fp" ]; then
+            fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}' | tail -1 | tr -d ':' | tr 'A-F' 'a-f' || true)"
+        fi
+        if [ -n "$fp" ]; then
+            printf '%s' "$fp"
+            return 0
+        fi
+    fi
+    log="$(journalctl -u nowhere -n 500 --no-pager 2>/dev/null || true)"
+    fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '[0-9a-fA-F]{64}' | tail -1 | tr 'A-F' 'a-f' || true)"
+    if [ -z "$fp" ]; then
+        fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}' | tail -1 | tr -d ':' | tr 'A-F' 'a-f' || true)"
+    fi
+    if [ -n "$fp" ]; then
+        printf '%s' "$fp"
+        return 0
+    fi
+    return 1
+}
+
 # 纯获取指纹（64 位小写 hex，无冒号），不打印不警告，供 pin= 拼接用
-# 优先用官方 nowhere fingerprint（自动处理 Morph），回退 openssl s_client
+# 顺序：官方 nowhere fingerprint（自动处理 Morph）-> 启动日志兜底 -> openssl s_client
+# 纯 UDP 时没有 TCP/TLS 监听，第一步和第三步都不可用，只剩日志兜底。
 get_tls_fingerprint() {
     [[ "$TLS_MODE" != "1" ]] && return 1
+    local jfp
     if ! has_tcp; then
-        # fingerprint 只能走 TCP/TLS：纯 UDP Portal 没有 TLS 监听，取不到指纹
+        jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
+        if [ -n "$jfp" ]; then
+            printf '%s' "$jfp"
+            return 0
+        fi
         return 1
     fi
     local port
@@ -573,6 +654,11 @@ get_tls_fingerprint() {
             echo "$fp"
             return 0
         fi
+    fi
+    jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
+    if [ -n "$jfp" ]; then
+        printf '%s' "$jfp"
+        return 0
     fi
     local sni="${PUBLIC_HOST:-localhost}"
     local fingerprint output
@@ -608,8 +694,18 @@ print_tls_fingerprint() {
         return 0
     fi
     if ! has_tcp; then
-        warn "当前为纯 QUIC/UDP Portal，没有 TLS 监听，无法用 fingerprint 读取指纹"
-        warn "自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志的 'tls certificate fingerprint:' 一行获取"
+        # 纯 QUIC/UDP：先走日志兜底，能取到就直接打印，取不到再提示手动查日志
+        local journal_fp
+        journal_fp="$(get_tls_fingerprint 2>/dev/null || true)"
+        if [ -n "$journal_fp" ]; then
+            echo
+            info "已从当前服务启动日志读取到自签证书 SHA-256 指纹："
+            echo -e "  ${GREEN}${journal_fp}${NC}"
+            warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（菜单 5 或 pz 命令）"
+        else
+            warn "当前为纯 QUIC/UDP Portal，没有 TLS 监听，且启动日志中未找到指纹"
+            warn "自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志含 fingerprint 的一行获取"
+        fi
         return 0
     fi
     echo
@@ -661,11 +757,29 @@ install_shortcuts() {
     self_path="$(readlink -f "$0" 2>/dev/null || true)"
 
     if [ -z "$self_path" ] || [ ! -f "$self_path" ]; then
-        warn "无法定位脚本自身文件路径（可能是通过管道 bash <(curl ...) 运行）"
-        warn "这种一次性管道运行方式下，脚本内容来自匿名管道，读取一次即耗尽，无法复制自身"
-        warn "快捷命令需要脚本先以文件形式保存到磁盘再运行，例如："
-        warn "  curl -fsSL <脚本地址> -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
-        return 1
+        # 管道/进程替换运行：$0 指向 /dev/fd/63、bash 或匿名管道，无法直接复制自身。
+        # 但这不等于快捷命令装不了：从 SCRIPT_URL 重新下载一份到管理脚本路径即可。
+        # 前提：新版必须已先推送到该 raw 地址；否则下载到的是旧版，下面会打印警告。
+        info "通过管道/进程替换运行，无法直接复制自身，正在从脚本地址重新下载一份..."
+        local dl_ok=0
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --max-time 30 "$SCRIPT_URL" -o "$MANAGER_PATH" 2>/dev/null && dl_ok=1
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$MANAGER_PATH" "$SCRIPT_URL" 2>/dev/null && dl_ok=1
+        fi
+        if [ "$dl_ok" != "1" ] || [ ! -s "$MANAGER_PATH" ] || ! grep -q "Adam Nowhere" "$MANAGER_PATH" 2>/dev/null; then
+            rm -f "$MANAGER_PATH"
+            warn "重新下载脚本失败，快捷命令无法安装"
+            warn "请改用文件方式运行：curl -fsSL ${SCRIPT_URL} -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
+            return 1
+        fi
+        chmod +x "$MANAGER_PATH"
+        self_path="$MANAGER_PATH"
+        local remote_ver
+        remote_ver="$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_PATH" 2>/dev/null | cut -d'"' -f2 || true)"
+        if [ -n "${SCRIPT_VERSION:-}" ] && [ -n "$remote_ver" ] && [ "$remote_ver" != "$SCRIPT_VERSION" ]; then
+            warn "注意：下载到的脚本版本为 ${remote_ver}，与当前运行的 ${SCRIPT_VERSION} 不一致（可能新版尚未推送到 ${SCRIPT_URL}），快捷命令将指向下载到的版本"
+        fi
     fi
 
     if [ "$self_path" != "$MANAGER_PATH" ]; then
@@ -880,10 +994,10 @@ show_menu() {
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║         Adam Nowhere Portal 一键管理脚本                     ║"
-    echo "║         已适配 v3.0.1 / NW3 · Portal + Vector + Egress       ║"
+    echo "║         已适配 v3.1.0 / NW3 · Portal + Vector + Egress       ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
-    echo -e "  管理脚本版本: ${SCRIPT_VERSION}（目标协议线 NW3，已适配 Nowhere v3.0.1）"
+    echo -e "  管理脚本版本: ${SCRIPT_VERSION}（目标协议线 NW3，已适配 Nowhere v3.1.0）"
     echo -e "  ${BOLD}1)${NC} 安装 Nowhere（向导）"
     echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
     echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
@@ -900,13 +1014,14 @@ show_menu() {
     echo -e "  ${BOLD}14)${NC} 生成 v3 共享密钥（32 位十六进制）"
     echo -e "  ${BOLD}15)${NC} 连通性探测 probe（真实 TCP Flow 测试）"
     echo -e "  ${BOLD}16)${NC} 检查证书状态 / 手动续期"
+    echo -e "  ${BOLD}17)${NC} 本机安装为 Egress 服务（出口机用，systemd）"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行${NC}"
         divider
     fi
-    read -rp "请选择操作 [0-16]: " MENU_CHOICE
+    read -rp "请选择操作 [0-17]: " MENU_CHOICE
 }
 
 do_install() {
@@ -1081,8 +1196,8 @@ do_install() {
     MORPH_TCP_PRELUDE="fade"
     if [ "$MORPH" = "1" ]; then
         echo ""
-        echo -e "${BOLD}Morph TCP Prelude 策略${NC}（${YELLOW}NOW_MORPH_TCP_PRELUDE；v3.0.1 新默认 fade。仅决定本机作为发起端时的前导字节分布，接收端三种通吃、两端无需一致、不进分享链接${NC}）："
-        echo "  1) fade  - ASCII→低7位→全8位渐变（v3.0.1 默认，推荐）"
+        echo -e "${BOLD}Morph TCP Prelude 策略${NC}（${YELLOW}NOW_MORPH_TCP_PRELUDE；v3.0.1 起默认 fade，v3.1.0 不变。仅决定本机作为发起端时的前导字节分布，接收端三种通吃、两端无需一致、不进分享链接${NC}）："
+        echo "  1) fade  - ASCII→低7位→全8位渐变（v3.0.1 起默认，v3.1.0 不变，推荐）"
         echo "  2) full8 - 全程全 8 位随机（v3.0.0 的默认行为）"
         echo "  3) low7  - 全程低 7 位随机"
         read -rp "选择 [1/2/3，默认1]: " PRELUDE_CHOICE
@@ -1177,6 +1292,7 @@ do_install() {
     fi
 
     GENERATE_EGRESS="0"
+    EGRESS_DIAL_MODE="single"; EGRESS_DIAL4="auto"; EGRESS_DIAL6="auto"
     if [ "$OUT_TYPE" = "egress" ]; then
         echo ""
         echo -e "${BOLD}远程 Egress 出口机连接信息${NC}（在出口机上运行 egress:// 主动回连本 Portal）："
@@ -1187,6 +1303,17 @@ do_install() {
             read -rp "  Egress 端出站源 IP dial（在出口机上绑定目标连接源地址，回车默认 auto）: " EGRESS_DIAL
             EGRESS_DIAL=${EGRESS_DIAL:-auto}
             validate_ip_or_auto "$EGRESS_DIAL" any || { warn "Egress dial 不是合法 IP 字面量，已重置为 auto"; EGRESS_DIAL="auto"; }
+            read -rp "  是否改用 dial4/dial6 分别绑定 IPv4/IPv6 目标出站源地址？[y/N]: " EGRESS_DIAL46_CHOICE
+            if [[ "$EGRESS_DIAL46_CHOICE" =~ ^[Yy]$ ]]; then
+                EGRESS_DIAL_MODE="dual"
+                read -rp "    dial4（IPv4 源地址，回车默认 auto）: " EGRESS_DIAL4
+                EGRESS_DIAL4=${EGRESS_DIAL4:-auto}
+                read -rp "    dial6（IPv6 源地址，回车默认 auto）: " EGRESS_DIAL6
+                EGRESS_DIAL6=${EGRESS_DIAL6:-auto}
+                validate_ip_or_auto "$EGRESS_DIAL4" 4 || { warn "Egress dial4 不是合法 IPv4 字面量，已重置为 auto"; EGRESS_DIAL4="auto"; }
+                validate_ip_or_auto "$EGRESS_DIAL6" 6 || { warn "Egress dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto"; EGRESS_DIAL6="auto"; }
+                EGRESS_DIAL="auto"
+            fi
         fi
     fi
 
@@ -1218,7 +1345,11 @@ do_install() {
         echo -e "  Vector客户端  : ${GREEN}生成（carrier=${VECTOR_CARRIER} in=${VECTOR_SOCKS}）${NC}"
     fi
     if [ "$GENERATE_EGRESS" = "1" ]; then
-        echo -e "  Egress出口机  : ${GREEN}生成（udp:$(udp_port)）${NC}"
+        if [ "$EGRESS_DIAL_MODE" = "dual" ]; then
+            echo -e "  Egress出口机  : ${GREEN}生成（udp:$(udp_port)，dial4=${EGRESS_DIAL4} dial6=${EGRESS_DIAL6}）${NC}"
+        else
+            echo -e "  Egress出口机  : ${GREEN}生成（udp:$(udp_port)，dial=${EGRESS_DIAL}）${NC}"
+        fi
     fi
     divider
     read -rp "确认安装 [y/N]: " CONFIRM
@@ -1398,6 +1529,9 @@ MORPH_TCP_PRELUDE_VALUE="${MORPH_TCP_PRELUDE}"
 TCP_FAMILY_VALUE="${TCP_FAMILY}"
 UDP_FAMILY_VALUE="${UDP_FAMILY}"
 EGRESS_DIAL_VALUE="${EGRESS_DIAL}"
+EGRESS_DIAL_MODE_VALUE="${EGRESS_DIAL_MODE}"
+EGRESS_DIAL4_VALUE="${EGRESS_DIAL4}"
+EGRESS_DIAL6_VALUE="${EGRESS_DIAL6}"
 GENERATE_VECTOR_VALUE="${GENERATE_VECTOR}"
 VECTOR_CARRIER_VALUE="${VECTOR_CARRIER}"
 VECTOR_SOCKS_VALUE="$(dq_escape "$VECTOR_SOCKS")"
@@ -1581,7 +1715,7 @@ $([ "$TLS_MODE" = "1" ] && echo "※ 同 Vector，pin= 指纹随 Portal 重启�
 
     cat > "${CONFIG_DIR}/config.txt" << CONFEOF
 ════════════════════════════════════════════════════════════════
-  Nowhere Portal 连接信息（v3.0.1 / NW3）
+  Nowhere Portal 连接信息（v3.1.0 / NW3）
   更新时间: $(date '+%Y-%m-%d %H:%M:%S')
 ════════════════════════════════════════════════════════════════
 
@@ -1597,7 +1731,7 @@ ${NOWHERE_PORTAL}
   共享密钥      : ${SHARED_KEY}（32 位小写十六进制，两端必须完全一致）
   传输模式      : ${NET}（端口模式 ${PORT_MODE}）
   Morph 乱形    : $([ "$MORPH" = "1" ] && echo "开启 morph=1（v3 默认，客户端必须同步开启）" || echo "关闭 morph=0（客户端必须同步关闭）")
-  Prelude 策略  : ${MORPH_TCP_PRELUDE}（NOW_MORPH_TCP_PRELUDE，仅本机发起端生效；v3.0.1 默认 fade，接收端通吃、两端无需一致）
+  Prelude 策略  : ${MORPH_TCP_PRELUDE}（NOW_MORPH_TCP_PRELUDE，仅本机发起端生效；v3.0.1 起默认 fade，v3.1.0 不变，接收端通吃、两端无需一致）
   TLS           : $([ "$TLS_MODE" = "1" ] && echo "自签证书(tls=1，靠 pin= 指纹锁定)" || echo "真实证书(tls=2，系统 CA + 主机名校验)")
   Portal 出口   : ${OUT_TYPE}
 ${udp_section}${tcp_section}${vector_section}${egress_section}
@@ -1709,6 +1843,10 @@ load_saved_config() {
     TCP_FAMILY="${TCP_FAMILY_VALUE:-}"
     UDP_FAMILY="${UDP_FAMILY_VALUE:-}"
     EGRESS_DIAL="${EGRESS_DIAL_VALUE:-auto}"
+    EGRESS_DIAL_MODE="${EGRESS_DIAL_MODE_VALUE:-single}"
+    case "$EGRESS_DIAL_MODE" in single|dual) : ;; *) EGRESS_DIAL_MODE="single" ;; esac
+    EGRESS_DIAL4="${EGRESS_DIAL4_VALUE:-auto}"
+    EGRESS_DIAL6="${EGRESS_DIAL6_VALUE:-auto}"
     GENERATE_VECTOR="${GENERATE_VECTOR_VALUE:-0}"
     # 旧配置里存的是 VECTOR_UP/VECTOR_DOWN 双向载体，v3 Vector 只有单载体：优先取上行值
     VECTOR_CARRIER="${VECTOR_CARRIER_VALUE:-${VECTOR_UP_VALUE:-tcp}}"
@@ -1720,6 +1858,231 @@ load_saved_config() {
         warn "当前保存的共享密钥不符合 v3 规范（必须是恰好 32 位小写十六进制字符）"
         warn "v3 会直接拒绝用该密钥启动。请用菜单「4) 重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端"
     fi
+}
+
+# 只下载并安装二进制，不触碰任何服务（供本机 Egress 安装用：服务文件尚未生成时，
+# 不能复用 install_nowhere_version，那个函数会在装完后直接 systemctl start nowhere）。
+install_nowhere_binary_only() {
+    detect_binary
+    info "正在获取最新版本号..."
+    local latest
+    latest=$(curl -s --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4 || true)
+    [ -z "$latest" ] && { warn "无法获取版本号，请检查网络"; return 1; }
+    local latest_major
+    latest_major="$(version_major "$latest")"
+    if [ -n "$latest_major" ] && [ "$latest_major" -lt 3 ]; then
+        warn "当前最新版为 ${latest}，低于 v3.0.0，与 NW3 配置不兼容，已中止"
+        return 1
+    fi
+    info "最新版本: ${latest} (${ARCH_NAME}-${LIBC})"
+    local workdir binary_path
+    workdir="$(mktemp -d /tmp/nowhere-dl.XXXXXX)"
+    trap "rm -rf $workdir" RETURN
+    curl -fL --retry 3 --connect-timeout 10 \
+        -o "$workdir/nowhere.tar.gz" \
+        "https://github.com/${REPO}/releases/download/${latest}/${BIN_NAME}" || { warn "下载失败"; return 1; }
+    verify_release_checksum "$latest" "$workdir" || { warn "安装包 SHA256 校验失败，已中止"; return 1; }
+    tar -xzf "$workdir/nowhere.tar.gz" -C "$workdir/" || { warn "解压失败"; return 1; }
+    binary_path=$(find "$workdir" -type f -name nowhere -perm -u+x | head -1)
+    [ -z "$binary_path" ] && binary_path=$(find "$workdir" -type f -name nowhere | head -1)
+    [ -z "$binary_path" ] && { warn "未找到 nowhere 二进制文件"; return 1; }
+    if [ -f "$BIN_PATH" ]; then
+        cp "$BIN_PATH" "$BIN_BACKUP_PATH"
+        read_installed_version > "$PREV_VERSION_FILE"
+    fi
+    install -m 755 "$binary_path" "$BIN_PATH"
+    record_installed_version "$latest"
+    success "Nowhere $(${BIN_PATH} --version 2>&1 | head -1) 安装完成"
+    return 0
+}
+
+# 本机安装为 Egress 服务（在出口机上运行，主动回连 Portal 的 QUIC 端口）。
+# 注意：这会覆盖本机现有的 nowhere.service（同一服务名），一台机器同一时间只能是
+# Portal 或 Egress 其中一种角色；本函数不读写 Portal 的 nowhere.env，避免把两种
+# 配置混进同一个 env 文件导致 load_saved_config 误读，Egress 配置单独存在 egress.env。
+do_install_egress_service() {
+    step "本机安装为 Egress 服务"
+    divider
+    warn "本机将作为出口机（Egress），主动回连 Portal；这会覆盖本机现有的 nowhere.service"
+    warn "Portal 侧必须已设 out=egress 且已放行 QUIC/UDP 端口，否则注册会返回 BUSY 或连不上"
+    read -rp "确认继续 [y/N]: " EG_CONFIRM
+    [[ ! "$EG_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+    local eg_host eg_port eg_key eg_morph eg_sni eg_pin eg_dial_mode eg_dial eg_dial4 eg_dial6 eg_rate eg_etar eg_family
+    local eg_url eg_query eg_host_part
+    read -rp "Portal 公网地址（域名或 IP，Egress 回连用）: " eg_host
+    eg_host=$(echo "$eg_host" | tr -d ' \r\n')
+    [[ -z "$eg_host" ]] && { warn "Portal 地址不能为空"; return; }
+    read -rp "Portal QUIC/UDP 端口（回车默认 443，同端口双栈时填 443，分端口时填 UDP 端口）: " eg_port
+    eg_port=${eg_port:-443}
+    validate_port "$eg_port" || { warn "端口不合法，重置为 443"; eg_port=443; }
+    read -rp "Portal UDP 地址族（回车=不限；4=仅 IPv4；6=仅 IPv6）: " eg_family
+    case "$eg_family" in 4|6) : ;; *) eg_family="" ;; esac
+    while true; do
+        read -rsp "共享密钥（必须与 Portal 完全一致，32 位小写十六进制，输入不回显）: " eg_key; echo
+        if is_valid_key "$eg_key"; then
+            break
+        fi
+        warn "密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符，不能回车自动生成（必须与 Portal 一致）"
+    done
+    read -rp "Morph 是否开启（须与 Portal 一致）[Y/n]: " eg_morph
+    if [[ "$eg_morph" =~ ^[Nn]$ ]]; then eg_morph="0"; else eg_morph="1"; fi
+    echo ""
+    echo "Portal 证书信任方式："
+    echo "  1) tls=2 真实证书：走系统 CA + 主机名校验（默认）"
+    echo "  2) tls=1 自签证书：必须用 pin= 锁定 Portal 证书指纹（指纹随 Portal 重启变化）"
+    read -rp "选择 [1/2，默认1]: " EG_TLS_CHOICE
+    eg_sni=""; eg_pin=""
+    case ${EG_TLS_CHOICE:-1} in
+        2)
+            while true; do
+                read -rsp "Portal 自签证书指纹 pin（64 位 hex，可从 Portal 机菜单 8 查看，输入不回显，回车=暂不填）: " eg_pin; echo
+                eg_pin=$(echo "$eg_pin" | tr -d ' \r\n' | tr 'A-F' 'a-f')
+                if [ -z "$eg_pin" ]; then
+                    warn "未填 pin：自签证书走系统 CA 校验必然失败，服务会反复重连"
+                    read -rp "仍要继续（稍后需手动改 egress.env 补 pin）？[y/N]: " EG_PIN_CONFIRM
+                    [[ ! "$EG_PIN_CONFIRM" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+                    break
+                fi
+                if [[ "$eg_pin" =~ ^[0-9a-f]{64}$ ]]; then
+                    break
+                fi
+                warn "pin 必须是 64 位小写十六进制字符"
+            done
+            ;;
+        *)
+            read -rp "  SNI（证书域名与回连地址不一致时填，回车=用回连地址）: " eg_sni
+            eg_sni=$(echo "$eg_sni" | tr -d ' \r\n')
+            ;;
+    esac
+    eg_dial_mode="single"; eg_dial="auto"; eg_dial4="auto"; eg_dial6="auto"
+    echo ""
+    read -rp "Egress 到目标的出站源 IP dial（回车默认 auto，只影响目标连接，不影响回连 Portal）: " eg_dial
+    eg_dial=${eg_dial:-auto}
+    validate_ip_or_auto "$eg_dial" any || { warn "dial 不是合法 IP 字面量，已重置为 auto"; eg_dial="auto"; }
+    read -rp "是否改用 dial4/dial6 分别绑定 IPv4/IPv6 目标出站源地址？[y/N]: " EG_DIAL46
+    if [[ "$EG_DIAL46" =~ ^[Yy]$ ]]; then
+        eg_dial_mode="dual"
+        read -rp "  dial4（IPv4 源地址，回车默认 auto）: " eg_dial4
+        eg_dial4=${eg_dial4:-auto}
+        read -rp "  dial6（IPv6 源地址，回车默认 auto）: " eg_dial6
+        eg_dial6=${eg_dial6:-auto}
+        validate_ip_or_auto "$eg_dial4" 4 || { warn "dial4 不是合法 IPv4 字面量，已重置为 auto"; eg_dial4="auto"; }
+        validate_ip_or_auto "$eg_dial6" 6 || { warn "dial6 不是合法 IPv6 字面量，已重置为 auto"; eg_dial6="auto"; }
+        eg_dial="auto"
+    fi
+    read -rp "上行限速 Mbps（0=不限速）: " eg_rate
+    eg_rate=${eg_rate:-0}
+    validate_rate "$eg_rate" || { warn "输入不合法，重置为 0"; eg_rate=0; }
+    read -rp "下行限速 Mbps（0=不限速）: " eg_etar
+    eg_etar=${eg_etar:-0}
+    validate_rate "$eg_etar" || { warn "输入不合法，重置为 0"; eg_etar=0; }
+    eg_host_part="$(format_host_for_url "$eg_host")"
+    eg_query="morph=${eg_morph}"
+    if [ "$eg_dial_mode" = "dual" ]; then
+        [[ "$eg_dial4" != "auto" ]] && eg_query="${eg_query}&dial4=$(urlencode "$eg_dial4")"
+        [[ "$eg_dial6" != "auto" ]] && eg_query="${eg_query}&dial6=$(urlencode "$eg_dial6")"
+    elif [ "$eg_dial" != "auto" ]; then
+        eg_query="${eg_query}&dial=$(urlencode "$eg_dial")"
+    fi
+    [[ "$eg_rate" != "0" ]] && eg_query="${eg_query}&rate=${eg_rate}"
+    [[ "$eg_etar" != "0" ]] && eg_query="${eg_query}&etar=${eg_etar}"
+    [[ -n "$eg_sni" ]] && eg_query="${eg_query}&sni=$(urlencode "$eg_sni")"
+    [[ -n "$eg_pin" ]] && eg_query="${eg_query}&pin=${eg_pin}"
+    eg_url="egress://${eg_key}@${eg_host_part}/udp${eg_family}:${eg_port}?${eg_query}"
+    echo ""
+    divider
+    echo -e "  Portal 地址 : ${GREEN}${eg_host}:${eg_port} (udp${eg_family})${NC}"
+    echo -e "  共享密钥    : ${GREEN}$(mask_secret "$eg_key")${NC}"
+    echo -e "  Morph       : ${GREEN}${eg_morph}${NC}"
+    if [ "$eg_dial_mode" = "dual" ]; then
+        echo -e "  出站源 IP   : ${GREEN}dial4=${eg_dial4} dial6=${eg_dial6}${NC}"
+    else
+        echo -e "  出站源 IP   : ${GREEN}dial=${eg_dial}${NC}"
+    fi
+    echo -e "  Egress URL  : ${GREEN}${eg_url/$eg_key/$(mask_secret "$eg_key")}${NC}"
+    divider
+    read -rp "确认安装为 Egress 服务 [y/N]: " EG_CONFIRM2
+    [[ ! "$EG_CONFIRM2" =~ ^[Yy]$ ]] && { info "已取消"; return; }
+    step "安装系统依赖（仅 curl/wget/tar）"
+    divider
+    apt-get update -qq
+    apt-get install -y -qq curl wget tar
+    if [ -x "$BIN_PATH" ]; then
+        read -rp "已检测到 nowhere 二进制，是否跳过下载直接使用？[Y/n]: " EG_REUSE
+        if [[ ! "${EG_REUSE:-y}" =~ ^[Nn]$ ]]; then
+            info "复用现有二进制: $(${BIN_PATH} --version 2>&1 | head -1)"
+        else
+            install_nowhere_binary_only || { warn "二进制下载失败，安装中止"; return; }
+        fi
+    else
+        install_nowhere_binary_only || { warn "二进制下载失败，安装中止"; return; }
+    fi
+    step "保存 Egress 配置并创建 systemd 服务"
+    divider
+    install -d -m 700 "$CONFIG_DIR"
+    cat > "$EGRESS_CONFIG_FILE" << EGENVEOF
+NOWHERE_EGRESS="${eg_url}"
+EGRESS_PORTAL_HOST="${eg_host}"
+EGRESS_PORTAL_PORT="${eg_port}"
+EGRESS_MORPH="${eg_morph}"
+EGENVEOF
+    chmod 600 "$EGRESS_CONFIG_FILE"
+    cat > "$SERVICE_FILE" << EGSEOF
+[Unit]
+Description=Nowhere Egress
+Documentation=https://github.com/${REPO}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${EGRESS_CONFIG_FILE}
+ExecStart=${BIN_PATH} \${NOWHERE_EGRESS}
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
+EGSEOF
+    systemctl daemon-reload
+    systemctl enable nowhere
+    systemctl restart nowhere
+    sleep 3
+    if systemctl is-active --quiet nowhere; then
+        success "Egress 服务已启动（注册结果请看日志：ACCEPTED 为成功，BUSY 说明 Portal 已有别的 Egress 占用）"
+    else
+        warn "Egress 服务未能启动，日志如下："
+        journalctl -u nowhere -n 30 --no-pager
+        warn "安装中止：请按日志排查（常见：密钥/pin/端口/Portal 未设 out=egress）"
+        return
+    fi
+    cat > "$EGRESS_CONFIG_TXT" << EGCONFEOF
+════════════════════════════════════════════════════════════════
+  Nowhere Egress 连接信息（v3.1.0 / NW3）
+  更新时间: $(date '+%Y-%m-%d %H:%M:%S')
+════════════════════════════════════════════════════════════════
+
+【出口机启动参数（Egress URL，用于 systemd ExecStart）】
+${eg_url}
+
+【说明】
+  Portal 地址 : ${eg_host}:${eg_port} (udp${eg_family})
+  Morph       : ${eg_morph}（须与 Portal 一致）
+  本机角色    : Egress（主动回连 Portal，无需本机开放入站端口）
+  每台 Portal 只接受一个 Egress 注册；已有 Egress 在线时新注册会返回 BUSY。
+  tls=1 时 pin 随 Portal 重启变化，Portal 重启后需在本机更新 egress.env 里的 pin 并重启服务。
+════════════════════════════════════════════════════════════════
+EGCONFEOF
+    chmod 600 "$EGRESS_CONFIG_TXT"
+    cat "$EGRESS_CONFIG_TXT"
+    echo ""
+    info "常用命令：systemctl status nowhere / journalctl -u nowhere -f / ${MANAGER_PATH} status"
+    install_shortcuts || true
 }
 
 do_uninstall() {
@@ -2068,6 +2431,7 @@ run_interactive_menu() {
         14) do_genkey ;;
         15) do_probe ;;
         16) do_cert_status ;;
+        17) do_install_egress_service ;;
         0) exit 0 ;;
         *) error "无效选择" ;;
     esac
@@ -2091,5 +2455,6 @@ case "$ACTION" in
     generate-key) do_genkey ;;
     probe)      do_probe ;;
     cert-status) do_cert_status ;;
-    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback/generate-key/probe/cert-status）" ;;
+    install-egress) do_install_egress_service ;;
+    *) error "未知操作: ${ACTION}（可用: install/uninstall/update/reconfig/config/status/logs/fingerprint/restart/shortcuts/version/select-version/rollback/generate-key/probe/cert-status/install-egress）" ;;
 esac
