@@ -111,6 +111,11 @@ set -o pipefail
 #       安装 / 卸载；DNS 设置；IPv4 / IPv6 优先级；临时 / 永久禁用 IPv6（均可恢复）。
 #     - 菜单 24 自动维护：每 5 分钟保活巡检（服务退出或端口不监听时重启）；每日任务依次做
 #       管理脚本从仓库自更新、Snell / Xray 跟随官方更新、证书同步、可选每日重启。原 adam-snell-update 定时器并入。
+#   ── 脚本 v4.2 修订（2026-11-16）──
+#     - 主菜单重排为两组八项：协议安装（1 Nowhere / 2 Snell / 3 Xray）与系统管理（4 脚本更新 / 5 防火墙 /
+#       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
+#       安装与配置 / 运行与排查 / 证书 / 版本分组；「重装快捷命令」移到脚本更新。上面修订说明里的
+#       "菜单 17/18/19…" 是当时的编号。命令行子命令与 zt / pz / cxpz / cq 不变。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -138,7 +143,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="4.1"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="4.2"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -717,7 +722,7 @@ validate_socks() {
 # 证书信任参数（Vector/Egress 共用）：
 #   tls=2 真实证书：默认按端点主机名走系统 CA 校验；公网地址与证书域名不一致时补 sni=
 #   tls=1 自签证书：必须 pin=证书 SHA-256 指纹（64 位小写 hex），否则校验必然失败
-# 自签指纹取不到（服务未启动等）时返回 1，调用方应留空并提示稍后用菜单 5/8 重新生成
+# 自签指纹取不到（服务未启动等）时返回 1，调用方应留空并提示稍后用Nowhere 菜单 4/10 重新生成
 append_trust_params() {
     local query="$1"
     if [ "$TLS_MODE" = "2" ]; then
@@ -843,7 +848,7 @@ build_vector_info() {
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
     if [[ -z "$host" ]]; then
-        warn "未能确定公网地址，无法生成 Vector 连接串，可稍后通过菜单「5) 查看连接信息」重试"
+        warn "未能确定公网地址，无法生成 Vector 连接串，可稍后通过Nowhere 菜单「4) 查看连接信息」重试"
         return 0
     fi
     host_part="$(format_host_for_url "$host")"
@@ -863,7 +868,7 @@ build_vector_info() {
     if trust_query="$(append_trust_params "$query")"; then
         query="$trust_query"
     else
-        warn "未能获取自签证书指纹，Vector 连接串暂缺 pin=（服务启动后可用菜单 5 重新生成）"
+        warn "未能获取自签证书指纹，Vector 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）"
     fi
     VECTOR_URL="vector://${SHARED_KEY}@${host_part}/${carrier}:${port}?${query}"
 }
@@ -879,7 +884,7 @@ build_egress_info() {
     host="${PUBLIC_HOST:-}"
     [[ -z "$host" ]] && host="$(detect_public_host)"
     if [[ -z "$host" ]]; then
-        warn "未能确定公网地址，无法生成 Egress 连接串，可稍后通过菜单「5) 查看连接信息」重试"
+        warn "未能确定公网地址，无法生成 Egress 连接串，可稍后通过Nowhere 菜单「4) 查看连接信息」重试"
         return 0
     fi
     host_part="$(format_host_for_url "$host")"
@@ -905,7 +910,7 @@ build_egress_info() {
     if trust_query="$(append_trust_params "$query")"; then
         query="$trust_query"
     else
-        warn "未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用菜单 5 重新生成）"
+        warn "未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）"
     fi
     EGRESS_URL="egress://${SHARED_KEY}@${host_part}/${carrier}:${port}?${query}"
 }
@@ -1038,7 +1043,7 @@ print_tls_fingerprint() {
             echo
             info "已从当前服务启动日志读取到自签证书 SHA-256 指纹："
             echo -e "  ${GREEN}${journal_fp}${NC}"
-            warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（菜单 5 或 pz 命令）"
+            warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（Nowhere 菜单 4 或 pz 命令）"
         else
             warn "当前为纯 QUIC/UDP Portal，没有 TLS 监听，且启动日志中未找到指纹"
             warn "自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志含 fingerprint 的一行获取"
@@ -1051,7 +1056,7 @@ print_tls_fingerprint() {
     fingerprint="$(get_tls_fingerprint || true)"
     if [ -n "$fingerprint" ]; then
         echo -e "  ${GREEN}${fingerprint}${NC}"
-        warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（菜单 5 或 pz 命令）"
+        warn "tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（Nowhere 菜单 4 或 pz 命令）"
     else
         warn "暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100 | grep fingerprint"
     fi
@@ -1346,7 +1351,7 @@ HOOKEOF
             warn "续期演练未通过：请根据上方报错排查（如 80 端口被占、DNS 凭证失效），否则证书到期后服务会中断"
         fi
     else
-        warn "已跳过演练：建议 90 天内用菜单「16) 检查证书状态 / 手动续期」验证一次"
+        warn "已跳过演练：建议 90 天内用Nowhere 菜单「11) 检查证书状态 / 手动续期」验证一次"
     fi
 }
 
@@ -1363,15 +1368,7 @@ setup_acmesh_renewal() {
 }
 
 menu_status_summary() {
-    local role nw
-    role="$(current_role)"
-    case "$role" in portal) role="Portal" ;; egress) role="Egress" ;; *) role="" ;; esac
-    if [ -x "$BIN_PATH" ]; then
-        nw="$(read_installed_version)${role:+ · ${role}} · $(svc_state nowhere)"
-    else
-        nw="${YELLOW}未安装${NC}"
-    fi
-    echo -e "  Nowhere : ${nw}"
+    echo -e "  Nowhere : $(nowhere_state_text)"
     echo -e "  Snell   : $(snell_state_text)"
     echo -e "  Xray    : $(xray_state_text)"
     echo -e "  防火墙  : $(fw_state_text)      Fail2ban : $(f2b_state_text)      保活巡检 : $(maint_timer_state adam-watchdog.timer)"
@@ -1388,39 +1385,114 @@ show_menu() {
     echo -e "  管理脚本版本: ${SCRIPT_VERSION}"
     menu_status_summary
     divider
-    echo -e "  ${BOLD}── Nowhere ──${NC}"
-    echo -e "  ${BOLD}1)${NC} 安装 Nowhere Portal（向导）"
-    echo -e "  ${BOLD}2)${NC} 卸载 Nowhere"
-    echo -e "  ${BOLD}3)${NC} 更新 Nowhere 二进制（更新到最新版）"
-    echo -e "  ${BOLD}4)${NC} 重新配置（修改参数）"
-    echo -e "  ${BOLD}5)${NC} 查看连接信息 / 导入链接"
-    echo -e "  ${BOLD}6)${NC} 查看服务状态（含 nowhere status）"
-    echo -e "  ${BOLD}7)${NC} 查看实时日志"
-    echo -e "  ${BOLD}8)${NC} 查看证书指纹（tls=1 自签 / tls=2 文件证书）"
-    echo -e "  ${BOLD}9)${NC} 重启服务"
-    echo -e "  ${BOLD}10)${NC} 重装快捷命令（adam/zt/pz/cxpz/cq）"
-    echo -e "  ${BOLD}11)${NC} 查看当前版本 / 检查更新"
-    echo -e "  ${BOLD}12)${NC} 选择指定版本（版本切换/回退到历史版本）"
-    echo -e "  ${BOLD}13)${NC} 快速回退到上一个版本"
-    echo -e "  ${BOLD}14)${NC} 生成 v3 共享密钥（32 位十六进制）"
-    echo -e "  ${BOLD}15)${NC} 连通性探测 probe（真实 TCP Flow 测试）"
-    echo -e "  ${BOLD}16)${NC} 检查证书状态 / 手动续期"
-    echo -e "  ${BOLD}17)${NC} 本机安装为 Egress 服务（出口机用，QUIC 或 TLS 载体）"
-    echo -e "  ${BOLD}── 扩展功能 ──${NC}"
-    echo -e "  ${BOLD}18)${NC} Snell v${SNELL_MAJOR} 管理（安装 / 跟随测试版更新 / 健康检查 / 配置）"
-    echo -e "  ${BOLD}19)${NC} 防火墙管理（ufw：安装 / 放行与删除端口 / 启停）"
-    echo -e "  ${BOLD}20)${NC} Fail2ban 管理（封禁时长 / 被封 IP / 启停）"
-    echo -e "  ${BOLD}21)${NC} 更新本管理脚本"
-    echo -e "  ${BOLD}22)${NC} Xray 管理（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）"
-    echo -e "  ${BOLD}23)${NC} 系统与网络调优（TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6）"
-    echo -e "  ${BOLD}24)${NC} 自动维护（保活巡检 / 脚本与内核自动更新）"
+    echo -e "  ${BOLD}── 协议安装 ──${NC}"
+    echo -e "  ${BOLD}1)${NC} Nowhere（Portal / Egress：安装、配置、连接信息、证书、版本）"
+    echo -e "  ${BOLD}2)${NC} Snell v${SNELL_MAJOR}（安装、跟随测试版更新、健康检查、配置）"
+    echo -e "  ${BOLD}3)${NC} Xray（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）"
+    echo -e "  ${BOLD}── 系统管理 ──${NC}"
+    echo -e "  ${BOLD}4)${NC} 脚本更新（更新本管理脚本 / 重装快捷命令）"
+    echo -e "  ${BOLD}5)${NC} 防火墙（ufw：安装、放行与删除端口、启停）"
+    echo -e "  ${BOLD}6)${NC} Fail2ban（封禁时长、被封 IP、启停）"
+    echo -e "  ${BOLD}7)${NC} 系统调优（TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6）"
+    echo -e "  ${BOLD}8)${NC} 自动维护（保活巡检 / 脚本与内核自动更新）"
     echo -e "  ${BOLD}0)${NC} 退出"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}提示：可直接输入${NC} ${CYAN}adam${NC} ${YELLOW}唤出此菜单，或用${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}快捷执行；${NC}${CYAN}adam help${NC} ${YELLOW}查看全部子命令${NC}"
         divider
     fi
-    read -rp "请选择操作 [0-24]: " MENU_CHOICE
+    read -rp "请选择操作 [0-8]: " MENU_CHOICE
+}
+
+nowhere_state_text() {
+    local role
+    role="$(current_role)"
+    case "$role" in portal) role="Portal" ;; egress) role="Egress" ;; *) role="" ;; esac
+    if [ -x "$BIN_PATH" ]; then
+        printf '%s' "$(read_installed_version)${role:+ · ${role}} · $(svc_state nowhere)"
+    else
+        printf '%s' "${YELLOW}未安装${NC}"
+    fi
+}
+
+nowhere_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        echo -e "${BOLD}${CYAN}━━━ Nowhere 管理（${TARGET_NW_VERSION} / NW3） ━━━${NC}"
+        echo -e "  当前状态: $(nowhere_state_text)"
+        divider
+        echo -e "  ${BOLD}── 安装与配置 ──${NC}"
+        echo -e "  ${GREEN}1)${NC}  ${GREEN}安装${NC} Nowhere Portal（向导）"
+        echo -e "  ${GREEN}2)${NC}  本机安装为 Egress 服务（出口机用，QUIC 或 TLS 载体）"
+        echo -e "  ${GREEN}3)${NC}  重新配置（修改参数）"
+        echo -e "  ${GREEN}4)${NC}  查看连接信息 / 导入链接"
+        echo -e "  ${GREEN}5)${NC}  生成 v3 共享密钥（32 位十六进制）"
+        echo -e "  ${BOLD}── 运行与排查 ──${NC}"
+        echo -e "  ${GREEN}6)${NC}  查看服务状态（含 nowhere status）"
+        echo -e "  ${GREEN}7)${NC}  查看实时日志"
+        echo -e "  ${GREEN}8)${NC}  重启服务"
+        echo -e "  ${GREEN}9)${NC}  连通性探测 probe（真实 TCP Flow 测试）"
+        echo -e "  ${BOLD}── 证书 ──${NC}"
+        echo -e "  ${GREEN}10)${NC} 查看证书指纹（tls=1 自签 / tls=2 文件证书）"
+        echo -e "  ${GREEN}11)${NC} 检查证书状态 / 手动续期"
+        echo -e "  ${BOLD}── 版本 ──${NC}"
+        echo -e "  ${GREEN}12)${NC} 查看当前版本 / 检查更新"
+        echo -e "  ${GREEN}13)${NC} 更新 Nowhere 二进制（更新到最新版）"
+        echo -e "  ${GREEN}14)${NC} 选择指定版本（版本切换 / 回退到历史版本）"
+        echo -e "  ${GREEN}15)${NC} 快速回退到上一个版本"
+        echo -e "  ${BOLD}──${NC}"
+        echo -e "  ${GREEN}16)${NC} ${RED}卸载${NC} Nowhere"
+        echo -e "  ${GREEN}0)${NC}  返回主菜单"
+        divider
+        read -rp "请选择 [0-16]: " choice
+        case "$choice" in
+            1)  run_action do_install ;;
+            2)  run_action do_install_egress_service ;;
+            3)  run_action do_reconfig ;;
+            4)  run_action do_show_config ;;
+            5)  run_action do_genkey ;;
+            6)  run_action do_show_status ;;
+            7)  run_action do_show_logs ;;
+            8)  run_action do_restart ;;
+            9)  run_action do_probe ;;
+            10) run_action do_fingerprint ;;
+            11) run_action do_cert_status ;;
+            12) run_action do_show_version ;;
+            13) run_action do_update ;;
+            14) run_action do_select_version ;;
+            15) run_action do_rollback ;;
+            16) run_action do_uninstall ;;
+            0)  return 0 ;;
+            *)  warn "无效选择" ;;
+        esac
+        pause_return
+    done
+}
+
+script_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        maint_load
+        echo -e "${BOLD}${CYAN}━━━ 脚本更新 ━━━${NC}"
+        echo -e "  当前版本: ${SCRIPT_VERSION}    每日自动从仓库更新: $(maint_onoff "$MAINT_SCRIPT_AUTO")"
+        divider
+        echo -e "  ${GREEN}1)${NC} 立即更新本管理脚本（从仓库拉取）"
+        echo -e "  ${GREEN}2)${NC} 每日自动从仓库更新 开 / 关"
+        echo -e "  ${GREEN}3)${NC} 重装快捷命令（adam / zt / pz / cxpz / cq）"
+        echo -e "  ${GREEN}0)${NC} 返回主菜单"
+        divider
+        read -rp "请选择 [0-3]: " choice
+        case "$choice" in
+            1) run_action do_update_script ;;
+            2) run_action maint_toggle MAINT_SCRIPT_AUTO ;;
+            3) run_action install_shortcuts ;;
+            0) return 0 ;;
+            *) warn "无效选择" ;;
+        esac
+        pause_return
+    done
 }
 
 do_install() {
@@ -2112,12 +2184,12 @@ ${VECTOR_URL}
 启动命令：
 NOW_MORPH_TCP_PRELUDE=${MORPH_TCP_PRELUDE} NOW_MORPH_UDP_PRELUDE=${MORPH_UDP_PRELUDE} nowhere '${VECTOR_URL}'
 $([ "$TLS_MODE" = "1" ] && echo "
-※ 用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（菜单 5 或 pz 命令）")
+※ 用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（Nowhere 菜单 4 或 pz 命令）")
 "
         else
             vector_section="
 【本地 Vector 客户端】
-生成失败：未能获取到有效的连接参数，可稍后通过菜单「5) 查看连接信息」重试
+生成失败：未能获取到有效的连接参数，可稍后通过Nowhere 菜单「4) 查看连接信息」重试
 "
         fi
     fi
@@ -2130,7 +2202,7 @@ $([ "$TLS_MODE" = "1" ] && echo "
 连接串：
 ${EGRESS_URL}
 
-出口机启动命令（或在出口机上运行本脚本菜单 17，直接粘贴上面的连接串装成 systemd 服务）：
+出口机启动命令（或在出口机上运行本脚本 Nowhere 菜单 2，直接粘贴上面的连接串装成 systemd 服务）：
 NOW_MORPH_TCP_PRELUDE=${MORPH_TCP_PRELUDE} NOW_MORPH_UDP_PRELUDE=${MORPH_UDP_PRELUDE} nowhere '${EGRESS_URL}'
 ※ 本 Portal 已固定 out=egress：没有可用的 Egress 时，新连接会在 Flow 建立超时（NOW_FLOW_SETUP_TIMEOUT，默认 20s）内等待注册，超时即失败，不会回退直连
 ※ v3.3.0 起同一 Portal 可同时接受多台 Egress（TLS / QUIC 可混用，Portal 按先进先出轮转，不保证均衡）；使用 tcp 载体的出口机需 ≥ v3.3.0
@@ -2139,7 +2211,7 @@ $([ "$TLS_MODE" = "1" ] && echo "※ 同 Vector，pin= 指纹随 Portal 重启�
         else
             egress_section="
 【远程 Egress 出口机】
-生成失败：未能获取到有效的连接参数，可稍后通过菜单「5) 查看连接信息」重试
+生成失败：未能获取到有效的连接参数，可稍后通过Nowhere 菜单「4) 查看连接信息」重试
 "
         fi
     fi
@@ -2260,7 +2332,7 @@ load_saved_config() {
             OUT_TYPE="direct"
             SOCKS="none"
         fi
-        warn "检测到旧版（NW1）配置文件。v3 还要求：密钥改为 32 位十六进制、删除 alpn/net/log/pool 参数，建议用菜单「4) 重新配置」按 v3 向导重装一次"
+        warn "检测到旧版（NW1）配置文件。v3 还要求：密钥改为 32 位十六进制、删除 alpn/net/log/pool 参数，建议用Nowhere 菜单「3) 重新配置」按 v3 向导重装一次"
     else
         SOCKS="${SOCKS_VALUE:-none}"
     fi
@@ -2293,7 +2365,7 @@ load_saved_config() {
 
     if ! is_valid_key "$SHARED_KEY"; then
         warn "当前保存的共享密钥不符合 v3 规范（必须是恰好 32 位小写十六进制字符）"
-        warn "v3 会直接拒绝用该密钥启动。请用菜单「4) 重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端"
+        warn "v3 会直接拒绝用该密钥启动。请用Nowhere 菜单「3) 重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端"
     fi
 }
 
@@ -2323,7 +2395,7 @@ install_nowhere_binary_only() {
     return 0
 }
 
-# 解析 egress:// 连接串（Portal 端菜单 5 / pz 生成的那一串）。
+# 解析 egress:// 连接串（Portal 端 Nowhere 菜单 4 / pz 生成的那一串）。
 # 结果写入 PE_KEY / PE_HOST / PE_PORT / PE_CARRIER / PE_FAMILY / PE_MORPH。
 # 同时限制字符集：这串内容会原样写进 systemd 的 EnvironmentFile。
 parse_egress_url() {
@@ -2379,7 +2451,7 @@ do_install_egress_service() {
     local eg_url="" eg_query eg_host_part eg_paste=""
 
     echo ""
-    info "可以直接粘贴 Portal 端（菜单 5 / pz）生成的 egress:// 连接串，跳过逐项填写"
+    info "可以直接粘贴 Portal 端（Nowhere 菜单 4 / pz）生成的 egress:// 连接串，跳过逐项填写"
     read -rsp "粘贴 egress:// 连接串（输入不回显，回车 = 逐项填写）: " eg_paste; echo
     eg_paste="$(printf '%s' "$eg_paste" | tr -d ' \r\n')"
     if [ -n "$eg_paste" ]; then
@@ -2427,7 +2499,7 @@ do_install_egress_service() {
         case ${EG_TLS_CHOICE:-1} in
             2)
                 while true; do
-                    read -rsp "Portal 自签证书指纹 pin（64 位 hex，可从 Portal 机菜单 8 查看，输入不回显，回车=暂不填）: " eg_pin; echo
+                    read -rsp "Portal 自签证书指纹 pin（64 位 hex，可从 Portal 机 Nowhere 菜单 10 查看，输入不回显，回车=暂不填）: " eg_pin; echo
                     eg_pin=$(echo "$eg_pin" | tr -d ' \r\n' | tr 'A-F' 'a-f')
                     if [ -z "$eg_pin" ]; then
                         warn "未填 pin：自签证书走系统 CA 校验必然失败，服务会反复重连"
@@ -2680,7 +2752,7 @@ do_update() {
 
     install_nowhere_version "$latest" || error "更新失败"
     if [ "$cross_major" = "1" ]; then
-        warn "跨代升级后请接着用菜单「4) 重新配置」按新版向导重建配置（新密钥 + 新 URL），再同步更新所有对端"
+        warn "跨代升级后请接着用Nowhere 菜单「3) 重新配置」按新版向导重建配置（新密钥 + 新 URL），再同步更新所有对端"
     fi
 }
 
@@ -2709,7 +2781,7 @@ do_show_version() {
         if [ "$current" = "$latest" ]; then
             success "已是最新版本 (${latest})"
         else
-            warn "有新版本可用: ${latest}（当前 ${current}），可选菜单「更新」升级"
+            warn "有新版本可用: ${latest}（当前 ${current}），可用 Nowhere 菜单「13) 更新 Nowhere 二进制」升级"
         fi
     else
         warn "无法查询最新版本，请检查网络"
@@ -2826,7 +2898,7 @@ do_show_config() {
         if [ -f "$EGRESS_CONFIG_TXT" ]; then
             cat "$EGRESS_CONFIG_TXT"
         else
-            warn "本机为 Egress 角色，但未找到 ${EGRESS_CONFIG_TXT}，请用菜单 17 重新安装"
+            warn "本机为 Egress 角色，但未找到 ${EGRESS_CONFIG_TXT}，请用 Nowhere 菜单 2 重新安装"
         fi
         return 0
     fi
@@ -2891,7 +2963,7 @@ do_restart() {
     load_saved_config
     print_tls_fingerprint
     if [[ "${TLS_MODE:-}" == "1" ]]; then
-        warn "自签证书指纹已随本次重启变化，请用 pz/菜单 5 重新生成带新 pin= 的 Vector/Egress 连接串并同步到对端"
+        warn "自签证书指纹已随本次重启变化，请用 pz / Nowhere 菜单 4 重新生成带新 pin= 的 Vector/Egress 连接串并同步到对端"
     fi
     return 0
 }
@@ -2918,7 +2990,7 @@ do_probe() {
         return 0
     fi
     load_saved_config
-    is_valid_key "$SHARED_KEY" || error "当前密钥不符合 v3 规范，无法探测，请先用菜单 4 重新配置"
+    is_valid_key "$SHARED_KEY" || error "当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置"
     local vector_url target
     vector_url="$(build_probe_vector_url)"
     read -rp "目标地址 host:port（回车默认 example.com:443）: " target
@@ -3393,7 +3465,7 @@ fw_status() {
 fw_allow_for_service() {
     local spec
     if ! ufw_installed; then
-        warn "未安装 ufw，已跳过防火墙配置（可用主菜单「防火墙管理」安装）；请确认云厂商安全组已放行: $*"
+        warn "未安装 ufw，已跳过防火墙配置（可用主菜单「5) 防火墙」安装）；请确认云厂商安全组已放行: $*"
         return 0
     fi
     fw_allow_ssh
@@ -5124,7 +5196,7 @@ snell_install() {
     elif confirm "开启自动更新？（每天检查一次官方发布，${SNELL_CHANNEL} 通道有 v${SNELL_MAJOR} 新版本就自动升级，失败自动回滚）" y; then
         snell_enable_autoupdate || true
     fi
-    # 保活巡检默认随安装启用（可在主菜单「自动维护」里关闭）
+    # 保活巡检默认随安装启用（可在主菜单「8) 自动维护」里关闭）
     maint_ask_script_auto
     maint_install_timers || true
     if snell_is_prerelease "$latest"; then
@@ -7350,9 +7422,12 @@ do_update_script() {
 
 usage() {
     cat << USAGEEOF
-用法: adam [命令]          （不带参数 = 打开菜单）
+用法: adam [命令]          （不带参数 = 打开主菜单）
+
+主菜单: 1 Nowhere · 2 Snell · 3 Xray · 4 脚本更新 · 5 防火墙 · 6 Fail2ban · 7 系统调优 · 8 自动维护
 
 Nowhere:
+  nowhere                    打开 Nowhere 菜单
   install | uninstall | update | reconfig | config | status | logs | restart
   fingerprint | version | select-version | rollback | generate-key | probe
   cert-status | install-egress | shortcuts
@@ -7390,7 +7465,8 @@ Fail2ban:
   f2b ban <IP> | unban <IP> | unban-all
 
 其他:
-  update-script              更新本管理脚本
+  script                     打开脚本更新菜单
+  update-script              立即更新本管理脚本
 USAGEEOF
 }
 
@@ -7398,34 +7474,17 @@ run_interactive_menu() {
     while true; do
         show_menu
         case "$MENU_CHOICE" in
-            1)  run_action do_install ;;
-            2)  run_action do_uninstall ;;
-            3)  run_action do_update ;;
-            4)  run_action do_reconfig ;;
-            5)  run_action do_show_config ;;
-            6)  run_action do_show_status ;;
-            7)  run_action do_show_logs ;;
-            8)  run_action do_fingerprint ;;
-            9)  run_action do_restart ;;
-            10) run_action install_shortcuts ;;
-            11) run_action do_show_version ;;
-            12) run_action do_select_version ;;
-            13) run_action do_rollback ;;
-            14) run_action do_genkey ;;
-            15) run_action do_probe ;;
-            16) run_action do_cert_status ;;
-            17) run_action do_install_egress_service ;;
-            18) snell_menu; continue ;;
-            19) fw_menu; continue ;;
-            20) f2b_menu; continue ;;
-            21) run_action do_update_script ;;
-            22) xray_menu; continue ;;
-            23) tune_menu; continue ;;
-            24) maint_menu; continue ;;
-            0)  exit 0 ;;
-            *)  warn "无效选择" ;;
+            1) nowhere_menu ;;
+            2) snell_menu ;;
+            3) xray_menu ;;
+            4) script_menu ;;
+            5) fw_menu ;;
+            6) f2b_menu ;;
+            7) tune_menu ;;
+            8) maint_menu ;;
+            0) exit 0 ;;
+            *) warn "无效选择"; pause_return ;;
         esac
-        pause_return
     done
 }
 
@@ -7453,6 +7512,8 @@ case "$ACTION" in
     fw|firewall) fw_cli "${ACTION_ARGS[@]}" ;;
     f2b|fail2ban) f2b_cli "${ACTION_ARGS[@]}" ;;
     update-script) do_update_script ;;
+    nowhere)    nowhere_menu ;;
+    script)     script_menu ;;
     xray)       xray_cli "${ACTION_ARGS[@]}" ;;
     tune)       tune_cli "${ACTION_ARGS[@]}" ;;
     auto|maint) maint_menu ;;
