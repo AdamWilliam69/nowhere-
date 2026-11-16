@@ -111,6 +111,10 @@ set -o pipefail
 #       安装 / 卸载；DNS 设置；IPv4 / IPv6 优先级；临时 / 永久禁用 IPv6（均可恢复）。
 #     - 菜单 24 自动维护：每 5 分钟保活巡检（服务退出或端口不监听时重启）；每日任务依次做
 #       管理脚本从仓库自更新、Snell / Xray 跟随官方更新、证书同步、可选每日重启。原 adam-snell-update 定时器并入。
+#   ── 脚本 v4.3 修订（2026-11-17）──
+#     - Snell 支持多端口：Snell 菜单 12 新增端口配置（每个端口独立 PSK / mode，由 snell-port@端口 实例承载）、
+#       菜单 13 删除任意一个端口配置（删主端口时由一个附加端口接替为主配置；只剩一份时等同卸载）。
+#       附加端口同样纳入防火墙放行、内核保留端口、保活巡检、健康检查、版本升级与回滚。
 #   ── 脚本 v4.2 修订（2026-11-16）──
 #     - 主菜单重排为两组八项：协议安装（1 Nowhere / 2 Snell / 3 Xray）与系统管理（4 脚本更新 / 5 防火墙 /
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
@@ -143,7 +147,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="4.2"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="4.3"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -168,6 +172,8 @@ SNELL_CONF="${SNELL_DIR}/snell-server.conf"
 SNELL_VERSION_FILE="${SNELL_DIR}/version.txt"
 SNELL_STATE_FILE="${SNELL_DIR}/adam-snell.env"
 SNELL_SERVICE="/etc/systemd/system/snell.service"
+SNELL_PORTS_DIR="${SNELL_DIR}/ports"   # 附加端口配置：<端口>.conf，由 snell-port@<端口> 实例承载
+SNELL_PORT_UNIT="/etc/systemd/system/snell-port@.service"
 SNELL_DL_BASE="https://dl.nssurge.com/snell"
 SNELL_KB_URLS=(
     "https://kb.nssurge.com/surge-knowledge-base/release-notes/snell.md"
@@ -3125,8 +3131,9 @@ nowhere_ports() {
 managed_ports() {
     local sp
     nowhere_ports
-    sp="$(snell_port)"
-    if [ -n "$sp" ]; then echo "${sp}/tcp"; fi
+    while IFS= read -r sp; do
+        if [ -n "$sp" ]; then echo "${sp}/tcp"; fi
+    done < <(snell_all_ports)
     xray_ports
     return 0
 }
@@ -4171,11 +4178,17 @@ maint_ask_script_auto() {
     return 0
 }
 
-maint_unit_installed() { [ -f "/etc/systemd/system/$1.service" ]; }
+maint_unit_installed() {
+    case "$1" in
+        snell-port@*) [ -f "${SNELL_PORTS_DIR}/${1#snell-port@}.conf" ] ;;
+        *)            [ -f "/etc/systemd/system/$1.service" ] ;;
+    esac
+}
 
 maint_unit_healthy() {
     case "$1" in
-        snell)     snell_healthy ;;
+        snell)     snell_main_healthy ;;
+        snell-port@*) snell_extra_healthy "${1#snell-port@}" ;;
         adam-xray) xray_healthy ;;
         *)         systemctl is-active --quiet "$1" 2>/dev/null ;;
     esac
@@ -4266,7 +4279,10 @@ maint_watchdog() {
     [ "$MAINT_WATCHDOG" = "1" ] || return 0
     # 正在更新 / 安装时不插手，下一轮再看
     maint_lock 0 || return 0
-    for unit in snell adam-xray nowhere; do
+    local -a units=(snell)
+    while IFS= read -r unit; do units+=("snell-port@${unit}"); done < <(snell_extra_ports)
+    units+=(adam-xray nowhere)
+    for unit in "${units[@]}"; do
         maint_unit_installed "$unit" || continue
         # 只管"设为开机自启"的服务：手动 disable 掉的不会被拉起
         systemctl is-enabled --quiet "$unit" 2>/dev/null || continue
@@ -4345,7 +4361,10 @@ maint_daily() {
     if [ -x "$XRAY_BIN" ]; then xray_sync_certs || true; fi
     reserved_ports_sync || true
     if [ "$MAINT_DAILY_RESTART" = "1" ]; then
-        for unit in snell adam-xray; do
+        local -a runits=(snell)
+        while IFS= read -r unit; do runits+=("snell-port@${unit}"); done < <(snell_extra_ports)
+        runits+=(adam-xray)
+        for unit in "${runits[@]}"; do
             if systemctl is-active --quiet "$unit" 2>/dev/null; then
                 systemctl restart "$unit" >/dev/null 2>&1 || true
                 maint_log "[每日重启] ${unit} 已重启"
@@ -4491,8 +4510,9 @@ snell_is_prerelease() { local v="${1#v}"; [[ "$v" =~ [a-z] ]]; }
 
 snell_ver_major() { local v="${1#v}"; printf '%s' "${v%%.*}"; }
 
-snell_conf_get() {
-    [ -f "$SNELL_CONF" ] || return 1
+snell_conf_get() {   # snell_conf_get KEY [配置文件，默认主配置]
+    local file="${2:-$SNELL_CONF}"
+    [ -f "$file" ] || return 1
     awk -v k="$1" '
         /^[ \t]*[#;\[]/ { next }
         {
@@ -4500,7 +4520,7 @@ snell_conf_get() {
             kk = substr($0, 1, i - 1); gsub(/[ \t]/, "", kk)
             if (kk == k) { v = substr($0, i + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); print v; found = 1; exit }
         }
-        END { exit !found }' "$SNELL_CONF"
+        END { exit !found }' "$file"
 }
 
 # 监听端口：取 listen 的第一个端点
@@ -4723,27 +4743,135 @@ snell_apply_binary() {
 }
 
 snell_fix_perms() {
+    local f
     if getent group snell >/dev/null 2>&1; then
         chown root:snell "$SNELL_DIR" 2>/dev/null || true
         chmod 750 "$SNELL_DIR" 2>/dev/null || true
-        if [ -f "$SNELL_CONF" ]; then
-            chown root:snell "$SNELL_CONF" 2>/dev/null || true
-            chmod 640 "$SNELL_CONF" 2>/dev/null || true
+        if [ -d "$SNELL_PORTS_DIR" ]; then
+            chown root:snell "$SNELL_PORTS_DIR" 2>/dev/null || true
+            chmod 750 "$SNELL_PORTS_DIR" 2>/dev/null || true
         fi
+        for f in "$SNELL_CONF" "$SNELL_PORTS_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            chown root:snell "$f" 2>/dev/null || true
+            chmod 640 "$f" 2>/dev/null || true
+        done
     fi
     return 0
 }
 
-snell_healthy() {
-    local port out
+# ── 多端口：主配置（snell.service）之外，每个附加端口是一份独立配置 + 一个 snell-port@端口 实例 ──
+
+# 附加端口列表（每行一个，升序）
+snell_extra_ports() {
+    local f p
+    [ -d "$SNELL_PORTS_DIR" ] || return 0
+    for f in "$SNELL_PORTS_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        p="$(basename "$f" .conf)"
+        if [[ "$p" =~ ^[0-9]+$ ]]; then echo "$p"; fi
+    done | sort -n
+    return 0
+}
+
+# 全部端口：主端口在前
+snell_all_ports() {
+    local p
+    p="$(snell_port)"
+    if [ -n "$p" ]; then echo "$p"; fi
+    snell_extra_ports
+    return 0
+}
+
+snell_port_conf() {   # 端口对应的配置文件路径
+    if [ "$1" = "$(snell_port)" ]; then printf '%s' "$SNELL_CONF"; else printf '%s' "${SNELL_PORTS_DIR}/$1.conf"; fi
+}
+
+# 端口是否已是本机某份 Snell 配置（服务没运行时 ss 查不到，所以单独判断）
+snell_port_taken() {
+    local want="$1" p
+    while IFS= read -r p; do
+        if [ "$p" = "$want" ]; then return 0; fi
+    done < <(snell_all_ports)
+    return 1
+}
+
+snell_write_port_unit() {
+    cat > "$SNELL_PORT_UNIT" << SNPORTEOF
+[Unit]
+Description=Snell Proxy Service (extra port %i)
+Documentation=https://kb.nssurge.com/surge-knowledge-base/release-notes/snell
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=snell
+Group=snell
+ExecStart=${SNELL_BIN} -l info -c ${SNELL_PORTS_DIR}/%i.conf
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+LimitNOFILE=65536
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+SyslogIdentifier=snell-server-%i
+
+[Install]
+WantedBy=multi-user.target
+SNPORTEOF
+}
+
+snell_main_healthy() {
+    local port
     systemctl is-active --quiet snell 2>/dev/null || return 1
     port="$(snell_port)"
     [ -n "$port" ] || return 0
-    command -v ss >/dev/null 2>&1 || return 0
-    out="$(ss -tln 2>/dev/null || true)"
-    printf '%s\n' "$out" | awk -v p=":${port}" '
-        { n = length($4); if (n >= length(p) && substr($4, n - length(p) + 1) == p) f = 1 }
-        END { exit !f }'
+    tcp_listening "$port"
+}
+
+snell_extra_healthy() {   # snell_extra_healthy 端口
+    systemctl is-active --quiet "snell-port@$1" 2>/dev/null || return 1
+    tcp_listening "$1"
+}
+
+# 主端口与全部附加端口都正常
+snell_healthy() {
+    local p
+    snell_main_healthy || return 1
+    while IFS= read -r p; do
+        snell_extra_healthy "$p" || return 1
+    done < <(snell_extra_ports)
+    return 0
+}
+
+# 重启主服务与全部附加端口实例（换二进制、回滚、手动重启时用）
+snell_restart_all() {
+    local p
+    systemctl restart snell 2>/dev/null || true
+    while IFS= read -r p; do
+        systemctl restart "snell-port@${p}" 2>/dev/null || true
+    done < <(snell_extra_ports)
+    return 0
+}
+
+# 配置目录里已有附加端口配置（如卸载时保留了配置后重装）时，把它们的实例重新拉起来
+snell_start_extras() {
+    local p
+    [ -n "$(snell_extra_ports)" ] || return 0
+    snell_write_port_unit
+    systemctl daemon-reload
+    while IFS= read -r p; do
+        systemctl enable "snell-port@${p}" >/dev/null 2>&1 || true
+        systemctl restart "snell-port@${p}" 2>/dev/null || true
+        if ufw_installed; then ufw allow "${p}/tcp" >/dev/null 2>&1 || true; fi
+        info "已恢复附加端口 ${p}"
+    done < <(snell_extra_ports)
+    return 0
 }
 
 snell_rollback_binary() {
@@ -4755,7 +4883,7 @@ snell_rollback_binary() {
     warn "正在回滚到旧版本${prev:+（${prev}）} ..."
     install -m 755 "$SNELL_BIN_BACKUP" "$SNELL_BIN"
     if [ -n "$prev" ]; then echo "$prev" > "$SNELL_VERSION_FILE"; fi
-    systemctl restart snell 2>/dev/null || true
+    snell_restart_all
     sleep 2
     if snell_healthy; then
         success "已回滚，服务恢复运行"
@@ -4776,7 +4904,7 @@ snell_upgrade_to() {
         success "Snell 二进制已更新到 ${ver}（未检测到 snell.service，未启动服务）"
         return 0
     fi
-    systemctl restart snell 2>/dev/null || true
+    snell_restart_all
     sleep 2
     if snell_healthy; then
         success "Snell 已更新: ${prev:-未知} → ${ver}"
@@ -4802,9 +4930,9 @@ snell_ipv6_ok() {
     [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]
 }
 
-# snell_write_conf PORT PSK MODE DNS_PREF
+# snell_write_conf PORT PSK MODE DNS_PREF [目标文件，默认主配置]
 snell_write_conf() {
-    local port="$1" psk="$2" mode="$3" pref="$4" listen tmp
+    local port="$1" psk="$2" mode="$3" pref="$4" dest="${5:-$SNELL_CONF}" listen tmp
     if snell_ipv6_ok; then
         listen="0.0.0.0:${port},[::]:${port}"
     else
@@ -4820,7 +4948,8 @@ psk = ${psk}
 dns-ip-preference = ${pref}
 SNCONFEOF
     chmod 640 "$tmp"
-    mv -f "$tmp" "$SNELL_CONF"
+    install -d -m 750 "$(dirname "$dest")"
+    mv -f "$tmp" "$dest"
     snell_fix_perms
 }
 
@@ -4875,6 +5004,25 @@ snell_port_conflict() {
     return 0
 }
 
+# 询问一个可用的新端口（不能被其他进程占用，也不能是本机已有的 Snell 端口），结果写入 SNELL_ASK_PORT
+snell_ask_new_port() {
+    local def p
+    def="$(random_free_port)"
+    while true; do
+        read -rp "监听端口（回车使用随机端口 ${def}）: " p
+        p="${p:-$def}"
+        if [[ ! "$p" =~ ^[0-9]+$ ]] || [ "$((10#$p))" -lt 1 ] || [ "$((10#$p))" -gt 65535 ]; then
+            warn "端口不合法（1-65535）"
+            continue
+        fi
+        p=$((10#$p))
+        if snell_port_taken "$p"; then warn "端口 ${p} 已经是本机的一份 Snell 配置，请换一个"; continue; fi
+        if snell_port_conflict "$p"; then warn "TCP 端口 ${p} 已被其他进程占用，请换一个"; continue; fi
+        SNELL_ASK_PORT="$p"
+        return 0
+    done
+}
+
 random_free_port() {
     local p=0 i
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -4884,18 +5032,154 @@ random_free_port() {
     printf '%s' "$p"
 }
 
-snell_client_line() {
-    local host port psk mode major name
-    port="$(snell_port)"
-    psk="$(snell_conf_get psk 2>/dev/null || true)"
-    mode="$(snell_conf_get mode 2>/dev/null || true)"
+snell_client_line() {   # snell_client_line [端口，默认主端口]
+    local host port psk mode major name conf
+    port="${1:-$(snell_port)}"
+    conf="$(snell_port_conf "$port")"
+    psk="$(snell_conf_get psk "$conf" 2>/dev/null || true)"
+    mode="$(snell_conf_get mode "$conf" 2>/dev/null || true)"
     mode="${mode:-default}"
     snell_load_state
     host="${SNELL_PUBLIC_HOST:-$(detect_public_host)}"
     name="${SNELL_NODE_NAME:-Snell-v${SNELL_MAJOR}}"
+    if [ "$port" != "$(snell_port)" ]; then name="${name}-${port}"; fi
     major="$(snell_ver_major "$(snell_installed_version)")"
     [[ "$major" =~ ^[0-9]+$ ]] || major="$SNELL_MAJOR"
     printf '%s = snell, %s, %s, psk=%s, version=%s, mode=%s, reuse=true' "$name" "$host" "$port" "$psk" "$major" "$mode"
+}
+
+# 列出全部端口配置（带序号）。序号 1 始终是主端口
+snell_list_ports() {
+    local p n=0 conf st kind
+    while IFS= read -r p; do
+        n=$((n + 1))
+        conf="$(snell_port_conf "$p")"
+        if tcp_listening "$p"; then st="${GREEN}监听中${NC}"; else st="${RED}未监听${NC}"; fi
+        if [ "$n" -eq 1 ]; then kind="主端口  "; else kind="附加端口"; fi
+        echo -e "  ${BOLD}${n})${NC} ${kind} ${p}    mode $(snell_conf_get mode "$conf" 2>/dev/null || echo default)    ${st}"
+    done < <(snell_all_ports)
+    return 0
+}
+
+# 新增一份端口配置：独立的端口 + PSK + mode，由 snell-port@端口 实例承载
+snell_add_port() {
+    snell_require || return 1
+    local port psk mode="default" pref ans conf
+    local pskre='^[A-Za-z0-9_-]{12,255}$'
+    step "新增 Snell 端口配置"
+    divider
+    echo "  现有端口配置："
+    snell_list_ports
+    echo ""
+    info "新端口使用独立的 PSK 与 mode，和现有端口互不影响（可以给不同设备 / 不同用途各用一份）"
+    snell_ask_new_port
+    port="$SNELL_ASK_PORT"
+    while true; do
+        read -rp "PSK（回车自动生成 32 位随机串；自定义需 12-255 位，仅限字母、数字、- 和 _）: " psk
+        if [ -z "$psk" ]; then
+            psk="$(snell_gen_psk)"
+            if [ "${#psk}" -ne 32 ]; then warn "随机 PSK 生成失败"; return 1; fi
+            break
+        fi
+        if [[ "$psk" =~ $pskre ]]; then break; fi
+        warn "PSK 不符合要求"
+    done
+    echo "  mode：1) default（默认）  2) unshaped  3) unsafe-raw（明文，仅可信内网）"
+    read -rp "  选择 [1/2/3，默认1]: " ans
+    case "${ans:-1}" in
+        2) mode="unshaped" ;;
+        3) if confirm "unsafe-raw 为明文传输，确认？" n; then mode="unsafe-raw"; fi ;;
+        *) : ;;
+    esac
+    pref="$(snell_conf_get dns-ip-preference 2>/dev/null || true)"
+    conf="${SNELL_PORTS_DIR}/${port}.conf"
+    snell_ensure_user || return 1
+    snell_write_conf "$port" "$psk" "$mode" "${pref:-default}" "$conf"
+    snell_write_port_unit
+    systemctl daemon-reload
+    systemctl enable "snell-port@${port}" >/dev/null 2>&1 || true
+    systemctl restart "snell-port@${port}" 2>/dev/null || true
+    sleep 2
+    if ! snell_extra_healthy "$port"; then
+        warn "新端口未能启动，已撤回。日志："
+        journalctl -u "snell-port@${port}" -n 15 --no-pager 2>/dev/null || true
+        systemctl disable --now "snell-port@${port}" >/dev/null 2>&1 || true
+        rm -f "$conf"
+        return 1
+    fi
+    success "端口 ${port} 已添加并监听"
+    fw_allow_for_service "${port}/tcp"
+    reserved_ports_sync || true
+    echo ""
+    echo -e "${BOLD}Surge 节点配置：${NC}"
+    echo -e "${GREEN}$(snell_client_line "$port")${NC}"
+    return 0
+}
+
+# 删除某一份端口配置。可删任意一份：
+#   删附加端口 = 停掉它的实例并删除配置；
+#   删主端口   = 由序号最小的附加端口接替为主配置（它的端口与 PSK 不变，用它的客户端不受影响）；
+#   只剩一份时删除等同于卸载，转去走卸载流程。
+snell_delete_port() {
+    snell_require || return 1
+    local target="${1:-}" main p ans promote bak
+    local -a all=()
+    step "删除 Snell 端口配置"
+    divider
+    main="$(snell_port)"
+    while IFS= read -r p; do all+=("$p"); done < <(snell_all_ports)
+    if [ "${#all[@]}" -eq 0 ]; then warn "没有找到任何端口配置"; return 1; fi
+    if [ -z "$target" ]; then
+        snell_list_ports
+        read -rp "输入要删除的序号（回车取消）: " ans
+        if [ -z "$ans" ]; then info "已取消"; return 0; fi
+        if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#all[@]}" ]; then warn "序号无效"; return 1; fi
+        target="${all[$((ans - 1))]}"
+    elif ! snell_port_taken "$target"; then
+        warn "端口 ${target} 不是本机的 Snell 端口配置（现有: ${all[*]}）"
+        return 1
+    fi
+
+    if [ "${#all[@]}" -eq 1 ]; then
+        warn "端口 ${target} 是唯一的一份配置，删除它等于卸载 Snell"
+        snell_uninstall
+        return $?
+    fi
+
+    if [ "$target" != "$main" ]; then
+        confirm "确认删除附加端口 ${target} 的配置？（使用该端口的客户端将无法连接）" n || { info "已取消"; return 0; }
+        systemctl disable --now "snell-port@${target}" >/dev/null 2>&1 || true
+        rm -f "${SNELL_PORTS_DIR}/${target}.conf"
+    else
+        promote="${all[1]}"
+        info "端口 ${target} 是主端口配置：删除后由附加端口 ${promote} 接替为主配置（${promote} 的端口与 PSK 不变）"
+        confirm "确认删除主端口 ${target} 的配置？（使用该端口的客户端将无法连接）" n || { info "已取消"; return 0; }
+        bak="${SNELL_CONF}.bak"
+        cp -f "$SNELL_CONF" "$bak"
+        systemctl disable --now "snell-port@${promote}" >/dev/null 2>&1 || true
+        cp -f "${SNELL_PORTS_DIR}/${promote}.conf" "$SNELL_CONF"
+        snell_fix_perms
+        systemctl restart snell 2>/dev/null || true
+        sleep 2
+        if ! snell_main_healthy; then
+            warn "接替后主服务未能启动，已恢复原样。日志："
+            journalctl -u snell -n 15 --no-pager 2>/dev/null || true
+            mv -f "$bak" "$SNELL_CONF"
+            snell_fix_perms
+            systemctl restart snell 2>/dev/null || true
+            systemctl enable "snell-port@${promote}" >/dev/null 2>&1 || true
+            systemctl restart "snell-port@${promote}" 2>/dev/null || true
+            return 1
+        fi
+        rm -f "$bak" "${SNELL_PORTS_DIR}/${promote}.conf"
+    fi
+    success "端口 ${target} 的配置已删除"
+    fw_prune_old_specs "${target}/tcp"
+    reserved_ports_sync || true
+    echo ""
+    echo "  剩余端口配置："
+    snell_list_ports
+    return 0
 }
 
 snell_show_config() {
@@ -4913,11 +5197,18 @@ snell_show_config() {
     echo ""
     echo -e "${BOLD}Surge 节点配置（粘贴到 [Proxy] 段）：${NC}"
     echo -e "${GREEN}$(snell_client_line)${NC}"
+    local xp xconf
+    while IFS= read -r xp; do
+        xconf="${SNELL_PORTS_DIR}/${xp}.conf"
+        echo ""
+        echo -e "  ${BOLD}附加端口 ${xp}${NC}（${xconf}）  mode $(snell_conf_get mode "$xconf" 2>/dev/null || echo default)  PSK $(snell_conf_get psk "$xconf" 2>/dev/null || echo '?')"
+        echo -e "${GREEN}$(snell_client_line "$xp")${NC}"
+    done < <(snell_extra_ports)
     echo ""
     echo "  说明："
     echo "  · mode 必须与服务端一致（官方要求），否则无法连通"
     echo "  · v6 的协议特征由 PSK 派生：更换 PSK 等于更换一套流量特征，客户端需同步修改"
-    echo "  · v6 已移除 QUIC Proxy Mode，UDP 走 UDP over TCP，防火墙只需放行 TCP $(snell_port)；官方建议客户端屏蔽 QUIC 让应用回落到 HTTP/2"
+    echo "  · v6 已移除 QUIC Proxy Mode，UDP 走 UDP over TCP，防火墙只需放行 TCP $(snell_all_ports | paste -sd, -)；官方建议客户端屏蔽 QUIC 让应用回落到 HTTP/2"
     echo "  · 需要支持 Snell v6 的 Surge 版本；官方未说明 v6 服务端兼容 v4/v5 客户端，第三方客户端是否支持请以其文档为准"
     return 0
 }
@@ -5112,6 +5403,10 @@ snell_install() {
                 continue
             fi
             port=$((10#$port))
+            if [ "$port" != "$old_port" ] && snell_port_taken "$port"; then
+                warn "端口 ${port} 已经是本机的一份 Snell 附加端口配置，请换一个"
+                continue
+            fi
             if snell_port_conflict "$port"; then
                 warn "TCP 端口 ${port} 已被其他进程占用，请换一个"
                 continue
@@ -5175,7 +5470,7 @@ snell_install() {
     systemctl enable snell >/dev/null 2>&1 || true
     systemctl restart snell 2>/dev/null || true
     sleep 2
-    if snell_healthy; then
+    if snell_main_healthy; then
         success "Snell ${latest} 已启动并监听 TCP ${port}"
     else
         warn "Snell 未能正常启动，最近日志："
@@ -5185,6 +5480,7 @@ snell_install() {
 
     SNELL_PUBLIC_HOST="$host"; SNELL_NODE_NAME="$name"
     snell_save_state
+    snell_start_extras
 
     fw_allow_for_service "${port}/tcp"
     if [ -n "$old_port" ] && [ "$old_port" != "$port" ]; then fw_prune_old_specs "${old_port}/tcp"; fi
@@ -5216,6 +5512,7 @@ snell_reconfig() {
     mode="$(snell_conf_get mode 2>/dev/null || true)"; mode="${mode:-default}"
     pref="$(snell_conf_get dns-ip-preference 2>/dev/null || true)"; pref="${pref:-default}"
     echo "当前：端口 ${port} · mode ${mode} · DNS 偏好 ${pref}"
+    echo "  （这里修改的是主端口配置；附加端口请用「删除端口配置」+「新增端口配置」）"
     echo "  1) 修改端口"
     echo "  2) 重新生成 PSK（同时更换一套流量特征）"
     echo "  3) 自定义 PSK"
@@ -5229,6 +5526,7 @@ snell_reconfig() {
             read -rp "新的监听端口: " ans
             if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "$((10#$ans))" -lt 1 ] || [ "$((10#$ans))" -gt 65535 ]; then warn "端口不合法"; return 1; fi
             ans=$((10#$ans))
+            if [ "$ans" != "$old_port" ] && snell_port_taken "$ans"; then warn "端口 ${ans} 已经是本机的一份 Snell 附加端口配置"; return 1; fi
             if snell_port_conflict "$ans"; then warn "TCP 端口 ${ans} 已被其他进程占用"; return 1; fi
             port="$ans"
             ;;
@@ -5281,7 +5579,7 @@ snell_reconfig() {
     snell_write_conf "$port" "$psk" "$mode" "$pref"
     systemctl restart snell 2>/dev/null || true
     sleep 2
-    if ! snell_healthy; then
+    if ! snell_main_healthy; then
         warn "新配置启动失败，已恢复原配置。日志："
         journalctl -u snell -n 15 --no-pager 2>/dev/null || true
         mv -f "$bak" "$SNELL_CONF"
@@ -5353,6 +5651,12 @@ snell_health_check() {
     else
         hc_line 0 "二进制可运行（${cur:-版本未知}）"
     fi
+    local xp
+    while IFS= read -r xp; do
+        if snell_extra_healthy "$xp"; then hc_line 0 "附加端口 ${xp} 运行并监听中"; else hc_line 1 "附加端口 ${xp} 未运行或没有在监听"; fi
+        if [ "$xp" -ge 1024 ] && ! reserved_port_ok "$xp"; then hc_line 1 "附加端口 ${xp} 未加入内核保留端口"; fi
+        if ufw_active && ! fw_is_allowed "$xp" tcp; then hc_line 1 "防火墙未放行附加端口 ${xp}/tcp"; fi
+    done < <(snell_extra_ports)
     if grep -q '^Restart=always' "$SNELL_SERVICE" 2>/dev/null; then hc_line 0 "服务单元已启用崩溃自动拉起"; else hc_line 1 "服务单元未启用 Restart=always（旧版单元）"; fi
     maint_load
     if [ "$MAINT_WATCHDOG" = "1" ] && systemctl is-active --quiet adam-watchdog.timer 2>/dev/null; then
@@ -5409,6 +5713,11 @@ snell_repair() {
     reserved_ports_sync || true
     if [ -n "$port" ] && ufw_active; then ufw allow "${port}/tcp" >/dev/null 2>&1 || true; fi
     maint_install_timers || true
+    snell_start_extras
+    if ufw_active; then
+        local rp
+        while IFS= read -r rp; do ufw allow "${rp}/tcp" >/dev/null 2>&1 || true; done < <(snell_extra_ports)
+    fi
     systemctl restart snell 2>/dev/null || true
     sleep 2
     if snell_healthy; then
@@ -5430,10 +5739,10 @@ snell_logs() {
 
 snell_restart() {
     snell_require || return 1
-    systemctl restart snell 2>/dev/null || true
+    snell_restart_all
     sleep 2
     if snell_healthy; then
-        success "Snell 已重启"
+        success "Snell 已重启（含全部附加端口）"
     else
         warn "重启后未检测到服务正常监听："
         journalctl -u snell -n 15 --no-pager 2>/dev/null || true
@@ -5447,23 +5756,28 @@ snell_uninstall() {
         info "未检测到 Snell 安装"
         return 0
     fi
-    local port
+    local port p ports
     port="$(snell_port)"
-    if ! confirm "确认卸载 Snell？" n; then info "已取消"; return 0; fi
+    ports="$(snell_all_ports | tr '\n' ' ')"
+    if ! confirm "确认卸载 Snell（全部端口配置: ${ports:-无}）？" n; then info "已取消"; return 0; fi
     systemctl disable --now snell >/dev/null 2>&1 || true
+    while IFS= read -r p; do
+        systemctl disable --now "snell-port@${p}" >/dev/null 2>&1 || true
+    done < <(snell_extra_ports)
+    rm -f "$SNELL_PORT_UNIT"
     rm -f "$SNELL_SERVICE" "$SNELL_BIN" "$SNELL_BIN_BACKUP" "$SNELL_VERSION_FILE"
     systemctl daemon-reload
-    if [ -n "$port" ] && ufw_installed; then
-        if confirm "同时删除防火墙里 Snell 端口（${port}/tcp）的放行规则？" y; then
-            # 配置还在时 managed_ports 仍会包含该端口，这里直接删
-            fw_delete_spec "${port}/tcp"
+    if [ -n "${ports// /}" ] && ufw_installed; then
+        if confirm "同时删除防火墙里 Snell 端口（${ports}）的放行规则？" y; then
+            # 配置还在时 managed_ports 仍会包含这些端口，这里直接删
+            for p in $ports; do fw_delete_spec "${p}/tcp"; done
         fi
     fi
     if confirm "同时删除配置目录 ${SNELL_DIR}（含 PSK）？" n; then
         rm -rf "$SNELL_DIR"
         userdel snell >/dev/null 2>&1 || true
     else
-        info "已保留 ${SNELL_DIR}，重装时可直接沿用端口和 PSK"
+        info "已保留 ${SNELL_DIR}，重装时可直接沿用端口和 PSK（附加端口也会一并恢复）"
     fi
     reserved_ports_sync || true
     success "Snell 已卸载"
@@ -5478,7 +5792,8 @@ snell_state_text() {
     fi
     v=""
     if [ -f "$SNELL_VERSION_FILE" ]; then v="$(tr -d ' \r\n' < "$SNELL_VERSION_FILE" 2>/dev/null || true)"; fi
-    printf '%s' "${v:-版本未知} · $(svc_state snell)"
+    local n; n="$(snell_all_ports | grep -c . || true)"
+    printf '%s' "${v:-版本未知} · ${n} 个端口 · $(svc_state snell)"
 }
 
 snell_menu() {
@@ -5491,30 +5806,34 @@ snell_menu() {
         divider
         echo -e "  ${GREEN}1)${NC}  ${GREEN}安装${NC} / 重装 Snell（自动获取官方最新版，默认跟随测试版）"
         echo -e "  ${GREEN}2)${NC}  检查并更新到官方最新版"
-        echo -e "  ${GREEN}3)${NC}  查看配置 / Surge 节点配置行"
-        echo -e "  ${GREEN}4)${NC}  修改配置（端口 / PSK / mode / DNS 偏好 / 节点名）"
-        echo -e "  ${GREEN}5)${NC}  自动更新 开 / 关 / 切换通道（beta ⇄ stable）"
-        echo -e "  ${GREEN}6)${NC}  健康检查（只检测）"
-        echo -e "  ${GREEN}7)${NC}  一键修复（单元 / 保留端口 / 防火墙 / 保活定时器）"
-        echo -e "  ${GREEN}8)${NC}  服务状态"
-        echo -e "  ${GREEN}9)${NC}  实时日志"
-        echo -e "  ${GREEN}10)${NC} 重启服务"
-        echo -e "  ${GREEN}11)${NC} ${RED}卸载${NC} Snell"
+        echo -e "  ${GREEN}3)${NC}  查看配置 / Surge 节点配置行（全部端口）"
+        echo -e "  ${GREEN}4)${NC}  修改主端口配置（端口 / PSK / mode / DNS 偏好 / 节点名）"
+        echo -e "  ${GREEN}5)${NC}  ${GREEN}新增${NC}端口配置（多端口：每个端口独立 PSK）"
+        echo -e "  ${GREEN}6)${NC}  ${RED}删除${NC}某个端口配置（可选任意一个端口）"
+        echo -e "  ${GREEN}7)${NC}  自动更新 开 / 关 / 切换通道（beta ⇄ stable）"
+        echo -e "  ${GREEN}8)${NC}  健康检查（只检测）"
+        echo -e "  ${GREEN}9)${NC}  一键修复（单元 / 保留端口 / 防火墙 / 保活定时器）"
+        echo -e "  ${GREEN}10)${NC} 服务状态"
+        echo -e "  ${GREEN}11)${NC} 实时日志"
+        echo -e "  ${GREEN}12)${NC} 重启服务"
+        echo -e "  ${GREEN}13)${NC} ${RED}卸载${NC} Snell"
         echo -e "  ${GREEN}0)${NC}  返回主菜单"
         divider
-        read -rp "请选择 [0-11]: " choice
+        read -rp "请选择 [0-13]: " choice
         case "$choice" in
             1)  run_action snell_install ;;
             2)  run_action snell_update ;;
             3)  run_action snell_show_config ;;
             4)  run_action snell_reconfig ;;
-            5)  run_action snell_toggle_autoupdate ;;
-            6)  run_action snell_health_check ;;
-            7)  run_action snell_repair ;;
-            8)  run_action snell_status ;;
-            9)  run_action snell_logs ;;
-            10) run_action snell_restart ;;
-            11) run_action snell_uninstall ;;
+            5)  run_action snell_add_port ;;
+            6)  run_action snell_delete_port ;;
+            7)  run_action snell_toggle_autoupdate ;;
+            8)  run_action snell_health_check ;;
+            9)  run_action snell_repair ;;
+            10) run_action snell_status ;;
+            11) run_action snell_logs ;;
+            12) run_action snell_restart ;;
+            13) run_action snell_uninstall ;;
             0)  return 0 ;;
             *)  warn "无效选择" ;;
         esac
@@ -5531,6 +5850,9 @@ snell_cli() {
         update|check) snell_update ;;
         config|info) snell_show_config ;;
         reconfig)    snell_reconfig ;;
+        ports)       snell_require && snell_list_ports ;;
+        add-port)    snell_add_port ;;
+        del-port)    snell_delete_port "${1:-}" ;;
         status)      snell_status ;;
         logs)        snell_logs ;;
         restart)     snell_restart ;;
@@ -5543,7 +5865,7 @@ snell_cli() {
                 *)   snell_toggle_autoupdate ;;
             esac ;;
         uninstall)   snell_uninstall ;;
-        *) error "未知的 snell 子命令: ${sub}（可用: install / update / config / reconfig / status / health / repair / logs / restart / auto [on|off] / uninstall）" ;;
+        *) error "未知的 snell 子命令: ${sub}（可用: install / update / config / reconfig / ports / add-port / del-port [端口] / status / health / repair / logs / restart / auto [on|off] / uninstall）" ;;
     esac
 }
 
@@ -7209,6 +7531,14 @@ services_adapt_ipv6() {
         if [ -n "$port" ] && [ -n "$psk" ]; then
             snell_write_conf "$port" "$psk" "${mode:-default}" "${pref:-default}"
             systemctl try-restart snell >/dev/null 2>&1 || true
+            local xp xconf
+            while IFS= read -r xp; do
+                xconf="${SNELL_PORTS_DIR}/${xp}.conf"
+                snell_write_conf "$xp" "$(snell_conf_get psk "$xconf" 2>/dev/null || true)" \
+                    "$(snell_conf_get mode "$xconf" 2>/dev/null || echo default)" \
+                    "$(snell_conf_get dns-ip-preference "$xconf" 2>/dev/null || echo default)" "$xconf"
+                systemctl try-restart "snell-port@${xp}" >/dev/null 2>&1 || true
+            done < <(snell_extra_ports)
             info "Snell 的监听地址已按当前 IPv6 状态调整"
         fi
     fi
@@ -7435,6 +7765,7 @@ Nowhere:
 Snell v${SNELL_MAJOR}:
   snell                      打开 Snell 菜单
   snell install | update | config | reconfig | status | health | repair | logs | restart | uninstall
+  snell ports | add-port | del-port [端口]    多端口：列出 / 新增 / 删除某个端口配置
   snell auto on|off          开/关 跟随官方发布的自动更新（默认 beta 通道：跟随最新测试版）
 
 Xray (SS / VLESS):
