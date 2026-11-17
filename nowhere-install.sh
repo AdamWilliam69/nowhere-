@@ -146,6 +146,10 @@ set -o pipefail
 #       回退中文，不会丢字。i18n 函数名仍为 L()（v4.4 已由 tr() 改名，避免遮蔽系统 tr 命令）。
 #     - 安装开始即选语言：do_install 第 0 步先问 1) 中文 2) English（默认当前语言），
 #       选完立即生效并持久化；首次打开主菜单且未存过语言时也会先问一次。adam lang zh|en 不变。
+#   ── 脚本 v4.6 修订（2026-11-17）──
+#     - 主菜单不再显示管理脚本版本：该行改为当前时间 + 公网 IP（时间取 date，
+#       IP 复用 detect_public_host；同一进程内只探测一次，避免每次刷新菜单都等网络，
+#       取不到显示未知）。版本号仍在「脚本更新」菜单与 adam version 里看。
 #   ── 脚本 v4.2 修订（2026-11-16）──
 #     - 主菜单重排为两组八项：协议安装（1 Nowhere / 2 Snell / 3 Xray）与系统管理（4 脚本更新 / 5 防火墙 /
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
@@ -178,7 +182,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="4.5"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="8"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -1865,6 +1869,7 @@ L() {
         '，dial=') printf '%s' ', dial=' ;;
         '，morph=') printf '%s' ', morph=' ;;
         '？') printf '%s' '?' ;;
+        '时间') printf '%s' 'Time' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -3090,6 +3095,16 @@ setup_acmesh_renewal() {
     "${ACME_HOME}/acme.sh" --list 2>/dev/null | grep -E "Main_Domain|${DOMAIN}" || true
 }
 
+# 主菜单时间 + 公网 IP：同一进程内只探测一次，避免每次刷新菜单都等网络
+# （直接调用、不包在 $() 里，否则赋值落在子 shell、缓存不生效）
+menu_time_ip() {
+    if [ -z "${_MENU_PUBLIC_IP_DONE:-}" ]; then
+        _MENU_PUBLIC_IP="$(detect_public_host)"
+        _MENU_PUBLIC_IP_DONE=1
+    fi
+    echo -e "  $(L '时间'): $(date '+%Y-%m-%d %H:%M:%S')  IP: ${_MENU_PUBLIC_IP:-$(L '未知')}"
+}
+
 menu_status_summary() {
     echo -e "  Nowhere : $(nowhere_state_text)"
     echo -e "  Snell   : $(snell_state_text)"
@@ -3105,7 +3120,7 @@ show_menu() {
     echo "║   Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · $(L '防火墙') · Fail2ban · $(L '调优')║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
-    echo -e "  $(L '管理脚本版本'): ${SCRIPT_VERSION}"
+    menu_time_ip
     menu_status_summary
     divider
     echo -e "  ${BOLD}── $(L '协议安装') ──${NC}"
