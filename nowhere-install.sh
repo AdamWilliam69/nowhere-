@@ -150,6 +150,17 @@ set -o pipefail
 #     - 主菜单不再显示管理脚本版本：该行改为当前时间 + 公网 IP（时间取 date，
 #       IP 复用 detect_public_host；同一进程内只探测一次，避免每次刷新菜单都等网络，
 #       取不到显示未知）。版本号仍在「脚本更新」菜单与 adam version 里看。
+#   ── 脚本 v9 修订（2026-11-19，修三处实装反馈）──
+#     - adam 快捷命令：install_shortcuts 失败曾被 || true 静默吞掉（管道安装且新版未推
+#       GitHub 时 ensure_manager_copy 下载 404 即无快捷命令）；现快捷壳先校验管理脚本副本
+#       在位、缺失时给修复命令，安装/重配结束 verify_shortcuts 再验一次，doctor 也查。
+#     - Xray 分享链接地址：detect_public_host 的 hostname -I 兜底曾直接取首地址（常为内
+#       网 IP），现只取公网 IP、取不到返回空；安装提示与菜单 13 改地址时校验：IP 须为公
+#       网 IP、域名须能解析且解析到本机公网 IP，否则警告并由用户确认是否仍用；地址为空
+#       时不再生成 @:端口 的坏链接。
+#     - Xray 路由：00-base.json 补 geoip:cn / geosite:cn → block（默认开），缺 geo 数据
+#       时自动从官方 release 下载，下载失败则不开启；Xray 菜单 15 与 xray cnblock [on|off]
+#       可开关（状态存 XRAY_CN_BLOCK）。
 #   ── 脚本 v4.2 修订（2026-11-16）──
 #     - 主菜单重排为两组八项：协议安装（1 Nowhere / 2 Snell / 3 Xray）与系统管理（4 脚本更新 / 5 防火墙 /
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
@@ -182,7 +193,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="8"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="v8.2"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -1870,6 +1881,30 @@ L() {
         '，morph=') printf '%s' ', morph=' ;;
         '？') printf '%s' '?' ;;
         '时间') printf '%s' 'Time' ;;
+        '大陆流量拦截（geoip:cn / geosite:cn → 拦截）开 / 关') printf '%s' 'Block mainland traffic (geoip:cn / geosite:cn) on / off' ;;
+        '大陆流量拦截（geoip:cn / geosite:cn → 拦截）：') printf '%s' 'Mainland traffic block (geoip:cn / geosite:cn): ' ;;
+        '大陆拦截:') printf '%s' 'Mainland block:' ;;
+        '快捷命令已就绪：输入 adam 打开菜单') printf '%s' 'Shortcuts ready: type adam to open the menu' ;;
+        '快捷命令未能安装（服务本身不受影响）') printf '%s' 'Shortcuts could not be installed (services are unaffected)' ;;
+        '修复：重新运行安装脚本文件，或执行：') printf '%s' 'Fix: re-run the installer file, or run:' ;;
+        '快捷命令 adam：正常（指向') printf '%s' 'Shortcut adam: OK (points to' ;;
+        '快捷命令 adam 不可用：请执行') printf '%s' 'Shortcut adam is unavailable: please run' ;;
+        '或重新运行安装脚本') printf '%s' 'or re-run the installer' ;;
+        '该地址不是公网 IP（内网/保留地址），客户端连不上：') printf '%s' 'That address is not a public IP (private/reserved); clients cannot connect: ' ;;
+        '该域名解析不到任何 IP，请检查域名/DNS：') printf '%s' 'That domain resolves to no IP; check the domain/DNS: ' ;;
+        '该域名解析到的 IP 与本机公网 IP 不一致（可能是 CDN/多线，也可能是填错）：') printf '%s' 'That domain resolves to IPs different from this machine'\''s public IP (may be CDN/multi-line, or a typo): ' ;;
+        '本机公网 IP：') printf '%s' 'This machine'\''s public IP: ' ;;
+        '仍要使用这个地址？') printf '%s' 'Use this address anyway?' ;;
+        '未能确定公网地址，分享链接暂不可用，请用 Xray 菜单 13 设置公网地址') printf '%s' 'Could not determine the public address; share links are unavailable for now. Set it in Xray menu 13.' ;;
+        'geo 数据缺失，大陆拦截未开启') printf '%s' 'Geo data missing; mainland block not enabled' ;;
+        'geo 数据缺失：本次安装先不开启大陆拦截，稍后用 Xray 菜单 15 再开') printf '%s' 'Geo data missing: mainland block will not be enabled for this install; enable it later from Xray menu 15' ;;
+        '下载 geo 数据失败：') printf '%s' 'Failed to download geo data: ' ;;
+        '，大陆拦截暂不可用') printf '%s' '; mainland block unavailable' ;;
+        '用法：xray cnblock on|off') printf '%s' 'Usage: xray cnblock on|off' ;;
+        '配置重载失败，拦截状态未生效，请查看日志') printf '%s' 'Config reload failed; the block state did not take effect. Check the logs.' ;;
+        '公网地址为空') printf '%s' 'Public address is empty' ;;
+        '未修改') printf '%s' 'Not changed' ;;
+        '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：') printf '%s' 'Shortcut install failed: check that /usr/local/bin is writable and the manager copy exists: ' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -2319,20 +2354,106 @@ gen_key() {
     fi
 }
 
+# 是否为公网 IP（排除私网/回环/链路本地/CGNAT/文档段/组播；IPv6 排除回环/链路本地/ULA/文档段）
+is_public_ip() {
+    local ip="$1" a b
+    ip="${ip#[}"; ip="${ip%]}"
+    if [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+        case "$a" in
+            0|127) return 1 ;;
+            10) return 1 ;;
+            100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 1 ;;
+            169) [ "$b" = "254" ] && return 1 ;;
+            172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1 ;;
+            192)
+                case "$b" in 0|168) return 1 ;; esac
+                ;;
+            198)
+                case "$b" in 18|19|51) return 1 ;; esac
+                ;;
+            203) [ "$b" = "0" ] && return 1 ;;
+            224|225|226|227|228|229|230|231|232|233|234|235|236|237|238|239) return 1 ;;
+            24[0-9]|25[0-9]) return 1 ;;
+        esac
+        return 0
+    fi
+    local low="${ip,,}"
+    case "$low" in
+        ::1|::) return 1 ;;
+        fe8*|fe9*|fea*|feb*|fc*|fd*) return 1 ;;
+        2001:db8*) return 1 ;;
+    esac
+    [[ "$low" == *:* ]] && return 0
+    return 1
+}
+
 detect_public_host() {
-    local detected="" u
+    local detected="" u cand
     for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.me/ip; do
         detected="$(curl -4fsS --max-time 4 "$u" 2>/dev/null | tr -d ' \r\n' || true)"
         if [[ "$detected" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
         detected=""
     done
     if [ -z "$detected" ]; then
-        # 纯 IPv6 机器：旧版只查 IPv4，取不到就退回 hostname -I 的第一个地址（可能是内网地址）
+        # 纯 IPv6 机器：再查一次 IPv6 出口地址（只接受公网段）
         detected="$(curl -6fsS --max-time 4 https://api64.ipify.org 2>/dev/null | tr -d ' \r\n' || true)"
-        [[ "$detected" =~ ^[0-9A-Fa-f:]+$ ]] || detected=""
+        [[ "$detected" =~ ^[0-9A-Fa-f:]+$ ]] && is_public_ip "$detected" || detected=""
     fi
-    [[ -z "$detected" ]] && detected="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [ -z "$detected" ]; then
+        # hostname -I 可能先返回内网地址：只取其中第一个公网 IP，取不到返回空
+        # （空值会强制手动输入，而不是悄悄用内网 IP 生成一堆连不上的分享链接）
+        for cand in $(hostname -I 2>/dev/null || true); do
+            if is_public_ip "$cand"; then detected="$cand"; break; fi
+        done
+    fi
     printf '%s' "$detected"
+}
+
+# 解析域名到 IP 列表（每行一个），解析不到返回空
+resolve_host_ips() {
+    local host="$1" out=""
+    if command -v getent >/dev/null 2>&1; then
+        out="$(getent hosts "$host" 2>/dev/null | awk '{print $1}' || true)"
+    fi
+    if [ -z "$out" ] && command -v host >/dev/null 2>&1; then
+        out="$(host "$host" 2>/dev/null | awk '/has address|has IPv6 address/ {print $NF}' || true)"
+    fi
+    if [ -z "$out" ] && command -v dig >/dev/null 2>&1; then
+        out="$(dig +short "$host" 2>/dev/null | grep -E '^[0-9A-Fa-f:.]+$' || true)"
+    fi
+    printf '%s' "$out"
+}
+
+# 校验分享链接用的公网地址：IP 必须是公网 IP；域名必须能解析，且解析结果须与本机公网 IP 一致
+# （不一致可能是 CDN/多线，也可能是填错；调用方据此警告并由用户确认是否仍用）。返回 0=可用，1=有问题
+check_public_host() {
+    local host="$1" detected="" resolved="" rip
+    if [ -z "$host" ]; then
+        warn "$(L '公网地址为空')"
+        return 1
+    fi
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$host" == *:* ]]; then
+        if ! is_public_ip "$host"; then
+            warn "$(L '该地址不是公网 IP（内网/保留地址），客户端连不上：')${host}"
+            return 1
+        fi
+        return 0
+    fi
+    resolved="$(resolve_host_ips "$host")"
+    if [ -z "$resolved" ]; then
+        warn "$(L '该域名解析不到任何 IP，请检查域名/DNS：')${host}"
+        return 1
+    fi
+    detected="$(detect_public_host)"
+    if [ -n "$detected" ]; then
+        while IFS= read -r rip; do
+            [ "$rip" = "$detected" ] && return 0
+        done <<< "$resolved"
+        warn "$(L '该域名解析到的 IP 与本机公网 IP 不一致（可能是 CDN/多线，也可能是填错）：')$(printf '%s' "$resolved" | tr '\n' ' ' | sed 's/ $//')$(L '，本机公网 IP：')${detected}"
+        return 1
+    fi
+    return 0
 }
 
 mask_secret() {
@@ -2836,6 +2957,18 @@ ensure_manager_copy() {
     return 0
 }
 
+# 校验快捷命令与管理脚本副本是否就绪（安装/重配结束时调用；只警告，不中断安装）
+verify_shortcuts() {
+    if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then
+        success "$(L '快捷命令已就绪：输入 adam 打开菜单')"
+        return 0
+    fi
+    warn "$(L '快捷命令未能安装（服务本身不受影响）')"
+    info "$(L '修复：重新运行安装脚本文件，或执行：')"
+    echo "  curl -fsSL ${SCRIPT_URL} -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH} shortcuts"
+    return 1
+}
+
 install_shortcuts() {
     step "$(L '安装快捷命令')"
     divider
@@ -2844,35 +2977,32 @@ install_shortcuts() {
         return 1
     fi
 
-    cat > /usr/local/bin/adam << SHORTEOF
+    # 快捷命令只是薄壳：先校验管理脚本副本在位，缺失时给出修复方法而不是报看不懂的错
+    local spec name args
+    for spec in "adam:" "zt:status" "pz:config" "cxpz:reconfig" "cq:restart"; do
+        name="${spec%%:*}"; args="${spec#*:}"
+        cat > "/usr/local/bin/${name}" << SHORTEOF
 #!/bin/bash
-exec "${MANAGER_PATH}" "\$@"
+if [ ! -x "${MANAGER_PATH}" ]; then
+    echo "管理脚本副本缺失：${MANAGER_PATH}" >&2
+    echo "修复：重新运行安装脚本文件，或执行：" >&2
+    echo "  curl -fsSL ${SCRIPT_URL} -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH} shortcuts" >&2
+    exit 1
+fi
+exec "${MANAGER_PATH}" ${args} "\$@"
 SHORTEOF
-    chmod +x /usr/local/bin/adam
+        chmod +x "/usr/local/bin/${name}"
+    done
 
-    cat > /usr/local/bin/zt << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" status
-SHORTEOF
-    chmod +x /usr/local/bin/zt
-
-    cat > /usr/local/bin/pz << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" config
-SHORTEOF
-    chmod +x /usr/local/bin/pz
-
-    cat > /usr/local/bin/cxpz << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" reconfig
-SHORTEOF
-    chmod +x /usr/local/bin/cxpz
-
-    cat > /usr/local/bin/cq << SHORTEOF
-#!/bin/bash
-exec "${MANAGER_PATH}" restart
-SHORTEOF
-    chmod +x /usr/local/bin/cq
+    local missing=0 n
+    for n in adam zt pz cxpz cq; do
+        [ -x "/usr/local/bin/${n}" ] || missing=1
+    done
+    [ -x "$MANAGER_PATH" ] || missing=1
+    if [ "$missing" = "1" ]; then
+        warn "$(L '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：')${MANAGER_PATH}"
+        return 1
+    fi
 
     success "$(L '快捷命令已安装完成')"
     echo -e "  ${CYAN}adam${NC}   $(L '— 打开管理菜单')"
@@ -3905,6 +4035,7 @@ SVCEOF
     step "$(L '第 13 步：安装快捷命令')"
     divider
     install_shortcuts || true
+    verify_shortcuts || true
 }
 
 print_all_info() {
@@ -4442,6 +4573,7 @@ EGCONFEOF
     echo ""
     info "$(L '常用命令：systemctl status nowhere / journalctl -u nowhere -f /') ${MANAGER_PATH} status"
     install_shortcuts || true
+    verify_shortcuts || true
 }
 
 do_uninstall() {
@@ -6386,6 +6518,7 @@ do_doctor() {
     echo "  Nowhere  : $([ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>&1 | head -1 || echo "$(L '未安装')") $(L '· 角色') $(current_role) · $(svc_state nowhere)"
     echo "  Snell    : $([ -x "$SNELL_BIN" ] && "$SNELL_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state snell)"
     echo "  Xray     : $([ -x "$XRAY_BIN" ] && "$XRAY_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state adam-xray)"
+    if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
     echo "  $(L '保活巡检 :') $(maint_timer_state adam-watchdog.timer)    $(L '每日维护 :') $(maint_timer_state adam-maintain.timer)"
     echo ""
     info "$(L '监听端口（ss）：')"
@@ -7915,7 +8048,7 @@ xray_installed_version() {
 }
 
 xray_load_state() {
-    XRAY_CHANNEL="prerelease"; XRAY_AUTO_UPDATE="0"; XRAY_PUBLIC_HOST=""; XRAY_PIN_VERSION=""
+    XRAY_CHANNEL="prerelease"; XRAY_AUTO_UPDATE="0"; XRAY_PUBLIC_HOST=""; XRAY_PIN_VERSION=""; XRAY_CN_BLOCK="1"
     if [ -f "$XRAY_STATE_FILE" ]; then
         # shellcheck disable=SC1090
         source "$XRAY_STATE_FILE" 2>/dev/null || true
@@ -7931,6 +8064,7 @@ XRAY_CHANNEL="${XRAY_CHANNEL}"
 XRAY_AUTO_UPDATE="${XRAY_AUTO_UPDATE}"
 XRAY_PUBLIC_HOST="${XRAY_PUBLIC_HOST}"
 XRAY_PIN_VERSION="${XRAY_PIN_VERSION}"
+XRAY_CN_BLOCK="${XRAY_CN_BLOCK:-1}"
 XRSTEOF
     chmod 600 "$XRAY_STATE_FILE"
 }
@@ -8050,9 +8184,70 @@ xray_apply_binary() {
     return 0
 }
 
+# 确保 geoip.dat / geosite.dat 在位（大陆拦截规则依赖它们）；缺失时从官方 release 下载
+xray_ensure_geo_data() {
+    local missing=0 f url
+    for f in geoip.dat geosite.dat; do
+        [ -f "$XRAY_DIR/$f" ] || missing=1
+    done
+    [ "$missing" = "0" ] && return 0
+    install -d -m 755 "$XRAY_DIR"
+    for f in geoip.dat geosite.dat; do
+        [ -f "$XRAY_DIR/$f" ] && continue
+        case "$f" in
+            geoip.dat) url="https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" ;;
+            geosite.dat) url="https://github.com/v2fly/domain-list-community/releases/latest/download/geosite.dat" ;;
+        esac
+        if curl -fsSL --max-time 60 "$url" -o "$XRAY_DIR/$f.tmp" 2>/dev/null && [ -s "$XRAY_DIR/$f.tmp" ]; then
+            install -m 644 "$XRAY_DIR/$f.tmp" "$XRAY_DIR/$f"
+        else
+            rm -f "$XRAY_DIR/$f.tmp"
+            warn "$(L '下载 geo 数据失败：')${f}$(L '，大陆拦截暂不可用')"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# 大陆流量拦截开关（geoip:cn / geosite:cn → block）：xray cnblock [on|off]，不带参数=切换
+xray_cnblock() {
+    xray_require || return 1
+    local want="${1:-}"
+    xray_load_state
+    case "$want" in
+        on) XRAY_CN_BLOCK="1" ;;
+        off) XRAY_CN_BLOCK="0" ;;
+        "") [ "${XRAY_CN_BLOCK:-1}" = "1" ] && XRAY_CN_BLOCK="0" || XRAY_CN_BLOCK="1" ;;
+        *) warn "$(L '用法：xray cnblock on|off')"; return 1 ;;
+    esac
+    if [ "$XRAY_CN_BLOCK" = "1" ]; then
+        if ! xray_ensure_geo_data; then
+            warn "$(L 'geo 数据缺失，大陆拦截未开启')"
+            XRAY_CN_BLOCK="0"
+            xray_save_state
+            return 1
+        fi
+    fi
+    xray_save_state
+    xray_write_base
+    if xray_reload; then
+        success "$(L '大陆流量拦截（geoip:cn / geosite:cn → 拦截）：')$([ "$XRAY_CN_BLOCK" = "1" ] && echo "$(L '开')" || echo "$(L '关')")"
+    else
+        warn "$(L '配置重载失败，拦截状态未生效，请查看日志')"
+        return 1
+    fi
+    return 0
+}
+
 xray_write_base() {
     install -d -m 750 "$XRAY_CONF_D"
-    cat > "${XRAY_CONF_D}/00-base.json" << 'XRBASE'
+    local cn_rules=""
+    if [ "${XRAY_CN_BLOCK:-1}" = "1" ]; then
+        cn_rules=",
+      { \"type\": \"field\", \"ip\": [\"geoip:cn\"], \"outboundTag\": \"block\" },
+      { \"type\": \"field\", \"domain\": [\"geosite:cn\"], \"outboundTag\": \"block\" }"
+    fi
+    cat > "${XRAY_CONF_D}/00-base.json" << XRBASE
 {
   "log": { "loglevel": "warning" },
   "outbounds": [
@@ -8062,7 +8257,7 @@ xray_write_base() {
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }
+      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }${cn_rules}
     ]
   }
 }
@@ -8588,6 +8783,10 @@ xray_show_node() {
         fi
         if [ "$N_TYPE" = "ss2022" ]; then echo "  $(L '加密:') ${N_METHOD}    $(L '密码:') ${N_PASS}"; fi
     ) || return 1
+    if [ -z "$host" ]; then
+        warn "$(L '未能确定公网地址，分享链接暂不可用，请用 Xray 菜单 13 设置公网地址')"
+        return 0
+    fi
     link="$(xray_node_link "$tag" "$host" || true)"
     echo -e "  $(L '分享链接:')\n  ${GREEN}${link}${NC}"
     if command -v qrencode >/dev/null 2>&1 && [ -n "$link" ] && [ -t 1 ]; then
@@ -8767,6 +8966,10 @@ xray_install() {
     xray_fetch "$XRAY_TARGET" || return 1
     xray_ensure_user || return 1
     xray_apply_binary
+    if [ "${XRAY_CN_BLOCK:-1}" = "1" ] && ! xray_ensure_geo_data; then
+        warn "$(L 'geo 数据缺失：本次安装先不开启大陆拦截，稍后用 Xray 菜单 15 再开')"
+        XRAY_CN_BLOCK="0"
+    fi
     [ -f "${XRAY_CONF_D}/00-base.json" ] || xray_write_base
     xray_write_service
     xray_fix_perms
@@ -8776,8 +8979,12 @@ xray_install() {
     while true; do
         read -rp "$(L '生成分享链接用的公网地址（回车使用') ${host:-$(L '未探测到，请手动输入')}$(L '）:') " ans
         ans="${ans:-$host}"
-        if [[ -n "$ans" && "$ans" =~ $hostre ]]; then host="$ans"; break; fi
-        warn "$(L '地址不能为空，且只能包含字母、数字和 . : - _') [ ]"
+        if [[ -z "$ans" || ! "$ans" =~ $hostre ]]; then
+            warn "$(L '地址不能为空，且只能包含字母、数字和 . : - _') [ ]"
+            continue
+        fi
+        if check_public_host "$ans"; then host="$ans"; break; fi
+        if confirm "$(L '仍要使用这个地址？')" n; then host="$ans"; break; fi
     done
     XRAY_PUBLIC_HOST="$host"
     if [ "$XRAY_CHANNEL" = "pin" ]; then
@@ -9001,10 +9208,14 @@ xray_set_host() {
     local ans hostre='^[][A-Za-z0-9.:_-]+$'
     xray_load_state
     read -rp "$(L '分享链接用的公网地址（当前') ${XRAY_PUBLIC_HOST:-$(L '未设置')}$(L '）:') " ans
-    if [[ -n "$ans" && "$ans" =~ $hostre ]]; then
+    if [[ -z "$ans" || ! "$ans" =~ $hostre ]]; then
+        warn "$(L '未修改（为空或格式不合法）')"
+        return 0
+    fi
+    if check_public_host "$ans" || confirm "$(L '仍要使用这个地址？')" n; then
         XRAY_PUBLIC_HOST="$ans"; xray_save_state; success "$(L '已更新')"
     else
-        warn "$(L '未修改（为空或格式不合法）')"
+        warn "$(L '未修改')"
     fi
     return 0
 }
@@ -9049,7 +9260,7 @@ xray_menu() {
         clear 2>/dev/null || true
         xray_load_state
         echo -e "${BOLD}${CYAN}━━━ $(L 'Xray 管理（SS / VLESS）') ━━━${NC}"
-        echo -e "  $(L '当前状态:') $(xray_state_text)    $(L '通道:') ${XRAY_CHANNEL}    $(L '自动更新:') $(maint_onoff "$XRAY_AUTO_UPDATE")"
+        echo -e "  $(L '当前状态:') $(xray_state_text)    $(L '通道:') ${XRAY_CHANNEL}    $(L '自动更新:') $(maint_onoff "$XRAY_AUTO_UPDATE")    $(L '大陆拦截:') $([ "${XRAY_CN_BLOCK:-1}" = "1" ] && echo "$(L '开')" || echo "$(L '关')")"
         divider
         echo -e "  ${GREEN}1)${NC}  ${GREEN}$(L '安装')${NC} $(L '/ 重装 Xray 内核（选择通道：最新预发布 / 正式版 / 指定版本）')"
         echo -e "  ${GREEN}2)${NC}  ${GREEN}$(L '添加节点')${NC}$(L '（REALITY Vision / XHTTP REALITY / XHTTP CDN / VLESS Encryption / SS2022）')"
@@ -9065,9 +9276,10 @@ xray_menu() {
         echo -e "  ${GREEN}12)${NC} $(L '重启服务')"
         echo -e "  ${GREEN}13)${NC} $(L '修改分享链接用的公网地址')"
         echo -e "  ${GREEN}14)${NC} ${RED}$(L '卸载')${NC} Xray"
+        echo -e "  ${GREEN}15)${NC} $(L '大陆流量拦截（geoip:cn / geosite:cn → 拦截）开 / 关')"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-14]: " choice
+        read -rp "$(L '请选择') [0-15]: " choice
         case "$choice" in
             1)  run_action xray_install ;;
             2)  run_action xray_add_node ;;
@@ -9083,6 +9295,7 @@ xray_menu() {
             12) run_action xray_restart ;;
             13) run_action xray_set_host ;;
             14) run_action xray_uninstall ;;
+            15) run_action xray_cnblock ;;
             0)  return 0 ;;
             *)  warn "$(L '无效选择')" ;;
         esac
@@ -9106,6 +9319,7 @@ xray_cli() {
         status)       xray_status ;;
         logs)         xray_logs ;;
         restart)      xray_restart ;;
+        cnblock)      xray_cnblock "$@" ;;
         uninstall)    xray_uninstall ;;
         *) error "$(L '未知的 xray 子命令:') ${sub}$(L '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / uninstall）')" ;;
     esac
@@ -9778,7 +9992,7 @@ Snell v${SNELL_MAJOR}:
 
 Xray (SS / VLESS):
   $(L 'xray                       打开 Xray 菜单')
-  xray install | add | list | links | delete | update | health | repair | status | logs | restart | uninstall
+  xray install | add | list | links | delete | update | health | repair | status | logs | restart | cnblock [on|off] | uninstall
 
 $(L '系统与网络调优:')
   $(L 'tune                       打开调优菜单')
