@@ -161,6 +161,15 @@ set -o pipefail
 #     - Xray 路由：00-base.json 补 geoip:cn / geosite:cn → block（默认开），缺 geo 数据
 #       时自动从官方 release 下载，下载失败则不开启；Xray 菜单 15 与 xray cnblock [on|off]
 #       可开关（状态存 XRAY_CN_BLOCK）。
+#   ── 脚本 v8.3 修订（2026-11-19，新增 Xray 直连域名证书节点）──
+#     - 新增节点类型 6) VLESS + XHTTP + TLS（直连域名证书）：域名申请 Let's Encrypt
+#       证书（复用 Nowhere 的 certbot HTTP-01 / Cloudflare DNS-01 流程；同一域名已有
+#       有效证书时直接复用；已有证书文件也可直接用），续期由每日维护 xray_sync_certs
+#       同步并重启 Xray。
+#     - IP 选项保留：同一节点两种连法——分享链接地址用域名或本机 IP 均可（TLS 只验证
+#       SNI=域名），菜单 13 切换地址；节点详情同时给出另一地址的备用链接。
+#     - 直接节点（REALITY / VLESS Encryption / SS）本来就不需要域名证书：server 地址
+#       只是 TCP 目标，域名不通是 DNS 没解析到本机 IP，与证书无关。
 #   ── 脚本 v4.2 修订（2026-11-16）──
 #     - 主菜单重排为两组八项：协议安装（1 Nowhere / 2 Snell / 3 Xray）与系统管理（4 脚本更新 / 5 防火墙 /
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
@@ -1905,6 +1914,25 @@ L() {
         '公网地址为空') printf '%s' 'Public address is empty' ;;
         '未修改') printf '%s' 'Not changed' ;;
         '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：') printf '%s' 'Shortcut install failed: check that /usr/local/bin is writable and the manager copy exists: ' ;;
+        'VLESS + XHTTP + TLS（直连域名证书，证书自动申请，IP 照常用）') printf '%s' 'VLESS + XHTTP + TLS (direct domain cert, auto-issued; IP still works)' ;;
+        'VLESS + XHTTP + TLS（直连域名证书）') printf '%s' 'VLESS + XHTTP + TLS (direct domain cert)' ;;
+        '直连域名证书节点：客户端连域名或本机 IP 均可（SNI 始终为域名，证书只验证域名）') printf '%s' 'Direct domain-cert node: clients may connect by domain or by this machine'\''s IP (SNI is always the domain; the cert only validates the domain)' ;;
+        '域名（须已解析到本机，证书将签发给它）:') printf '%s' 'Domain (must already resolve to this machine; the cert is issued for it): ' ;;
+        'ACME 邮箱（证书账户用）:') printf '%s' 'ACME email (for the certificate account): ' ;;
+        '邮箱不能为空') printf '%s' 'Email cannot be empty' ;;
+        '证书申请方式：') printf '%s' 'Certificate method: ' ;;
+        'HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）') printf '%s' 'HTTP-01 (domain resolves to this machine + port 80 open, auto-renewal)' ;;
+        'Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）') printf '%s' 'Cloudflare DNS-01 (needs a CF API key/token, auto-renewal, port 80 can stay closed)' ;;
+        '已有证书文件（fullchain.pem + privkey.pem）') printf '%s' 'Existing certificate files (fullchain.pem + privkey.pem)' ;;
+        '检测到该域名已有有效证书，直接复用') printf '%s' 'Found a valid certificate for this domain; reusing it' ;;
+        '证书申请中（HTTP-01，需 80 端口）...') printf '%s' 'Requesting the certificate (HTTP-01, needs port 80)...' ;;
+        '证书申请中（Cloudflare DNS-01，约需 30-60 秒）...') printf '%s' 'Requesting the certificate (Cloudflare DNS-01, about 30-60s)...' ;;
+        '域名解析未通过，HTTP-01 很可能失败，仍要继续申请？') printf '%s' 'DNS check failed; HTTP-01 will probably fail. Continue anyway?' ;;
+        'Cloudflare 凭证文件已存在，直接复用') printf '%s' 'Cloudflare credentials file already exists; reusing it' ;;
+        '同一节点两种连法：域名或本机 IP（SNI 始终为域名），用 Xray 菜单 13 切换分享链接地址') printf '%s' 'Same node, two addresses: domain or this machine'\''s IP (SNI is always the domain); switch the share-link address in Xray menu 13' ;;
+        '备用链接（另一地址，SNI 仍为域名）:') printf '%s' 'Alternate link (other address, SNI is still the domain): ' ;;
+        'certbot Cloudflare 插件安装失败') printf '%s' 'Failed to install the certbot Cloudflare plugin' ;;
+        '域名:') printf '%s' 'Domain: ' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -8596,6 +8624,142 @@ xray_sync_certs() {
     return 0
 }
 
+# certbot 自动续期只负责“续签”，新证书的同步与重启由每日维护的 xray_sync_certs 负责
+xray_ensure_certbot_timer() {
+    if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
+        systemctl enable --now certbot.timer 2>/dev/null || warn "$(L 'certbot.timer 启用失败，自动续期可能不工作')"
+        return 0
+    fi
+    (crontab -l 2>/dev/null | grep -v 'certbot renew' || true; echo '0 3,15 * * * certbot renew --quiet') | crontab - 2>/dev/null || true
+    return 0
+}
+
+# 为域名申请/复用证书并复制到节点证书目录；成功时设置 XRAY_OBT_CRT/XRAY_OBT_KEY（源路径）
+xray_obtain_cert() {
+    local domain="$1" tag="$2" email="$3"
+    local le_crt="/etc/letsencrypt/live/${domain}/fullchain.pem"
+    local le_key="/etc/letsencrypt/live/${domain}/privkey.pem"
+    local ans src_crt="" src_key="" cf_email cf_key
+    if cert_is_valid "$domain" "$le_crt" "$le_key"; then
+        info "$(L '检测到该域名已有有效证书，直接复用')"
+        xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
+        XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
+        return 0
+    fi
+    echo "$(L '证书申请方式：')"
+    echo "  1) $(L 'HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）')"
+    echo "  2) $(L 'Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）')"
+    echo "  3) $(L '已有证书文件（fullchain.pem + privkey.pem）')"
+    read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans
+    case "${ans:-1}" in
+        3)
+            read -rp "$(L '证书文件路径（fullchain.pem）:') " src_crt
+            read -rp "$(L '私钥文件路径（privkey.pem）:') " src_key
+            if [ ! -f "$src_crt" ] || [ ! -f "$src_key" ]; then warn "$(L '证书或私钥文件不存在')"; return 1; fi
+            if ! cert_covers_domain "$src_crt" "$domain"; then
+                warn "$(L '该证书的域名列表里没有') ${domain}"
+                confirm "$(L '仍要使用？')" n || return 1
+            fi
+            xray_install_cert "$tag" "$src_crt" "$src_key" || { warn "$(L '证书复制失败')"; return 1; }
+            XRAY_OBT_CRT="$src_crt"; XRAY_OBT_KEY="$src_key"
+            return 0
+            ;;
+        2)
+            apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
+            apt_install python3-certbot-dns-cloudflare || { warn "$(L 'certbot Cloudflare 插件安装失败')"; return 1; }
+            if [ -s /etc/cloudflare/credentials.ini ]; then
+                info "$(L 'Cloudflare 凭证文件已存在，直接复用')"
+            else
+                read -rp "$(L 'Cloudflare 邮箱:') " cf_email
+                cf_email="$(printf '%s' "$cf_email" | tr -d ' \r\n')"
+                read -rsp "$(L 'Cloudflare API Token（建议）或 Global API Key（输入不回显）:') " cf_key; echo
+                cf_key="$(printf '%s' "$cf_key" | tr -d ' \r\n')"
+                if [ -z "$cf_email" ] || [ -z "$cf_key" ]; then warn "$(L 'Cloudflare 邮箱与凭证不能为空，已中止')"; return 1; fi
+                mkdir -p /etc/cloudflare
+                if [ "${#cf_key}" -ge 40 ]; then
+                    printf 'dns_cloudflare_api_token = %s\n' "$cf_key" > /etc/cloudflare/credentials.ini
+                else
+                    printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$cf_email" "$cf_key" > /etc/cloudflare/credentials.ini
+                fi
+                chmod 600 /etc/cloudflare/credentials.ini
+            fi
+            info "$(L '证书申请中（Cloudflare DNS-01，约需 30-60 秒）...')"
+            certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
+                --non-interactive --agree-tos --email "$email" -d "$domain" \
+                --dns-cloudflare-propagation-seconds 30 || { warn "$(L '证书申请失败：检查 CF 凭证与域名归属')"; return 1; }
+            verify_issued_cert "$domain" "$le_crt" "$le_key" || { warn "$(L '证书签发后校验未通过')"; return 1; }
+            success "$(L '证书申请成功')"
+            xray_ensure_certbot_timer
+            xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
+            XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
+            return 0
+            ;;
+        *)
+            if ! check_domain_dns "$domain"; then
+                confirm "$(L '域名解析未通过，HTTP-01 很可能失败，仍要继续申请？')" n || return 1
+            fi
+            apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
+            info "$(L '证书申请中（HTTP-01，需 80 端口）...')"
+            ufw allow 80/tcp 2>/dev/null || true
+            certbot certonly --standalone --preferred-challenges http --non-interactive \
+                --agree-tos --email "$email" -d "$domain" \
+                --http-01-port 80 --http-01-address 0.0.0.0 || { warn "$(L '证书申请失败：检查域名解析与 80 端口')"; return 1; }
+            verify_issued_cert "$domain" "$le_crt" "$le_key" || { warn "$(L '证书签发后校验未通过')"; return 1; }
+            success "$(L '证书申请成功')"
+            xray_ensure_certbot_timer
+            xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
+            XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
+            return 0
+            ;;
+    esac
+}
+
+# VLESS + XHTTP + TLS（直连域名证书）：TLS 只验证 SNI=域名，server 地址用域名或本机 IP 均可
+xray_add_xhttp_tls() {
+    local port uuid tag listen name path domain email re='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+    echo "$(L '直连域名证书节点：客户端连域名或本机 IP 均可（SNI 始终为域名，证书只验证域名）')"
+    while true; do
+        read -rp "$(L '域名（须已解析到本机，证书将签发给它）:') " domain
+        domain="$(printf '%s' "$domain" | tr -d ' \r\n')"
+        if [[ "$domain" == *.* && "$domain" =~ $re ]] && is_safe_host "$domain"; then break; fi
+        warn "$(L '域名格式不正确')"
+    done
+    while true; do
+        read -rp "$(L 'ACME 邮箱（证书账户用）:') " email
+        email="$(printf '%s' "$email" | tr -d ' \r\n')"
+        [ -n "$email" ] && break
+        warn "$(L '邮箱不能为空')"
+    done
+    xray_ask_port "$(xray_default_port 443)"; port="$XP_PORT"
+    xray_ask_vlessenc ask || true
+    uuid="$(xray_gen_uuid)"; listen="$(xray_listen_addr)"; path="/$(openssl rand -hex 6)"
+    tag="xhttp-tls-${port}"; name="VLESS-XHTTP-TLS-${port}"
+    XRAY_OBT_CRT=""; XRAY_OBT_KEY=""
+    xray_obtain_cert "$domain" "$tag" "$email" || return 1
+    local crt="${XRAY_CERT_DIR}/${tag}/fullchain.pem" key="${XRAY_CERT_DIR}/${tag}/privkey.pem"
+    xray_commit_node "$tag" "    {
+      \"tag\": \"${tag}\", \"listen\": \"${listen}\", \"port\": ${port}, \"protocol\": \"vless\",
+      \"settings\": { \"clients\": [ { \"id\": \"${uuid}\" } ], \"decryption\": \"${VE_DEC}\" },
+      \"streamSettings\": {
+        \"network\": \"xhttp\", \"security\": \"tls\",
+        \"tlsSettings\": { \"serverName\": \"${domain}\", \"alpn\": [\"h2\", \"http/1.1\"], \"certificates\": [ { \"certificateFile\": \"${crt}\", \"keyFile\": \"${key}\" } ] },
+        \"xhttpSettings\": { \"path\": \"${path}\", \"mode\": \"auto\" }
+      },
+      ${XRAY_SNIFF}
+    }" "N_TAG=\"${tag}\"
+N_TYPE=\"xhttp-tls\"
+N_PORT=\"${port}\"
+N_UUID=\"${uuid}\"
+N_DOMAIN=\"${domain}\"
+N_PATH=\"${path}\"
+N_ENC=\"${VE_ENC}\"
+N_CERT_SRC=\"${XRAY_OBT_CRT}\"
+N_KEY_SRC=\"${XRAY_OBT_KEY}\"
+N_NAME=\"${name}\"" || return 1
+    XRAY_NEW_TAG="$tag"
+    info "$(L '同一节点两种连法：域名或本机 IP（SNI 始终为域名），用 Xray 菜单 13 切换分享链接地址')"
+}
+
 xray_add_xhttp_cdn() {
     local port uuid tag listen name path domain ans origin="tls" crt="" key="" src_crt="" src_key="" cport="443" tls_block=""
     local re='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' dir
@@ -8743,6 +8907,8 @@ xray_node_link() {
                 echo "vless://${N_UUID}@${h}:${N_PORT}?encryption=${N_ENC}&security=reality&sni=${N_SNI}&fp=chrome&pbk=${N_PBK}&sid=${N_SID}&type=xhttp&path=${pathenc}&mode=auto&support-x25519mlkem768=true#${N_NAME}" ;;
             xhttp-cdn)
                 echo "vless://${N_UUID}@${N_DOMAIN}:${N_CPORT}?encryption=${N_ENC}&security=tls&sni=${N_DOMAIN}&fp=chrome&alpn=h2&type=xhttp&host=${N_DOMAIN}&path=${pathenc}&mode=auto#${N_NAME}" ;;
+            xhttp-tls)
+                echo "vless://${N_UUID}@${h}:${N_PORT}?encryption=${N_ENC}&security=tls&sni=${N_DOMAIN}&fp=chrome&alpn=h2&type=xhttp&host=${N_DOMAIN}&path=${pathenc}&mode=auto#${N_NAME}" ;;
             venc)
                 echo "vless://${N_UUID}@${h}:${N_PORT}?encryption=${N_ENC}&security=none&type=xhttp&path=${pathenc}&mode=auto#${N_NAME}" ;;
             ss2022)
@@ -8758,6 +8924,7 @@ xray_type_label() {
         vision)        printf 'VLESS + REALITY + Vision' ;;
         xhttp-reality) printf 'VLESS + XHTTP + REALITY' ;;
         xhttp-cdn)     printf 'VLESS + XHTTP（CDN）' ;;
+        xhttp-tls)     printf 'VLESS + XHTTP + TLS（直连域名证书）' ;;
         venc)          printf 'VLESS Encryption + XHTTP' ;;
         ss2022)        printf 'Shadowsocks 2022' ;;
         *)             printf '%s' "$1" ;;
@@ -8765,7 +8932,7 @@ xray_type_label() {
 }
 
 xray_show_node() {
-    local tag="$1" host link
+    local tag="$1" host link alt_host alt_link
     xray_load_state
     host="${XRAY_PUBLIC_HOST:-$(detect_public_host)}"
     (
@@ -8776,10 +8943,13 @@ xray_show_node() {
             vision|xhttp-reality) echo "  $(L '伪装站点:') ${N_SNI}    $(L '公钥')(pbk): ${N_PBK}    shortId: ${N_SID}" ;;
         esac
         case "$N_TYPE" in
-            xhttp-reality|xhttp-cdn|venc) echo "  $(L 'XHTTP 路径:') ${N_PATH}    VLESS Encryption: $([ "$N_ENC" = "none" ] && echo 未启用 || echo 已启用)" ;;
+            xhttp-reality|xhttp-cdn|venc|xhttp-tls) echo "  $(L 'XHTTP 路径:') ${N_PATH}    VLESS Encryption: $([ "$N_ENC" = "none" ] && echo 未启用 || echo 已启用)" ;;
         esac
         if [ "$N_TYPE" = "xhttp-cdn" ]; then
             echo "  $(L 'CDN 域名:') ${N_DOMAIN}$(L '（客户端端口') ${N_CPORT}$(L '）   回源:') $([ "$N_ORIGIN" = "plain" ] && echo "明文 HTTP" || echo "TLS") → $(L '本机') ${N_PORT}"
+        fi
+        if [ "$N_TYPE" = "xhttp-tls" ]; then
+            echo "  $(L '域名:') ${N_DOMAIN}    $(L '证书剩余约') $([ -f "${XRAY_CERT_DIR}/${tag}/fullchain.pem" ] && cert_expiry_days "${XRAY_CERT_DIR}/${tag}/fullchain.pem" 2>/dev/null || echo '?') $(L '天')"
         fi
         if [ "$N_TYPE" = "ss2022" ]; then echo "  $(L '加密:') ${N_METHOD}    $(L '密码:') ${N_PASS}"; fi
     ) || return 1
@@ -8789,6 +8959,17 @@ xray_show_node() {
     fi
     link="$(xray_node_link "$tag" "$host" || true)"
     echo -e "  $(L '分享链接:')\n  ${GREEN}${link}${NC}"
+    xray_node_load "$tag" 2>/dev/null || true
+    if [ "${N_TYPE:-}" = "xhttp-tls" ] && [ -n "${N_DOMAIN:-}" ]; then
+        alt_host=""
+        if [ "$host" = "$N_DOMAIN" ]; then alt_host="$(detect_public_host)"; else alt_host="$N_DOMAIN"; fi
+        if [ -n "$alt_host" ] && [ "$alt_host" != "$host" ]; then
+            alt_link="$(xray_node_link "$tag" "$alt_host" || true)"
+            if [ -n "$alt_link" ]; then
+                echo -e "  $(L '备用链接（另一地址，SNI 仍为域名）:')\n  ${GREEN}${alt_link}${NC}"
+            fi
+        fi
+    fi
     if command -v qrencode >/dev/null 2>&1 && [ -n "$link" ] && [ -t 1 ]; then
         qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null || true
     fi
@@ -8857,8 +9038,9 @@ xray_add_node() {
     echo -e "  ${GREEN}3)${NC} $(L 'VLESS + XHTTP + TLS / 明文回源（套 CDN，需要域名）')"
     echo -e "  ${GREEN}4)${NC} $(L 'VLESS Encryption + XHTTP（ML-KEM-768 抗量子，不依赖 TLS）')"
     echo -e "  ${GREEN}5)${NC} $(L 'Shadowsocks 2022（TCP + UDP）')"
+    echo -e "  ${GREEN}6)${NC} $(L 'VLESS + XHTTP + TLS（直连域名证书，证书自动申请，IP 照常用）')"
     echo -e "  ${GREEN}0)${NC} $(L '返回')"
-    read -rp "$(L '请选择') [0-5]: " ans
+    read -rp "$(L '请选择') [0-6]: " ans
     XRAY_NEW_TAG=""
     case "$ans" in
         1) xray_add_vision || return 1 ;;
@@ -8866,6 +9048,7 @@ xray_add_node() {
         3) xray_add_xhttp_cdn || return 1 ;;
         4) xray_add_venc || return 1 ;;
         5) xray_add_ss || return 1 ;;
+        6) xray_add_xhttp_tls || return 1 ;;
         *) return 0 ;;
     esac
     success "$(L '节点') ${XRAY_NEW_TAG} $(L '已添加并生效')"
