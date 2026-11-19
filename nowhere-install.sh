@@ -150,6 +150,14 @@ set -o pipefail
 #     - 主菜单不再显示管理脚本版本：该行改为当前时间 + 公网 IP（时间取 date，
 #       IP 复用 detect_public_host；同一进程内只探测一次，避免每次刷新菜单都等网络，
 #       取不到显示未知）。版本号仍在「脚本更新」菜单与 adam version 里看。
+#   ── 脚本 v8.2 修订（2026-11-19，REALITY 域名地址握手失败修复）──
+#     - 根因：域名作 server 地址时客户端握手用的 SNI 是该域名，而服务端 REALITY 的
+#       serverNames 只有伪装站点，服务端认不出客户端、转发到伪装站回了真证书，客户端
+#       报 REALITY authentication failed；IP 作地址时客户端用伪装站点 SNI，所以能通。
+#     - 修复：新建 REALITY 节点时 serverNames 同时写入伪装站点 + 当前域名地址；菜单 13
+#       改地址与每日维护时同步全部 REALITY 节点的 serverNames（改回 IP 时自动去掉域名）。
+#     - 域名仍须解析到本机 IP（菜单 13 的校验不变）；若客户端侧 DNS 把域名解析到别处，
+#       仍会连到错误的服务器，与 serverNames 无关。
 #   ── 脚本 v9 修订（2026-11-19，修三处实装反馈）──
 #     - adam 快捷命令：install_shortcuts 失败曾被 || true 静默吞掉（管道安装且新版未推
 #       GitHub 时 ensure_manager_copy 下载 404 即无快捷命令）；现快捷壳先校验管理脚本副本
@@ -1933,6 +1941,9 @@ L() {
         '备用链接（另一地址，SNI 仍为域名）:') printf '%s' 'Alternate link (other address, SNI is still the domain): ' ;;
         'certbot Cloudflare 插件安装失败') printf '%s' 'Failed to install the certbot Cloudflare plugin' ;;
         '域名:') printf '%s' 'Domain: ' ;;
+        '已同步 REALITY serverNames（域名地址可用）') printf '%s' 'REALITY serverNames synced (domain address now works)' ;;
+        '未找到 python3，无法同步 REALITY 域名') printf '%s' 'python3 not found; cannot sync REALITY domain' ;;
+        '同步 REALITY 域名失败：') printf '%s' 'Failed to sync REALITY domain: ' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -6429,6 +6440,7 @@ maint_daily() {
         xray_autoupdate || true
     fi
     if [ -x "$XRAY_BIN" ]; then xray_sync_certs || true; fi
+    if [ -x "$XRAY_BIN" ]; then xray_sync_reality_snis || true; fi
     reserved_ports_sync || true
     if [ "$MAINT_DAILY_RESTART" = "1" ]; then
         local -a runits=(snell)
@@ -8551,7 +8563,7 @@ xray_add_vision() {
       \"settings\": { \"clients\": [ { \"id\": \"${uuid}\", \"flow\": \"xtls-rprx-vision\" } ], \"decryption\": \"none\" },
       \"streamSettings\": {
         \"network\": \"tcp\", \"security\": \"reality\",
-        \"realitySettings\": { \"show\": false, \"target\": \"${XR_SNI}:443\", \"xver\": 0, \"serverNames\": [\"${XR_SNI}\"], \"privateKey\": \"${XK_PRIV}\", \"shortIds\": [\"${sid}\"] }
+        \"realitySettings\": { \"show\": false, \"target\": \"${XR_SNI}:443\", \"xver\": 0, \"serverNames\": $(xray_reality_snis_json "${XR_SNI}"), \"privateKey\": \"${XK_PRIV}\", \"shortIds\": [\"${sid}\"] }
       },
       ${XRAY_SNIFF}
     }" "N_TAG=\"${tag}\"
@@ -8580,7 +8592,7 @@ xray_add_xhttp_reality() {
       \"streamSettings\": {
         \"network\": \"xhttp\", \"security\": \"reality\",
         \"xhttpSettings\": { \"path\": \"${path}\", \"mode\": \"auto\" },
-        \"realitySettings\": { \"show\": false, \"target\": \"${XR_SNI}:443\", \"xver\": 0, \"serverNames\": [\"${XR_SNI}\"], \"privateKey\": \"${XK_PRIV}\", \"shortIds\": [\"${sid}\"] }
+        \"realitySettings\": { \"show\": false, \"target\": \"${XR_SNI}:443\", \"xver\": 0, \"serverNames\": $(xray_reality_snis_json "${XR_SNI}"), \"privateKey\": \"${XK_PRIV}\", \"shortIds\": [\"${sid}\"] }
       },
       ${XRAY_SNIFF}
     }" "N_TAG=\"${tag}\"
@@ -8758,6 +8770,84 @@ N_KEY_SRC=\"${XRAY_OBT_KEY}\"
 N_NAME=\"${name}\"" || return 1
     XRAY_NEW_TAG="$tag"
     info "$(L '同一节点两种连法：域名或本机 IP（SNI 始终为域名），用 Xray 菜单 13 切换分享链接地址')"
+}
+
+# 当前分享链接地址是域名时输出它（IP 则输出空）
+xray_host_domain() {
+    local h="${XRAY_PUBLIC_HOST:-}"
+    if [ -z "$h" ]; then
+        xray_load_state
+        h="${XRAY_PUBLIC_HOST:-}"
+    fi
+    if [ -z "$h" ]; then h="$(detect_public_host || true)"; fi
+    if [[ "$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$h" == *:* ]]; then return 1; fi
+    if [[ "$h" == *.* && "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then printf '%s' "$h"; return 0; fi
+    return 1
+}
+
+# REALITY serverNames：伪装站点 + 当前域名地址（若是域名；域名作 server 地址时客户端握手用的 SNI 就是它）
+xray_reality_snis_json() {
+    local sni="$1" dom
+    dom="$(xray_host_domain || true)"
+    if [ -n "$dom" ] && [ "$dom" != "$sni" ]; then
+        printf '["%s", "%s"]' "$sni" "$dom"
+    else
+        printf '["%s"]' "$sni"
+    fi
+}
+
+# 把全部 REALITY 节点的 serverNames 同步为 [伪装站点, 当前域名地址?]；有改动才重载
+xray_sync_reality_snis() {
+    local tag conf rc changed=0 dom
+    xray_load_state
+    dom="$(xray_host_domain || true)"
+    command -v python3 >/dev/null 2>&1 || { warn "$(L '未找到 python3，无法同步 REALITY 域名')"; return 1; }
+    for tag in $(xray_node_tags); do
+        xray_node_load "$tag" || continue
+        case "$N_TYPE" in vision|xhttp-reality) ;; *) continue ;; esac
+        conf="${XRAY_CONF_D}/10-in-${tag}.json"
+        [ -f "$conf" ] || continue
+        rc=0
+        python3 - "$conf" "$N_SNI" "$dom" <<'PYEOF' || rc=$?
+import json, sys
+conf, sni, dom = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(conf) as f:
+        data = json.load(f)
+except Exception as e:
+    print("json load failed: %s" % e, file=sys.stderr)
+    sys.exit(1)
+snis = [sni]
+if dom and dom != sni:
+    snis.append(dom)
+changed = False
+for ib in data.get("inbounds", []):
+    rs = ib.get("streamSettings", {}).get("realitySettings")
+    if rs is not None and rs.get("serverNames") != snis:
+        rs["serverNames"] = snis
+        changed = True
+if not changed:
+    sys.exit(0)
+try:
+    with open(conf, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+except Exception as e:
+    print("json write failed: %s" % e, file=sys.stderr)
+    sys.exit(1)
+sys.exit(2)
+PYEOF
+        case "$rc" in
+            2) changed=1 ;;
+            0) : ;;
+            *) warn "$(L '同步 REALITY 域名失败：')${tag}" ;;
+        esac
+    done
+    if [ "$changed" = "1" ]; then
+        xray_reload || return 1
+        info "$(L '已同步 REALITY serverNames（域名地址可用）')"
+    fi
+    return 0
 }
 
 xray_add_xhttp_cdn() {
@@ -9397,6 +9487,7 @@ xray_set_host() {
     fi
     if check_public_host "$ans" || confirm "$(L '仍要使用这个地址？')" n; then
         XRAY_PUBLIC_HOST="$ans"; xray_save_state; success "$(L '已更新')"
+        xray_sync_reality_snis || true
     else
         warn "$(L '未修改')"
     fi
