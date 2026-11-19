@@ -150,6 +150,23 @@ set -o pipefail
 #     - 主菜单不再显示管理脚本版本：该行改为当前时间 + 公网 IP（时间取 date，
 #       IP 复用 detect_public_host；同一进程内只探测一次，避免每次刷新菜单都等网络，
 #       取不到显示未知）。版本号仍在「脚本更新」菜单与 adam version 里看。
+#   ── 脚本 v8.4 修订（2026-11-19，新增 Realm 与 Xray 端口转发）──
+#     - 新增 Realm 端口转发（参考 zywe03/realm-xwPF）：目录模式 realm -c /etc/adam-realm/conf.d，
+#       规则存 /etc/adam-realm/rules/<id>.env，渲染为 conf.d/rule-<id>.toml；主菜单 9 与 adam realm 子命令；
+#       支持 TCP/UDP/双栈、多目标负载均衡（extra_remotes + roundrobin/iphash 权重）、WS/TLS/WSS 双端隧道、
+#       指定出/入网卡与源 IP、Proxy Protocol v2、MPTCP；二进制走 zhboner/realm 官方 release（musl 优先，
+#       SHA256 digest 校验，失败换另一 libc 构建），服务以 adam-realm 专用用户运行（失败回退 root），
+#       零规则时自动停用服务；备份/恢复/卸载/保活/诊断均已接入。
+#     - 新增 Xray 端口转发（3x-ui 式 dokodemo-door）：规则存 /etc/adam-xray/forward/fXX.env，渲染为
+#       conf.d/20-forward.json（单个文件含全部已启用规则的 inbounds），Xray 菜单 16 与 adam xray fwd 子命令；
+#       无启用规则时删除该文件；重载失败用 .bak 恢复并再次重载；转发端口纳入 xray_ports（防火墙、
+#       内核保留端口、健康检查、卸载清理自动覆盖）。
+#     - 协同修正：xray_reload 仅在节点与转发规则都为零时停服务；xray_healthy 补 UDP 监听检查
+#       （此前只查 TCP，ss2022 与转发规则的 UDP 端口掉了也判健康）；xray 健康检查与状态行补转发规则。
+#     - 稳健性：全部新增 read 加 EOF 守卫；TOML 渲染走 mktemp+mv 原子写并转义注入字符；导入备份只允许
+#       etc/adam-realm/** 成员；端口冲突检测复用 check_port_occupied_by_other（排除自身进程）。
+#     - 词典：新增 159 条、删 7 条失效旧 key；词典现 1834 key、0 重复、0 缺失。
+#     - 未做：Realm 自动更新（手动更新即可）；真机测试（服务启动、转发连通性待实测）。
 #   ── 脚本 v10 修订（2026-11-19，审计打磨：Adam 前半段审计 14 项全部落地）──
 #     - 版本号与修订记录重新同步：SCRIPT_VERSION 由 v8.2 升为 v10（此前修订记录已到
 #       v9/v8.3 但版本号仍停 v8.2，同一版本号对应两份内容会让自动维护的防降级保护失效，
@@ -277,7 +294,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="8.3"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="8.4"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -324,6 +341,20 @@ XRAY_NODE_DIR="${XRAY_CONF_DIR}/nodes"
 XRAY_CERT_DIR="${XRAY_CONF_DIR}/certs"
 XRAY_STATE_FILE="${XRAY_CONF_DIR}/adam-xray.env"
 XRAY_SERVICE="/etc/systemd/system/adam-xray.service"
+
+# Realm 端口转发（zhboner/realm 官方 release）
+REALM_REPO="zhboner/realm"
+REALM_BIN="/usr/local/bin/realm"
+REALM_BIN_BACKUP="/usr/local/bin/realm.previous"
+REALM_DIR="/etc/adam-realm"
+REALM_CONF_D="${REALM_DIR}/conf.d"
+REALM_RULE_DIR="${REALM_DIR}/rules"
+REALM_VERSION_FILE="${REALM_DIR}/version.txt"
+REALM_SERVICE="/etc/systemd/system/adam-realm.service"
+
+# Xray 端口转发（dokodemo-door，3x-ui 式 tunnel）
+XRAY_FWD_DIR="${XRAY_CONF_DIR}/forward"
+XRAY_FWD_JSON="${XRAY_CONF_D}/20-forward.json"
 
 # 自动维护（保活 / 自动更新）
 MAINT_DIR="/etc/adam"
@@ -930,7 +961,6 @@ L() {
         '【防火墙提醒】') printf '%s' '[Firewall reminder]' ;;
         '一键修复') printf '%s' 'One-click repair' ;;
         '一键修复（单元 / 保留端口 / 防火墙 / 保活定时器）') printf '%s' 'One-click repair (unit / reserved ports / firewall / keepalive timer)' ;;
-        '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray）') printf '%s' 'Allow this script'\''s service ports in one click (SSH / Nowhere / Snell / Xray)' ;;
         '一键诊断（只读，不改任何配置）') printf '%s' 'One-click diagnostics (read-only; changes nothing)' ;;
         '上/下行限速   :') printf '%s' 'Up/down rate limit   :' ;;
         '上一个版本 tag    :') printf '%s' 'Previous version tag    :' ;;
@@ -958,7 +988,6 @@ L() {
         '不是本机的 Snell 端口配置（现有:') printf '%s' 'Not one of this machine'\''s Snell port configs (current: ' ;;
         '且不同协议代的密钥格式、URL 参数可能不兼容，仅换二进制不重配大概率启动失败或连不上') printf '%s' 'Also, key formats and URL parameters may differ across protocol generations; just swapping the binary without reconfiguring will most likely fail to start or connect' ;;
         '个端口 ·') printf '%s' 'ports ·' ;;
-        '个节点 ·') printf '%s' 'nodes ·' ;;
         '个，累计') printf '%s' ', total ' ;;
         '中文') printf '%s' 'Chinese' ;;
         '临时禁用 IPv6（重启后自动恢复）？') printf '%s' 'Temporarily disable IPv6 (auto-restored after reboot)?' ;;
@@ -1239,8 +1268,6 @@ L() {
         '当前封禁时长:') printf '%s' 'Current ban duration:' ;;
         '当前已是 tls=2 真实证书模式，无需迁移（证书状态见 Nowhere 菜单 11）') printf '%s' 'Already in tls=2 real-certificate mode; no migration needed (see Nowhere menu 11 for certificate status)' ;;
         '当前是容器类虚拟化（') printf '%s' 'Currently running in container-style virtualization (' ;;
-        '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray 均未安装）') printf '%s' 'No service ports managed by this script need allowing (Nowhere / Snell / Xray are all not installed)' ;;
-        '当前没有节点，Xray 服务已停止') printf '%s' 'No nodes right now; the Xray service has stopped' ;;
         '当前版本 :') printf '%s' 'Current version :' ;;
         '当前白名单（这些来源永远不会被封）:') printf '%s' 'Current allowlist (these sources are never banned):' ;;
         '当前系统与网络状态') printf '%s' 'Current system and network status' ;;
@@ -1254,7 +1281,6 @@ L() {
         '快捷命令已删除（管理脚本副本') printf '%s' 'Shortcut commands deleted (management script copy ' ;;
         '快捷命令已安装完成') printf '%s' 'Shortcut commands installed' ;;
         '快捷命令无法安装') printf '%s' 'Shortcut commands cannot be installed' ;;
-        '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray 等现有配置，并重启已启用的服务') printf '%s' 'Restore will overwrite existing configs under /etc/nowhere, /etc/snell, /etc/adam-xray, etc., and restart enabled services' ;;
         '恢复启用    0') printf '%s' 'Restore and enable    0' ;;
         '恢复失败：可能有其他 sysctl 配置文件也禁用了 IPv6（grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf）') printf '%s' 'Restore failed: other sysctl config files may also disable IPv6 (grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf)' ;;
         '恢复完成（已重启启用的服务）') printf '%s' 'Restore complete (enabled services restarted)' ;;
@@ -1801,7 +1827,6 @@ L() {
         '（务必和服务端保持一致）') printf '%s' ' (must match the server)' ;;
         '（只留最近 5 份）') printf '%s' ' (keep only the latest 5)' ;;
         '（可在「自动更新」里切到 beta 通道）') printf '%s' ' (you can switch to the beta channel under "Auto-update")' ;;
-        '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / uninstall）') printf '%s' ' (available: install / add / list / links / delete / update / health / repair / status / logs / restart / uninstall)' ;;
         '（可用: install / list / status / on / off / allow <端口> / deny <端口> / sync）') printf '%s' ' (available: install / list / status / on / off / allow <port> / deny <port> / sync)' ;;
         '（可用: install / status / banned / log / bantime <时长> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall）') printf '%s' ' (available: install / status / banned / log / bantime <duration> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall)' ;;
         '（可用: install / update / config / reconfig / ports / add-port / del-port') printf '%s' ' (available: install / update / config / reconfig / ports / add-port / del-port' ;;
@@ -1817,8 +1842,6 @@ L() {
         '（客户端端口') printf '%s' ' (client port' ;;
         '（对之后的新封禁生效）') printf '%s' ' (applies to new bans after this)' ;;
         '（或等待 10-30 分钟后重试）') printf '%s' ' (or wait 10-30 minutes and retry)' ;;
-        '（无 Nowhere/Snell/Xray 的 TCP 监听）') printf '%s' '(no Nowhere/Snell/Xray TCP listeners)' ;;
-        '（无 Nowhere/Snell/Xray 的 UDP 监听）') printf '%s' '(no Nowhere/Snell/Xray UDP listeners)' ;;
         '（无）') printf '%s' '(none)' ;;
         '（旧版备份') printf '%s' ' (old backup ' ;;
         '（旧版备份在') printf '%s' ' (old backup at ' ;;
@@ -2058,6 +2081,184 @@ L() {
         '备份二进制无法运行，回退已中止') printf '%s' 'The backup binary cannot run; rollback aborted' ;;
         '节点 tag 不合法，已跳过证书目录清理') printf '%s' 'Invalid node tag; skipped certificate directory cleanup' ;;
         '节点 tag 不合法，已中止删除') printf '%s' 'Invalid node tag; deletion aborted' ;;
+        '  入站网卡 listen_interface（如 eth0，回车默认自动）: ') printf '%s' '  Inbound NIC listen_interface (e.g. eth0, Enter for auto): ' ;;
+        '  出站源 IP through（回车默认自动）: ') printf '%s' '  Outbound source IP through (Enter for auto): ' ;;
+        '  出站网卡 interface（如 eth1，回车默认自动）: ') printf '%s' '  Outbound NIC interface (e.g. eth1, Enter for auto): ' ;;
+        '  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ') printf '%s' '  Weight per target (comma-separated, including the main target, e.g. 2,1; Enter for all weight 1): ' ;;
+        '  向目标发送 Proxy Protocol v2（send_proxy）？') printf '%s' '  Send Proxy Protocol v2 to the target (send_proxy)?' ;;
+        '  启用入站 MPTCP（accept_mptcp）？') printf '%s' '  Enable inbound MPTCP (accept_mptcp)?' ;;
+        '  启用出站 MPTCP（send_mptcp）？') printf '%s' '  Enable outbound MPTCP (send_mptcp)?' ;;
+        '  当前机器角色：1) 中转入口机（向外加密 remote_transport）  2) 落地出口机（入站解密 listen_transport）') printf '%s' '  This machine role: 1) Relay entry (encrypt outbound, remote_transport)  2) Exit node (decrypt inbound, listen_transport)' ;;
+        '  接收来源 Proxy Protocol（accept_proxy）？') printf '%s' '  Accept Proxy Protocol from the source (accept_proxy)?' ;;
+        '  负载策略：1) roundrobin（加权轮询）  2) iphash（源 IP 哈希）') printf '%s' '  Balance strategy: 1) roundrobin (weighted round-robin)  2) iphash (source IP hash)' ;;
+        '  选择 [1/2，默认 1]: ') printf '%s' '  Choose [1/2, default 1]: ' ;;
+        '  额外目标列表（逗号分隔，格式 host:port,host2:port）: ') printf '%s' '  Extra targets (comma-separated, host:port,host2:port): ' ;;
+        ' 失败') printf '%s' ' failed' ;;
+        ' 安装完成（') printf '%s' ' installed (' ;;
+        ' 已生效：') printf '%s' ' is now active: ' ;;
+        ' 已被其他进程占用：') printf '%s' ' is already in use by another process: ' ;;
+        'Host 不合法，回退标准透传') printf '%s' 'Invalid host, falling back to plain forwarding' ;;
+        'Realm ') printf '%s' 'Realm ' ;;
+        'Realm 下载或校验失败') printf '%s' 'Realm download or verification failed' ;;
+        'Realm 已卸载') printf '%s' 'Realm uninstalled' ;;
+        'Realm 已重启') printf '%s' 'Realm restarted' ;;
+        'Realm 暂不支持该架构：') printf '%s' 'Realm does not support this architecture: ' ;;
+        'Realm 更新失败') printf '%s' 'Realm update failed' ;;
+        'Realm 未安装，规则配置已保存，安装后生效') printf '%s' 'Realm is not installed; the rule config is saved and will take effect after installation' ;;
+        'Realm 端口转发管理') printf '%s' 'Realm port forwarding' ;;
+        'Realm 转发规则列表') printf '%s' 'Realm forwarding rules' ;;
+        'TCP + UDP 双栈（默认）') printf '%s' 'TCP + UDP (default)' ;;
+        'TLS SNI / 域名（如 example.com）: ') printf '%s' 'TLS SNI / domain (e.g. example.com): ' ;;
+        'WS Path（回车默认 /ws）: ') printf '%s' 'WS path (Enter for /ws): ' ;;
+        'Xray 未安装，转发配置已保存，重装 Xray 后生效') printf '%s' 'Xray is not installed; the forwarding config is saved and will take effect after reinstalling Xray' ;;
+        'Xray 端口转发（dokodemo-door）') printf '%s' 'Xray port forwarding (dokodemo-door)' ;;
+        'Xray 转发已重启') printf '%s' 'Xray forwarding restarted' ;;
+        'Xray 转发规则列表') printf '%s' 'Xray forwarding rules' ;;
+        ']？') printf '%s' ']?' ;;
+        'adam-realm 以专用用户启动失败，改以 root 重试') printf '%s' 'adam-realm failed to start as the dedicated user, retrying as root' ;;
+        'adam-realm 启动失败，请查看日志：journalctl -u adam-realm -n 20 --no-pager') printf '%s' 'adam-realm failed to start, see the logs: journalctl -u adam-realm -n 20 --no-pager' ;;
+        '下载 Realm ') printf '%s' 'Download Realm ' ;;
+        '下载的 realm 无法在本机运行，尝试另一构建') printf '%s' 'The downloaded realm binary cannot run on this machine, trying the other build' ;;
+        '仍要继续添加？') printf '%s' 'Add it anyway?' ;;
+        '传输隧道：') printf '%s' ' transport tunnel:' ;;
+        '伪装 Host（如 cdn.example.com）: ') printf '%s' 'Disguise host (e.g. cdn.example.com): ' ;;
+        '伪装域名 Host/SNI（如 cdn.example.com）: ') printf '%s' 'Disguise domain host/SNI (e.g. cdn.example.com): ' ;;
+        '入站解密') printf '%s' 'Inbound decrypt' ;;
+        '入站隧道') printf '%s' 'inbound tunnel' ;;
+        '出站加密') printf '%s' 'Outbound encrypt' ;;
+        '出站隧道') printf '%s' 'outbound tunnel' ;;
+        '出网卡:') printf '%s' 'out iface:' ;;
+        '创建 adam-realm 用户失败，改以 root 运行服务') printf '%s' 'Failed to create the adam-realm user, running the service as root' ;;
+        '创建临时文件失败') printf '%s' 'Failed to create a temporary file' ;;
+        '删除转发规则') printf '%s' 'Delete a forwarding rule' ;;
+        '卸载 Realm') printf '%s' 'Uninstall Realm' ;;
+        '压缩包损坏或格式无效') printf '%s' 'The archive is damaged or not a valid format' ;;
+        '同时删除规则配置目录') printf '%s' 'Also delete the rule config directory' ;;
+        '同时删除防火墙中 Realm 端口的放行规则（') printf '%s' 'Also delete the firewall allow rules for the Realm ports (' ;;
+        '启用 / 停用单条规则') printf '%s' 'Enable / disable a single rule' ;;
+        '域名不合法，回退标准透传') printf '%s' 'Invalid domain, falling back to plain forwarding' ;;
+        '备份为空或格式无效') printf '%s' 'The backup is empty or invalid' ;;
+        '备份包含 adam-realm 之外的成员，拒绝导入') printf '%s' 'The backup contains entries outside adam-realm; import refused' ;;
+        '备注含非法字符（\" 或 \），请去掉后重试') printf '%s' 'The remark contains illegal characters (" or \); remove them and retry' ;;
+        '安装 / 更新 Realm') printf '%s' 'Install / update Realm' ;;
+        '导入将覆盖 /etc/adam-realm 现有规则并重启服务，确认？') printf '%s' 'Import will overwrite the existing rules in /etc/adam-realm and restart the service. Continue?' ;;
+        '导入规则（从备份恢复）') printf '%s' 'Import rules (restore from backup)' ;;
+        '导出规则（迁移备份）') printf '%s' 'Export rules (migration backup)' ;;
+        '尚未安装 Realm，请先安装') printf '%s' 'Realm is not installed yet, please install it first' ;;
+        '已保留规则目录') printf '%s' 'Rule directory kept' ;;
+        '已删除规则 ') printf '%s' 'Deleted rule ' ;;
+        '已剔除无效目标：') printf '%s' 'Removed invalid target: ' ;;
+        '已是最新版本，仍要重新安装？') printf '%s' 'Already the latest version. Reinstall anyway?' ;;
+        '当前没有已启用的转发规则，adam-realm 已停止') printf '%s' 'No enabled forwarding rules; adam-realm has stopped' ;;
+        '恢复后重载仍失败，请检查 Xray 配置与日志') printf '%s' 'Reload still failed after restore; check the Xray config and logs' ;;
+        '找不到文件: ') printf '%s' 'File not found: ' ;;
+        '新版本启动失败，自动回滚到旧二进制...') printf '%s' 'The new version failed to start, rolling back to the old binary...' ;;
+        '新规则未能生效，已自动撤回（原有规则不受影响）') printf '%s' 'The new rule did not take effect and was rolled back automatically (existing rules are unaffected)' ;;
+        '新转发规则未能生效，已自动撤回') printf '%s' 'The new forwarding rule did not take effect and was rolled back automatically' ;;
+        '无法获取 Realm 最新版本号，请检查网络') printf '%s' 'Cannot get the latest Realm version; check the network' ;;
+        '暂无可测试的规则') printf '%s' 'No rules to test' ;;
+        '暂无规则') printf '%s' 'No rules yet' ;;
+        '暂无转发规则') printf '%s' 'No forwarding rules yet' ;;
+        '未取到官方 SHA256 摘要，跳过校验（') printf '%s' 'Official SHA256 digest unavailable, skipping verification (' ;;
+        '未找到 Realm 配置目录') printf '%s' 'Realm config directory not found' ;;
+        '未知的 realm 子命令:') printf '%s' 'Unknown realm subcommand:' ;;
+        '未知的 xray fwd 子命令:') printf '%s' 'Unknown xray fwd subcommand:' ;;
+        '本机监听 IP（回车默认 ') printf '%s' 'Listen IP on this machine (Enter for default ' ;;
+        '本机监听端口 (1-65535): ') printf '%s' 'Listen port on this machine (1-65535): ' ;;
+        '权重数量与目标数不符或含非数字，已按等权生成') printf '%s' 'Weight count does not match the target count or contains non-numbers; equal weights generated' ;;
+        '条规则') printf '%s' 'rules' ;;
+        '查看转发规则列表') printf '%s' 'List forwarding rules' ;;
+        '标准透传（推荐，性能最高，适用于已加密协议）') printf '%s' 'Plain forwarding (recommended, fastest, for already-encrypted protocols)' ;;
+        '正在查询 Realm 官方最新版本...') printf '%s' 'Querying the latest official Realm version...' ;;
+        '测试目标连通性与延迟') printf '%s' 'Test target connectivity and latency' ;;
+        '添加 Realm 转发规则') printf '%s' 'Add a Realm forwarding rule' ;;
+        '添加 Xray 端口转发') printf '%s' 'Add Xray port forwarding' ;;
+        '添加转发规则') printf '%s' 'Add a forwarding rule' ;;
+        '添加转发规则（TCP/UDP/LB/隧道/多网卡）') printf '%s' 'Add a forwarding rule (TCP/UDP/LB/tunnel/multi-NIC)' ;;
+        '源IP:') printf '%s' 'src IP:' ;;
+        '监听 IP 格式不合法') printf '%s' 'Invalid listen IP format' ;;
+        '目标地址格式不合法') printf '%s' 'Invalid target address format' ;;
+        '目标地址（域名、公网 IP 或同区免费内网 IP）: ') printf '%s' 'Target address (domain, public IP, or same-region free private IP): ' ;;
+        '目标地址（域名或 IP）: ') printf '%s' 'Target address (domain or IP): ' ;;
+        '目标端口 (1-65535): ') printf '%s' 'Target port (1-65535): ' ;;
+        '目标证书由 CA 签发（可校验）？') printf '%s' 'Is the target certificate CA-issued (verifiable)?' ;;
+        '确认删除规则 [') printf '%s' 'Confirm deleting rule [' ;;
+        '确认卸载 Realm（含服务与二进制）？') printf '%s' 'Confirm uninstalling Realm (including the service and binary)?' ;;
+        '私钥文件路径: ') printf '%s' 'Private key file path: ' ;;
+        '端口 ') printf '%s' 'Port ' ;;
+        '纯 TCP') printf '%s' 'TCP only' ;;
+        '纯 UDP') printf '%s' 'UDP only' ;;
+        '纯 UDP（自动跳过 WS/TLS 隧道选项）') printf '%s' 'UDP only (WS/TLS tunnel options are skipped automatically)' ;;
+        '纯TCP') printf '%s' 'TCP only' ;;
+        '纯UDP') printf '%s' 'UDP only' ;;
+        '缺少必需工具：') printf '%s' 'Missing required tool: ' ;;
+        '网卡名格式不合法，已忽略') printf '%s' 'Invalid NIC name, ignored' ;;
+        '规则 ') printf '%s' 'Rule ' ;;
+        '规则备注（可选）: ') printf '%s' 'Rule remark (optional): ' ;;
+        '规则备注（可选，如 香港VPC落地）: ') printf '%s' 'Rule remark (optional, e.g. HK VPC exit): ' ;;
+        '规则导入完成') printf '%s' 'Rules imported' ;;
+        '规则已导出至: ') printf '%s' 'Rules exported to: ' ;;
+        '规则渲染失败，已跳过：') printf '%s' 'Failed to render rule, skipped: ' ;;
+        '规则状态已切换为：') printf '%s' 'Rule status changed to: ' ;;
+        '证书或私钥文件不存在，回退内置自签') printf '%s' 'Certificate or key file not found, falling back to the built-in self-signed certificate' ;;
+        '证书文件路径（回车使用 Realm 内置自签）: ') printf '%s' 'Certificate file path (Enter to use the Realm built-in self-signed certificate): ' ;;
+        '跟随系统重定向（followRedirect，仅配合 iptables 转发规则使用）？') printf '%s' 'Follow system redirect (followRedirect, only with iptables redirect rules)?' ;;
+        '路径含非法字符（\" 或 \），回退内置自签') printf '%s' 'The path contains illegal characters (" or \); falling back to the built-in self-signed certificate' ;;
+        '路径含非法字符（\" 或 \），回退标准透传') printf '%s' 'The path contains illegal characters (" or \); falling back to plain forwarding' ;;
+        '跳过（纯 UDP 无法做 TCP 握手探测）') printf '%s' 'Skipped (pure UDP cannot be probed with a TCP handshake)' ;;
+        '转发协议：') printf '%s' 'Forwarding protocol:' ;;
+        '转发目标连通性测试（TCP 握手延迟）') printf '%s' 'Forwarding target connectivity test (TCP handshake latency)' ;;
+        '转发规则 ') printf '%s' 'Forwarding rule ' ;;
+        '转发配置重载失败，恢复上一版本') printf '%s' 'Forwarding config reload failed, restoring the previous version' ;;
+        '输入导出的 .tgz 备份文件路径: ') printf '%s' 'Enter the exported .tgz backup file path: ' ;;
+        '输入规则序号（回车取消）: ') printf '%s' 'Enter the rule number (Enter to cancel): ' ;;
+        '返回 Xray 菜单') printf '%s' 'Back to the Xray menu' ;;
+        '选择 [1-3，默认 1]: ') printf '%s' 'Choose [1-3, default 1]: ' ;;
+        '选择 [1-4，默认 1]: ') printf '%s' 'Choose [1-4, default 1]: ' ;;
+        '配置 WS / TLS / WSS 双端加密隧道？') printf '%s' 'Configure a WS / TLS / WSS two-ended encrypted tunnel?' ;;
+        '配置多目标负载均衡（extra_remotes）？') printf '%s' 'Configure multi-target load balancing (extra_remotes)?' ;;
+        '配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？') printf '%s' 'Configure advanced options (outbound source IP/NIC, Proxy Protocol, MPTCP)?' ;;
+        '重启服务 / 查看状态与日志') printf '%s' 'Restart the service / view status and logs' ;;
+        '非合法 IP，已忽略') printf '%s' 'Not a valid IP, ignored' ;;
+        '额外目标全部无效，已跳过负载均衡') printf '%s' 'All extra targets are invalid, load balancing skipped' ;;
+        '首次安装启动失败，已删除新二进制') printf '%s' 'First install failed to start; the new binary has been removed' ;;
+        '（可用: add / list / toggle / delete / test / restart / status）') printf '%s' '(available: add / list / toggle / delete / test / restart / status)' ;;
+        '（可用: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall）') printf '%s' '(available: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall)' ;;
+        '）: ') printf '%s' '): ' ;;
+        '），尝试另一构建') printf '%s' '), trying the other build' ;;
+        '，请先安装') printf '%s' ', please install it first' ;;
+        '端口转发') printf '%s' 'Port forwarding' ;;
+        '端口转发（dokodemo-door）') printf '%s' 'Port forwarding (dokodemo-door)' ;;
+        '端口转发（TCP / UDP 转发、负载均衡、WS / TLS 隧道）') printf '%s' 'Port forwarding (TCP/UDP forwarding, load balancing, WS/TLS tunnels)' ;;
+        'realm                      打开 Realm 端口转发菜单') printf '%s' 'realm                      Open the Realm port forwarding menu' ;;
+        '当前没有节点与转发规则，Xray 服务已停止') printf '%s' 'No nodes or forwarding rules; the Xray service has stopped' ;;
+        '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm 均未安装）') printf '%s' 'No service ports managed by this script need allowing (Nowhere / Snell / Xray / Realm are not installed)' ;;
+        '条转发规则') printf '%s' 'forwarding rules' ;;
+        '个节点') printf '%s' 'nodes' ;;
+        '（无 Nowhere/Snell/Xray/Realm 的 TCP 监听）') printf '%s' '(no Nowhere/Snell/Xray/Realm TCP listeners)' ;;
+        '（无 Nowhere/Snell/Xray/Realm 的 UDP 监听）') printf '%s' '(no Nowhere/Snell/Xray/Realm UDP listeners)' ;;
+        '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm 等现有配置，并重启已启用的服务') printf '%s' 'Restore will overwrite the existing configs in /etc/nowhere, /etc/snell, /etc/adam-xray and /etc/adam-realm, and restart the enabled services' ;;
+        '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall）') printf '%s' '(available: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall)' ;;
+        '是否同时卸载 Realm 端口转发？') printf '%s' 'Also uninstall Realm port forwarding?' ;;
+        '规则文件内容非法，已跳过：') printf '%s' 'Invalid rule file content, skipped: ' ;;
+        '导入的规则文件内容非法，已恢复原配置') printf '%s' 'The imported rule file content is invalid; the previous config has been restored' ;;
+        '解包失败，已恢复原配置') printf '%s' 'Extraction failed; the previous config has been restored' ;;
+        '规则已导入，但服务重载失败，请检查日志') printf '%s' 'Rules imported, but the service failed to reload; check the logs' ;;
+        '服务重载失败，删除未生效，请检查日志') printf '%s' 'Service reload failed; the deletion did not take effect, check the logs' ;;
+        '转发配置已移除，但 Xray 重载失败，请检查日志') printf '%s' 'Forwarding config removed, but Xray reload failed; check the logs' ;;
+        '已记录 root 运行标记，下次安装不再写入专用用户：') printf '%s' 'Recorded the run-as-root marker; the dedicated user will not be written on the next install: ' ;;
+        '改写服务文件失败') printf '%s' 'Failed to modify the service file' ;;
+        '创建 Realm 配置目录失败') printf '%s' 'Failed to create the Realm config directory' ;;
+        '备份旧二进制失败') printf '%s' 'Failed to back up the old binary' ;;
+        '安装 Realm 二进制失败') printf '%s' 'Failed to install the Realm binary' ;;
+        '导出失败') printf '%s' 'Export failed' ;;
+        '规则状态切换失败') printf '%s' 'Failed to change the rule status' ;;
+        '转发配置文件写入失败') printf '%s' 'Failed to write the forwarding config file' ;;
+        'Realm 服务恢复后重载失败，请检查日志') printf '%s' 'Realm failed to reload after restore; check the logs' ;;
+        '路径含 ; 或 =，回退标准透传') printf '%s' 'The path contains ; or =; falling back to plain forwarding' ;;
+        '路径含 ; 或 =，回退内置自签') printf '%s' 'The path contains ; or =; falling back to the built-in self-signed certificate' ;;
+        '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm）') printf '%s' 'Allow this script'\''s service ports in one click (SSH / Nowhere / Snell / Xray / Realm)' ;;
+        '规则文件内容非法，已恢复原配置') printf '%s' 'Invalid rule file content; the previous config has been restored' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -3803,6 +4004,7 @@ menu_status_summary() {
     echo -e "  Nowhere : $(nowhere_state_text)"
     echo -e "  Snell   : $(snell_state_text)"
     echo -e "  Xray    : $(xray_state_text)"
+    echo -e "  Realm   : $(realm_state_text)"
     echo -e "  $(L '防火墙')  : $(fw_state_text)      Fail2ban : $(f2b_state_text)      $(L '保活巡检') : $(maint_timer_state adam-watchdog.timer)"
 }
 
@@ -3827,13 +4029,14 @@ show_menu() {
     echo -e "  ${BOLD}6)${NC} $(L 'Fail2ban（')$(L '封禁时长、被封 IP、启停')$(L '）')"
     echo -e "  ${BOLD}7)${NC} $(L '系统调优')$(L '（')$(L 'TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6')$(L '）')"
     echo -e "  ${BOLD}8)${NC} $(L '自动维护')$(L '（')$(L '保活巡检 / 脚本与内核自动更新')$(L '）')"
+    echo -e "  ${BOLD}9)${NC} Realm $(L '端口转发（TCP / UDP 转发、负载均衡、WS / TLS 隧道）')"
     echo -e "  ${BOLD}0)${NC} $(L '退出')"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}$(L '提示：可直接输入')${NC} ${CYAN}adam${NC} ${YELLOW}$(L '唤出此菜单，或用')${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}$(L '快捷执行；')${NC}${CYAN}adam help${NC} ${YELLOW}$(L '查看全部子命令')${NC}"
         divider
     fi
-    read -rp "$(L '请选择操作') [0-8]: " MENU_CHOICE
+    read -rp "$(L '请选择操作') [0-9]: " MENU_CHOICE
 }
 
 nowhere_state_text() {
@@ -5132,6 +5335,11 @@ do_uninstall() {
             info "$(L '已删除 Cloudflare 凭证')"
         fi
     fi
+    if realm_installed || [ -d "$REALM_DIR" ] || [ -f "$REALM_SERVICE" ]; then
+        if confirm "$(L '是否同时卸载 Realm 端口转发？')" n; then
+            realm_uninstall_do
+        fi
+    fi
     read -rp "$(L '是否同时删除快捷命令 adam/zt/pz/cxpz/cq？')[y/N]: " RM_SHORTCUTS || { [ -n "$RM_SHORTCUTS" ] || return 1; }
     if [[ "$RM_SHORTCUTS" =~ ^[Yy]$ ]]; then
         if [ -x "$SNELL_BIN" ] || [ -x "$XRAY_BIN" ] || ufw_installed || f2b_installed; then
@@ -5671,6 +5879,7 @@ managed_ports() {
         if [ -n "$sp" ]; then echo "${sp}/tcp"; fi
     done < <(snell_all_ports)
     xray_ports
+    realm_ports
     return 0
 }
 
@@ -5693,7 +5902,7 @@ fw_sync_managed() {
         fi
     done < <(managed_ports)
     if [ "$n" -eq 0 ]; then
-        info "$(L '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray 均未安装）')"
+        info "$(L '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm 均未安装）')"
     fi
     return 0
 }
@@ -6114,7 +6323,7 @@ fw_menu() {
         echo -e "  ${GREEN}5)${NC} ${GREEN}$(L '启用')${NC}$(L '防火墙')"
         echo -e "  ${GREEN}6)${NC} ${RED}$(L '停用')${NC}$(L '防火墙')"
         echo -e "  ${GREEN}7)${NC} $(L '防火墙状态（详细）')"
-        echo -e "  ${GREEN}8)${NC} $(L '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray）')"
+        echo -e "  ${GREEN}8)${NC} $(L '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
         read -rp "$(L '请选择') [0-8]: " choice
@@ -6837,6 +7046,7 @@ maint_unit_healthy() {
         snell)     snell_main_healthy ;;
         snell-port@*) snell_extra_healthy "${1#snell-port@}" ;;
         adam-xray) xray_healthy ;;
+        adam-realm) realm_healthy ;;
         *)         systemctl is-active --quiet "$1" 2>/dev/null ;;
     esac
 }
@@ -6849,7 +7059,7 @@ maint_install_timers() {
     maint_load
     cat > /etc/systemd/system/adam-watchdog.service << WDSVC
 [Unit]
-Description=Adam manager: keep Snell / Xray / Nowhere alive
+Description=Adam manager: keep Snell / Xray / Nowhere / Realm alive
 After=network-online.target
 
 [Service]
@@ -6947,7 +7157,7 @@ maint_watchdog() {
     maint_lock 0 || { maint_log "[$(L '保活')] $(L '另一个维护任务仍在运行，本次跳过')"; return 0; }
     local -a units=(snell)
     while IFS= read -r unit; do units+=("snell-port@${unit}"); done < <(snell_extra_ports)
-    units+=(adam-xray nowhere)
+    units+=(adam-xray nowhere adam-realm)
     for unit in "${units[@]}"; do
         maint_unit_installed "$unit" || continue
         # 只管"设为开机自启"的服务：手动 disable 掉的不会被拉起
@@ -7099,7 +7309,7 @@ do_backup() {
     ts="$(date +%Y%m%d-%H%M%S)"
     dest="/root/adam-backup-${ts}.tgz"
     local d
-    for d in /etc/nowhere /etc/snell /etc/adam-xray /etc/adam /etc/fail2ban/jail.d/adam-sshd.local /etc/cloudflare/credentials.ini /etc/letsencrypt; do
+    for d in /etc/nowhere /etc/snell /etc/adam-xray /etc/adam-realm /etc/adam /etc/fail2ban/jail.d/adam-sshd.local /etc/cloudflare/credentials.ini /etc/letsencrypt; do
         [ -e "$d" ] && dirs+=("$d")
     done
     [ "${#dirs[@]}" -gt 0 ] || { warn "$(L '没有找到可备份的配置目录')"; return 1; }
@@ -7130,25 +7340,30 @@ do_restore() {
     while IFS= read -r m; do
         case "$m" in
             *".."*) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
-            etc/nowhere|etc/nowhere/*|etc/snell|etc/snell/*|etc/adam-xray|etc/adam-xray/*|etc/adam|etc/adam/*|etc/fail2ban/jail.d|etc/fail2ban/jail.d/*|etc/cloudflare|etc/cloudflare/*|etc/letsencrypt|etc/letsencrypt/*|/etc/nowhere|/etc/nowhere/*|/etc/snell|/etc/snell/*|/etc/adam-xray|/etc/adam-xray/*|/etc/adam|/etc/adam/*|/etc/fail2ban/jail.d|/etc/fail2ban/jail.d/*|/etc/cloudflare|/etc/cloudflare/*|/etc/letsencrypt|/etc/letsencrypt/*) ;;
+            etc/nowhere|etc/nowhere/*|etc/snell|etc/snell/*|etc/adam-realm|etc/adam-realm/*|etc/adam-xray|etc/adam-xray/*|etc/adam|etc/adam/*|etc/fail2ban/jail.d|etc/fail2ban/jail.d/*|etc/cloudflare|etc/cloudflare/*|etc/letsencrypt|etc/letsencrypt/*|/etc/nowhere|/etc/nowhere/*|/etc/snell|/etc/snell/*|/etc/adam-realm|/etc/adam-realm/*|/etc/adam-xray|/etc/adam-xray/*|/etc/adam|/etc/adam/*|/etc/fail2ban/jail.d|/etc/fail2ban/jail.d/*|/etc/cloudflare|/etc/cloudflare/*|/etc/letsencrypt|/etc/letsencrypt/*) ;;
             *) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
         esac
     done < <(tar -tzf "$file" 2>/dev/null || true)
     tar -tzf "$file" | head -20
-    warn "$(L '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray 等现有配置，并重启已启用的服务')"
+    warn "$(L '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm 等现有配置，并重启已启用的服务')"
     confirm "$(L '确认从') ${file} $(L '恢复？')" n || { info "$(L '已取消')"; return 0; }
     local u
-    for u in nowhere snell adam-xray; do
+    for u in nowhere snell adam-xray adam-realm; do
         systemctl is-active --quiet "$u" 2>/dev/null && systemctl stop "$u" >/dev/null 2>&1 || true
     done
     tar -xzf "$file" -C / || error "$(L '解包失败，现有配置可能已不完整，请检查')"
     systemctl daemon-reload
-    for u in nowhere snell adam-xray; do
+    for u in nowhere snell adam-xray adam-realm; do
         if systemctl is-enabled --quiet "$u" 2>/dev/null; then
             systemctl restart "$u" >/dev/null 2>&1 || warn "${u} $(L '重启失败，请看 journalctl -u') ${u}"
         fi
     done
     snell_sync_extras_after_restore || true
+    # 异机恢复：Realm 的 unit 可能未启用；有启用规则时按规则状态拉起并补防火墙
+    if [ -f "$REALM_SERVICE" ] && [ "$(realm_enabled_count)" -gt 0 ]; then
+        realm_reload_service >/dev/null 2>&1 || warn "$(L 'Realm 服务恢复后重载失败，请检查日志')"
+    fi
+    fw_sync_managed >/dev/null 2>&1 || true
     if f2b_installed; then systemctl restart fail2ban 2>/dev/null || true; fi
     success "$(L '恢复完成（已重启启用的服务）')"
 }
@@ -7160,13 +7375,14 @@ do_doctor() {
     echo "  Nowhere  : $([ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>&1 | head -1 || echo "$(L '未安装')") $(L '· 角色') $(current_role) · $(svc_state nowhere)"
     echo "  Snell    : $([ -x "$SNELL_BIN" ] && "$SNELL_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state snell)"
     echo "  Xray     : $([ -x "$XRAY_BIN" ] && "$XRAY_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state adam-xray)"
+    echo "  Realm    : $(realm_state_text)"
     if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
     echo "  $(L '保活巡检 :') $(maint_timer_state adam-watchdog.timer)    $(L '每日维护 :') $(maint_timer_state adam-maintain.timer)"
     echo ""
     info "$(L '监听端口（ss）：')"
     if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray' || echo "  $(L '（无 Nowhere/Snell/Xray 的 TCP 监听）')"
-        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray' || echo "  $(L '（无 Nowhere/Snell/Xray 的 UDP 监听）')"
+        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm 的 TCP 监听）')"
+        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm 的 UDP 监听）')"
     else
         warn "$(L 'ss 工具缺失，无法列出监听端口（请安装 iproute2）')"
     fi
@@ -8924,6 +9140,7 @@ xray_ports() {
             if [ "$N_TYPE" = "ss2022" ]; then echo "${N_PORT}/udp"; fi
         )
     done
+    xray_fwd_ports
     return 0
 }
 
@@ -8931,19 +9148,22 @@ xray_healthy() {
     local spec
     systemctl is-active --quiet adam-xray 2>/dev/null || return 1
     while IFS= read -r spec; do
-        [[ "$spec" == */tcp ]] || continue
-        tcp_listening "${spec%/tcp}" || return 1
+        if [[ "$spec" == */tcp ]]; then
+            tcp_listening "${spec%/tcp}" || return 1
+        elif [[ "$spec" == */udp ]]; then
+            udp_listening "${spec%/udp}" || return 1
+        fi
     done < <(xray_ports)
     return 0
 }
 
-# 校验配置并（重）启动；没有节点时停止服务
+# 校验配置并（重）启动；没有节点且无转发规则时停止服务
 xray_reload() {
     local out
     xray_fix_perms
-    if [ "$(xray_node_count)" -eq 0 ]; then
+    if [ "$(xray_node_count)" -eq 0 ] && [ "$(xray_fwd_enabled_count)" -eq 0 ]; then
         systemctl disable --now adam-xray >/dev/null 2>&1 || true
-        info "$(L '当前没有节点，Xray 服务已停止')"
+        info "$(L '当前没有节点与转发规则，Xray 服务已停止')"
         return 0
     fi
     if ! out="$(xray_test_conf)"; then
@@ -9003,7 +9223,7 @@ xray_listen_addr() { if snell_ipv6_ok; then printf '::'; else printf '0.0.0.0'; 
 # write_service_unit FILE DESC DOC STARTLIMIT USER GROUP EXEC CAPS NOFILE RESTART RESTARTSEC SVC_EXTRA：
 # 五处 systemd unit 写出共用同一模板（原子写 mktemp+mv；M13）
 write_service_unit() {
-    local file="$1" desc="$2" doc="$3" startlimit="$4" user="$5" group="$6" execline="$7" caps="$8" nofile="$9" restart="${10}" restartsec="${11}" svc_extra="${12:-}"
+    local file="$1" desc="$2" doc="$3" startlimit="$4" user="$5" group="$6" execline="$7" caps="$8" nofile="$9" restart="${10}" restartsec="${11}" svc_extra="${12:-}" unit_extra="${13:-}"
     local tmp
     tmp="$(mktemp "$(dirname "$file")/.unit.XXXXXX")" || return 1
     {
@@ -9011,6 +9231,7 @@ write_service_unit() {
         [ -n "$doc" ] && printf 'Documentation=%s\n' "$doc"
         printf 'After=network-online.target\nWants=network-online.target\n'
         [ -n "$startlimit" ] && printf 'StartLimitIntervalSec=%s\n' "$startlimit"
+        [ -n "$unit_extra" ] && printf '%s\n' "$unit_extra"
         printf '\n[Service]\nType=simple\n'
         [ -n "$user" ] && printf 'User=%s\nGroup=%s\n' "$user" "$group"
         printf 'ExecStart=%s\n' "$execline"
@@ -10006,7 +10227,7 @@ xray_health_check() {
     divider
     cur="$(xray_installed_version)"
     hc_line 0 "$(L '内核版本') ${cur:-$(L '未知')}"
-    if [ "$(xray_node_count)" -eq 0 ]; then
+    if [ "$(xray_node_count)" -eq 0 ] && [ "$(xray_fwd_enabled_count)" -eq 0 ]; then
         hc_line 2 "$(L '还没有节点，服务不会启动')"
         return 0
     fi
@@ -10033,6 +10254,22 @@ xray_health_check() {
             fi
         fi
     done
+    # 转发规则：TCP/UDP 监听与防火墙
+    local _ftag
+    while IFS= read -r _ftag; do
+        [ -n "$_ftag" ] || continue
+        xray_fwd_load "$_ftag" || continue
+        [ "${FWD_ENABLED:-0}" = "1" ] || continue
+        if ! validate_port "$FWD_LPORT"; then hc_line 1 "[fwd-${FWD_ID}] $(L '端口不合法')"; continue; fi
+        if [ "${FWD_PROTO:-both}" != "udp" ]; then
+            if tcp_listening "$FWD_LPORT"; then hc_line 0 "[fwd-${FWD_ID}] TCP ${FWD_LPORT} $(L '正在监听')"; else hc_line 1 "[fwd-${FWD_ID}] TCP ${FWD_LPORT} $(L '没有在监听')"; fi
+            if ufw_active && ! fw_is_allowed "$FWD_LPORT" tcp; then hc_line 1 "[fwd-${FWD_ID}] $(L '防火墙未放行') ${FWD_LPORT}/tcp"; fi
+        fi
+        if [ "${FWD_PROTO:-both}" != "tcp" ]; then
+            if udp_listening "$FWD_LPORT"; then hc_line 0 "[fwd-${FWD_ID}] UDP ${FWD_LPORT} $(L '正在监听')"; else hc_line 1 "[fwd-${FWD_ID}] UDP ${FWD_LPORT} $(L '没有在监听')"; fi
+            if ufw_active && ! fw_is_allowed "$FWD_LPORT" udp; then hc_line 1 "[fwd-${FWD_ID}] $(L '防火墙未放行') ${FWD_LPORT}/udp"; fi
+        fi
+    done < <(xray_fwd_tags)
     maint_load
     if [ "$MAINT_WATCHDOG" = "1" ] && systemctl is-active --quiet adam-watchdog.timer 2>/dev/null; then
         hc_line 0 "$(L '保活巡检定时器运行中（每 5 分钟）')"
@@ -10171,13 +10408,16 @@ xray_uninstall() {
 }
 
 xray_state_text() {
-    local v
+    local v fwd
     if [ ! -x "$XRAY_BIN" ]; then printf '%s' "${YELLOW}$(L '未安装')${NC}"; return 0; fi
     v="$(xray_installed_version)"
-    if [ "$(xray_node_count)" -eq 0 ]; then
+    fwd="$(xray_fwd_enabled_count)"
+    if [ "$(xray_node_count)" -eq 0 ] && [ "$fwd" -eq 0 ]; then
         printf '%s' "${v:-$(L '版本未知')} · ${YELLOW}$(L '无节点')${NC}"
     else
-        printf '%s' "${v:-$(L '版本未知')} · $(xray_node_count) $(L '个节点 ·') $(svc_state adam-xray)"
+        local fwd_txt=""
+        [ "$fwd" -gt 0 ] && fwd_txt=" · ${fwd} $(L '条转发规则')"
+        printf '%s' "${v:-$(L '版本未知')} · $(xray_node_count) $(L '个节点')${fwd_txt} · $(svc_state adam-xray)"
     fi
 }
 
@@ -10204,9 +10444,10 @@ xray_menu() {
         echo -e "  ${GREEN}13)${NC} $(L '修改分享链接用的公网地址')"
         echo -e "  ${GREEN}14)${NC} ${RED}$(L '卸载')${NC} Xray"
         echo -e "  ${GREEN}15)${NC} $(L '大陆流量拦截（geoip:cn / geosite:cn → 拦截）开 / 关')"
+        echo -e "  ${GREEN}16)${NC} $(L '端口转发（dokodemo-door）')"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-15]: " choice
+        read -rp "$(L '请选择') [0-16]: " choice
         case "$choice" in
             1)  run_action xray_install ;;
             2)  run_action xray_add_node ;;
@@ -10223,6 +10464,7 @@ xray_menu() {
             13) run_action xray_set_host ;;
             14) run_action xray_uninstall ;;
             15) run_action xray_cnblock ;;
+            16) run_action xray_fwd_menu ;;
             0)  return 0 ;;
             *)  warn "$(L '无效选择')" ;;
         esac
@@ -10247,8 +10489,9 @@ xray_cli() {
         logs)         xray_logs ;;
         restart)      xray_restart ;;
         cnblock)      xray_cnblock "$@" ;;
+        fwd)          xray_fwd_cli "$@" ;;
         uninstall)    xray_uninstall ;;
-        *) error "$(L '未知的 xray 子命令:') ${sub}$(L '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / uninstall）')" ;;
+        *) error "$(L '未知的 xray 子命令:') ${sub}$(L '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall）')" ;;
     esac
 }
 
@@ -10922,11 +11165,1355 @@ do_update_script() {
     return 0
 }
 
+# probe_tcp_host_port HOST PORT：TCP 握手探测，打印 OK <毫秒> 或 FAIL <原因>；恒返回 0，
+# 调用方按输出前缀判断。IPv6 与域名解析走 python3；无 python3 时退到 /dev/tcp（仅 IPv4/域名）。
+probe_tcp_host_port() {
+    local host="$1" port="$2"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import socket,sys,time
+h,p = sys.argv[1].strip("[]"), int(sys.argv[2])
+t0 = time.monotonic()
+try:
+    with socket.create_connection((h, p), timeout=3):
+        print(f"OK {(time.monotonic()-t0)*1000:.1f}ms")
+except Exception as e:
+    print(f"FAIL {e}")' "$host" "$port" 2>/dev/null || echo "FAIL"
+        return 0
+    fi
+    case "$host" in *:* ) echo "FAIL (need python3 for IPv6)"; return 0 ;; esac
+    if timeout 3 bash -c 'exec 3<>/dev/tcp/"$0"/"$1"' "$host" "$port" 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAIL timeout/refused"
+    fi
+    return 0
+}
+
+# ══════════════════════════════════════════════════════════════
+#   Realm 端口转发（参考 zywe03/realm-xwPF · 适配 adam 脚本架构）
+#   目录模式：realm -c /etc/adam-realm/conf.d（00-base.toml + rule-<id>.toml）
+#   规则元数据：/etc/adam-realm/rules/<id>.env（600 权限）
+#   v8.4 合入时按审计逐项修正（A1–A25，见文件头修订记录）
+# ══════════════════════════════════════════════════════════════
+
+realm_installed() { [ -x "$REALM_BIN" ]; }
+
+realm_rule_files() {
+    local f
+    [ -d "$REALM_RULE_DIR" ] || return 0
+    for f in "${REALM_RULE_DIR}"/*.env; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+realm_enabled_count() {
+    local f n=0
+    while IFS= read -r f; do
+        grep -q '^RULE_ENABLED="1"$' "$f" 2>/dev/null && n=$((n + 1))
+    done < <(realm_rule_files)
+    printf '%s' "$n"
+}
+
+realm_state_text() {
+    local total=0 enabled=0 f ver
+    if ! realm_installed; then
+        printf '%s' "${YELLOW}$(L '未安装')${NC}"
+        return 0
+    fi
+    while IFS= read -r f; do
+        total=$((total + 1))
+        grep -q '^RULE_ENABLED="1"$' "$f" 2>/dev/null && enabled=$((enabled + 1))
+    done < <(realm_rule_files)
+    ver="$(cat "$REALM_VERSION_FILE" 2>/dev/null || echo "$(L '未知')")"
+    printf '%s' "${ver} · ${enabled}/${total} $(L '条规则') · $(svc_state adam-realm)"
+}
+
+# 输出所有已启用规则的 ufw 端口规格（供 managed_ports / 防火墙 / 保留端口调用）
+realm_ports() {
+    local f
+    while IFS= read -r f; do
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            [ "${RULE_ENABLED:-0}" = "1" ] || exit 0
+            validate_port "${RULE_LPORT:-}" || exit 0
+            case "${RULE_PROTO:-both}" in
+                tcp)  echo "${RULE_LPORT}/tcp" ;;
+                udp)  echo "${RULE_LPORT}/udp" ;;
+                both) echo "${RULE_LPORT}/tcp"; echo "${RULE_LPORT}/udp" ;;
+            esac
+        )
+    done < <(realm_rule_files) | sort -u
+}
+
+# 供 watchdog 保活巡检调用：有启用规则时要求服务 active 且每个监听端口真实在监听
+realm_healthy() {
+    [ "$(realm_enabled_count)" -gt 0 ] || return 0
+    realm_installed || return 1
+    systemctl is-active --quiet adam-realm 2>/dev/null || return 1
+    command -v ss >/dev/null 2>&1 || return 1
+    local spec port proto
+    while IFS= read -r spec; do
+        [ -n "$spec" ] || continue
+        port="${spec%/*}"; proto="${spec#*/}"
+        if [ "$proto" = "udp" ]; then
+            udp_listening "$port" || return 1
+        else
+            tcp_listening "$port" || return 1
+        fi
+    done < <(realm_ports)
+    return 0
+}
+
+realm_default_listen_ip() {
+    if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)" = "1" ]; then
+        printf '0.0.0.0'
+    else
+        printf '[::]'
+    fi
+}
+
+# TOML 双引号字符串转义（只处理 \ 与 "；输入侧已拒绝 " \ 换行）
+toml_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# 值含 TOML 双引号字符串非法字符（" 或 \）时返回 0（非法）
+realm_has_toml_special() {
+    case "$1" in *\"*|*\\*|*$'\n'*|*$'\r'*|*$'\t'*) return 0 ;; *) return 1 ;; esac
+}
+
+realm_latest_tag() {
+    local tag=""
+    tag="$(curl -fsS --max-time 20 "https://api.github.com/repos/${REALM_REPO}/releases/latest" 2>/dev/null \
+        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
+    if [ -z "$tag" ]; then
+        tag="$(curl -fsSI --max-time 20 "https://github.com/${REALM_REPO}/releases/latest" 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
+    fi
+    printf '%s' "$tag"
+}
+
+realm_fetch_binary() {
+    local tag="$1" arch libc asset url api_json digest actual bin
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) warn "$(L 'Realm 暂不支持该架构：')$(uname -m)"; return 1 ;;
+    esac
+
+    REALM_DL_BIN=""
+    make_workdir || return 1
+    local workdir="$WORKDIR"
+    # 优先 musl 静态构建，避免老系统 GLIBC 版本过低无法运行；
+    # 任一构建下载/校验/试运行失败即试另一构建，两个都失败才报错。
+    for libc in musl gnu; do
+        asset="realm-${arch}-unknown-linux-${libc}.tar.gz"
+        url="https://github.com/${REALM_REPO}/releases/download/${tag}/${asset}"
+        local subdir="${workdir}/${libc}"
+        mkdir -p "$subdir" || { asset=""; continue; }
+        if ! curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "${subdir}/realm.tar.gz" "$url" 2>/dev/null; then
+            asset=""; continue
+        fi
+
+        # SHA256 校验（复用 GitHub Release API digest）；取不到摘要时明示跳过，不静默放行
+        actual="$(sha256sum "${subdir}/realm.tar.gz" | awk '{print $1}')"
+        api_json="$(curl -fsS --max-time 20 "https://api.github.com/repos/${REALM_REPO}/releases/tags/${tag}" 2>/dev/null || true)"
+        digest=""
+        if [ -n "$api_json" ] && command -v python3 >/dev/null 2>&1; then
+            digest="$(printf '%s' "$api_json" | ASSET="$asset" python3 -c 'import json,os,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for a in d.get("assets",[]):
+    if a.get("name")==os.environ["ASSET"]:
+        print((a.get("digest") or "").replace("sha256:",""))
+        break' 2>/dev/null || true)"
+        fi
+        if [ -n "$digest" ]; then
+            if [ "$digest" != "$actual" ]; then
+                warn "$(L 'SHA256 校验失败（')${asset}$(L '），尝试另一构建')"
+                asset=""; continue
+            fi
+            success "$(L 'SHA256 校验通过（')${asset}$(L '）')"
+        else
+            warn "$(L '未取到官方 SHA256 摘要，跳过校验（')${asset}$(L '）')"
+        fi
+
+        tar -xzf "${subdir}/realm.tar.gz" -C "$subdir" || { asset=""; continue; }
+        bin="$(find "$subdir" -maxdepth 2 -type f -name realm | head -1)"
+        [ -n "$bin" ] || { asset=""; continue; }
+        chmod 755 "$bin" || { asset=""; continue; }
+        if ! "$bin" --version >/dev/null 2>&1; then
+            warn "$(L '下载的 realm 无法在本机运行，尝试另一构建')"
+            asset=""; continue
+        fi
+        REALM_DL_BIN="$bin"
+        return 0
+    done
+    warn "$(L '下载 Realm ')${tag}$(L ' 失败')"
+    return 1
+}
+
+realm_write_base_config() {
+    install -d -m 755 "$REALM_DIR" "$REALM_CONF_D" "$REALM_RULE_DIR"
+    if [ ! -f "${REALM_CONF_D}/00-base.toml" ]; then
+        cat > "${REALM_CONF_D}/00-base.toml" << 'BASEEOF'
+[log]
+level = "warn"
+output = "stdout"
+
+[dns]
+mode = "ipv4_and_ipv6"
+protocol = "tcp_and_udp"
+min_ttl = 600
+max_ttl = 3600
+cache_size = 256
+
+[network]
+no_tcp = false
+use_udp = true
+tcp_timeout = 5
+udp_timeout = 30
+tcp_keepalive = 15
+tcp_keepalive_probe = 3
+BASEEOF
+        chmod 644 "${REALM_CONF_D}/00-base.toml"
+    fi
+}
+
+realm_write_service() {
+    local run_user="adam-realm" run_group="adam-realm"
+    if [ -f "${REALM_DIR}/run-as-root" ]; then
+        # 曾因专用用户启动失败而回退 root：不再写回 User=（见 realm_reload_service）
+        run_user=""; run_group=""
+    elif ! ensure_system_user adam-realm adam-realm 2>/dev/null; then
+        warn "$(L '创建 adam-realm 用户失败，改以 root 运行服务')"
+        run_user=""; run_group=""
+    fi
+    write_service_unit "$REALM_SERVICE" "Adam Realm Port Forwarder" "https://github.com/${REALM_REPO}" "60" "$run_user" "$run_group" "${REALM_BIN} -c ${REALM_CONF_D}" "CAP_NET_BIND_SERVICE CAP_NET_RAW" "1048576" "always" "3" "ProtectSystem=full
+ProtectHome=read-only" "StartLimitBurst=10"
+    systemctl daemon-reload || true
+}
+
+# 校验 .env 文件内容是否可安全 source：只允许 KEY="值" 行，值内不含未转义的 $ ` "
+# （本脚本写出的文件经 dq_escape 转义，$ 一律写成 \$、反引号写成 \`，故残留的 $ ` " 即为注入）
+realm_env_file_safe() {
+    local f="$1" line key val rest n=0
+    [ -f "$f" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        case "$line" in
+            *=*) key="${line%%=*}"; rest="${line#*=}" ;;
+            *) return 1 ;;
+        esac
+        case "$key" in
+            RULE_*|FWD_*) : ;;
+            *) return 1 ;;
+        esac
+        case "$rest" in
+            \"*\") val="${rest:1:${#rest}-2}" ;;
+            *) return 1 ;;
+        esac
+        val="${val//\\\\/}"
+        val="${val//\\\$/}"
+        val="${val//\\\`/}"
+        val="${val//\\\"/}"
+        case "$val" in *'$'*|*'`'*|*'"'*) return 1 ;; esac
+    done < "$f"
+    [ "$n" -gt 0 ] || return 1
+    return 0
+}
+
+# 将单条 rules/<id>.env 渲染为 conf.d/rule-<id>.toml（停用时删除对应 .toml）
+realm_render_rule() {
+    local id="$1"
+    local env_file="${REALM_RULE_DIR}/${id}.env"
+    local toml_file="${REALM_CONF_D}/rule-${id}.toml"
+    [ -f "$env_file" ] || { rm -f "$toml_file"; return 0; }
+    (
+        # shellcheck disable=SC1090
+        source "$env_file" 2>/dev/null || exit 1
+        if [ "${RULE_ENABLED:-0}" != "1" ]; then
+            rm -f "$toml_file"
+            exit 0
+        fi
+        # 渲染是最后一道防线：端口/IP 非法、手改或导入的坏值直接跳过本规则
+        validate_port "${RULE_LPORT:-}" || exit 1
+        validate_port "${RULE_RPORT:-}" || exit 1
+        is_safe_host "${RULE_RHOST:-}" || exit 1
+        local _lip="${RULE_LIP:-}"
+        _lip="${_lip#[}"; _lip="${_lip%]}"
+        is_ip "$_lip" 0 || exit 1
+        # 换行/回车绝不能进 TOML（导入或手改的 env 可能带换行）
+        case "${RULE_REMARK:-}${RULE_LTRANS:-}${RULE_RTRANS:-}${RULE_LIP:-}${RULE_RHOST:-}${RULE_THROUGH:-}${RULE_OUT_IF:-}${RULE_IN_IF:-}${RULE_EXTRA_REMOTES:-}${RULE_BALANCE:-}" in
+            *$'\n'*|*$'\r'*) exit 1 ;;
+        esac
+        local tmpf
+        tmpf="$(mktemp "${REALM_CONF_D}/.rule-${id}.XXXXXX")" || exit 1
+        local no_tcp="false" use_udp="true"
+        case "${RULE_PROTO:-both}" in
+            tcp) no_tcp="false"; use_udp="false" ;;
+            udp) no_tcp="true";  use_udp="true" ;;
+            *)   no_tcp="false"; use_udp="true" ;;
+        esac
+        local laddr raddr
+        laddr="$(format_host_for_url "$RULE_LIP"):${RULE_LPORT}"
+        raddr="$(format_host_for_url "$RULE_RHOST"):${RULE_RPORT}"
+
+        {
+            echo "# id=${id} remark=$(toml_escape "${RULE_REMARK:-}")"
+            echo "[[endpoints]]"
+            echo "listen = \"$(toml_escape "$laddr")\""
+            echo "remote = \"$(toml_escape "$raddr")\""
+            if [ -n "${RULE_EXTRA_REMOTES:-}" ]; then
+                local arr="" item ehost eport
+                local -a extras=()
+                IFS=',' read -r -a extras <<< "$RULE_EXTRA_REMOTES"
+                for item in "${extras[@]}"; do
+                    item="${item//[[:space:]]/}"
+                    [ -n "$item" ] || continue
+                    ehost="${item%:*}"; eport="${item##*:}"
+                    [ "$ehost" = "$item" ] && continue
+                    is_safe_host "$ehost" || continue
+                    validate_port "$eport" || continue
+                    arr="${arr:+${arr}, }\"$(toml_escape "$(format_host_for_url "$ehost"):${eport}")\""
+                done
+                [ -n "$arr" ] && echo "extra_remotes = [${arr}]"
+                [ -n "$arr" ] && [ -n "${RULE_BALANCE:-}" ] && echo "balance = \"$(toml_escape "$RULE_BALANCE")\""
+            fi
+            [ -n "${RULE_THROUGH:-}" ] && echo "through = \"$(toml_escape "$RULE_THROUGH")\""
+            [ -n "${RULE_OUT_IF:-}" ] && echo "interface = \"$(toml_escape "$RULE_OUT_IF")\""
+            [ -n "${RULE_IN_IF:-}" ] && echo "listen_interface = \"$(toml_escape "$RULE_IN_IF")\""
+            if [ "${RULE_PROTO:-both}" != "udp" ]; then
+                [ -n "${RULE_LTRANS:-}" ] && echo "listen_transport = \"$(toml_escape "$RULE_LTRANS")\""
+                [ -n "${RULE_RTRANS:-}" ] && echo "remote_transport = \"$(toml_escape "$RULE_RTRANS")\""
+            fi
+            local net="no_tcp = ${no_tcp}, use_udp = ${use_udp}"
+            [ "${RULE_SEND_PROXY:-0}" = "1" ]   && net="${net}, send_proxy = true, send_proxy_version = 2"
+            [ "${RULE_ACCEPT_PROXY:-0}" = "1" ] && net="${net}, accept_proxy = true"
+            [ "${RULE_SEND_MPTCP:-0}" = "1" ]   && net="${net}, send_mptcp = true"
+            [ "${RULE_ACCEPT_MPTCP:-0}" = "1" ] && net="${net}, accept_mptcp = true"
+            echo "network = { ${net} }"
+        } > "$tmpf" || { rm -f "$tmpf"; exit 1; }
+        chmod 644 "$tmpf"
+        mv -f "$tmpf" "$toml_file"
+    )
+}
+
+realm_rebuild_all() {
+    realm_write_base_config
+    local f id
+    while IFS= read -r f; do
+        id="$(basename "$f" .env)"
+        realm_env_file_safe "$f" || { warn "$(L '规则文件内容非法，已跳过：')${id}"; rm -f "${REALM_CONF_D}/rule-${id}.toml"; continue; }
+        realm_render_rule "$id" || warn "$(L '规则渲染失败，已跳过：')${id}"
+    done < <(realm_rule_files)
+    # 删除无对应 .env 的残留 rule-*.toml（逐个渲染后再清理，不断档）
+    local t
+    for t in "${REALM_CONF_D}"/rule-*.toml; do
+        [ -f "$t" ] || continue
+        id="$(basename "$t" .toml)"
+        id="${id#rule-}"
+        [ -f "${REALM_RULE_DIR}/${id}.env" ] || rm -f "$t"
+    done
+}
+
+# 有启用规则时 enable+启动；无规则时 disable+停止；是否 enable 由此处决定
+realm_reload_service() {
+    if ! realm_installed && [ ! -d "$REALM_DIR" ]; then
+        info "$(L 'Realm 未安装，规则配置已保存，安装后生效')"
+        return 0
+    fi
+    realm_rebuild_all
+    if [ "$(realm_enabled_count)" -eq 0 ]; then
+        systemctl disable --now adam-realm 2>/dev/null || true
+        info "$(L '当前没有已启用的转发规则，adam-realm 已停止')"
+        return 0
+    fi
+    if ! realm_installed; then
+        info "$(L 'Realm 未安装，规则配置已保存，安装后生效')"
+        return 0
+    fi
+    systemctl enable adam-realm >/dev/null 2>&1 || true
+    if svc_restart_wait adam-realm 2 20; then
+        return 0
+    fi
+    # 专用用户启动失败时改以 root 重试一次（参照 Nowhere 的回退模式）
+    if grep -q '^User=' "$REALM_SERVICE" 2>/dev/null; then
+        warn "$(L 'adam-realm 以专用用户启动失败，改以 root 重试')"
+        sed -i '/^User=/d; /^Group=/d' "$REALM_SERVICE" || { warn "$(L '改写服务文件失败')"; return 1; }
+        systemctl daemon-reload || true
+        if svc_restart_wait adam-realm 2 20; then
+            touch "${REALM_DIR}/run-as-root" 2>/dev/null || true
+            info "$(L '已记录 root 运行标记，下次安装不再写入专用用户：')${REALM_DIR}/run-as-root"
+            return 0
+        fi
+    fi
+    warn "$(L 'adam-realm 启动失败，请查看日志：journalctl -u adam-realm -n 20 --no-pager')"
+    return 1
+}
+
+realm_install() {
+    step "$(L '安装 / 更新 Realm')"
+    divider
+    apt_install curl tar ca-certificates python3 iproute2 || true
+    local _t
+    for _t in curl tar sha256sum python3 ss; do
+        command -v "$_t" >/dev/null 2>&1 || error "$(L '缺少必需工具：')${_t}$(L '，请先安装')"
+    done
+    info "$(L '正在查询 Realm 官方最新版本...')"
+    local tag cur=""
+    tag="$(realm_latest_tag)"
+    [ -n "$tag" ] || error "$(L '无法获取 Realm 最新版本号，请检查网络')"
+    [ -f "$REALM_VERSION_FILE" ] && cur="$(cat "$REALM_VERSION_FILE" 2>/dev/null || true)"
+    info "$(L '最新版本:') ${tag}"
+    [ -n "$cur" ] && info "$(L '当前版本:') ${cur}"
+    if [ -n "$cur" ] && [ "${cur#v}" = "${tag#v}" ] && realm_installed; then
+        if ! confirm "$(L '已是最新版本，仍要重新安装？')" n; then return 0; fi
+    fi
+
+    realm_fetch_binary "$tag" || error "$(L 'Realm 下载或校验失败')"
+    install -d -m 755 "$REALM_DIR" "$REALM_CONF_D" "$REALM_RULE_DIR" || error "$(L '创建 Realm 配置目录失败')"
+    if [ -f "$REALM_BIN" ]; then cp "$REALM_BIN" "$REALM_BIN_BACKUP" 2>/dev/null || warn "$(L '备份旧二进制失败')"; fi
+    install -m 755 "$REALM_DL_BIN" "$REALM_BIN" || error "$(L '安装 Realm 二进制失败')"
+    realm_write_base_config
+    realm_write_service
+
+    if [ "$(realm_enabled_count)" -gt 0 ]; then
+        if ! realm_reload_service; then
+            if [ -f "$REALM_BIN_BACKUP" ]; then
+                warn "$(L '新版本启动失败，自动回滚到旧二进制...')"
+                install -m 755 "$REALM_BIN_BACKUP" "$REALM_BIN"
+                [ -n "$cur" ] && echo "$cur" > "$REALM_VERSION_FILE"
+                systemctl restart adam-realm 2>/dev/null || true
+            else
+                warn "$(L '首次安装启动失败，已删除新二进制')"
+                rm -f "$REALM_BIN"
+            fi
+            error "$(L 'Realm 更新失败')"
+        fi
+    else
+        realm_reload_service || true
+    fi
+    echo "$tag" > "$REALM_VERSION_FILE"
+    success "$(L 'Realm ')${tag}$(L ' 安装完成（')$(${REALM_BIN} --version 2>&1 | head -1)$(L '）')"
+}
+
+realm_next_id() {
+    local i=1 id
+    while true; do
+        id="$(printf 'r%02d' "$i")"
+        [ ! -f "${REALM_RULE_DIR}/${id}.env" ] && { printf '%s' "$id"; return 0; }
+        i=$((i + 1))
+    done
+}
+
+# 构建 ws/tls/wss 隧道字符串（参考 xwPF 中转端/落地端配对）
+realm_prompt_transport() {
+    local role_label="$1" is_server="$2" choice host path sni crt key
+    REALM_TRANS_RESULT=""
+    echo "  ${role_label}$(L '传输隧道：')"
+    echo "    1) $(L '标准透传（推荐，性能最高，适用于已加密协议）')"
+    echo "    2) WS（WebSocket）"
+    echo "    3) TLS"
+    echo "    4) WSS（WebSocket + TLS）"
+    read -rp "  $(L '选择 [1-4，默认 1]: ')" choice || { [ -n "$choice" ] || return 0; }
+    case "${choice:-1}" in
+        1) return 0 ;;
+        2)
+            read -rp "    $(L '伪装 Host（如 cdn.example.com）: ')" host || { [ -n "$host" ] || return 0; }
+            read -rp "    $(L 'WS Path（回车默认 /ws）: ')" path || { [ -n "$path" ] || return 0; }
+            path="${path:-/ws}"; [[ "$path" == /* ]] || path="/${path}"
+            is_safe_host "$host" || { warn "$(L 'Host 不合法，回退标准透传')"; return 0; }
+            realm_has_toml_special "$path" && { warn "$(L '路径含非法字符（\" 或 \），回退标准透传')"; return 0; }
+            case "$path" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退标准透传')"; return 0 ;; esac
+            REALM_TRANS_RESULT="ws;host=${host};path=${path}"
+            ;;
+        3)
+            read -rp "    $(L 'TLS SNI / 域名（如 example.com）: ')" sni || { [ -n "$sni" ] || return 0; }
+            is_safe_host "$sni" || { warn "$(L '域名不合法，回退标准透传')"; return 0; }
+            if [ "$is_server" = "1" ]; then
+                read -rp "    $(L '证书文件路径（回车使用 Realm 内置自签）: ')" crt || { [ -n "$crt" ] || return 0; }
+                if [ -n "$crt" ]; then
+                    if realm_has_toml_special "$crt"; then warn "$(L '路径含非法字符（\" 或 \），回退内置自签')"; REALM_TRANS_RESULT="tls;servername=${sni}"; return 0; fi
+                    case "$crt" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退内置自签')"; REALM_TRANS_RESULT="tls;servername=${sni}"; return 0 ;; esac
+                    read -rp "    $(L '私钥文件路径: ')" key || { [ -n "$key" ] || return 0; }
+                    if [ -f "$crt" ] && [ -n "$key" ] && [ -f "$key" ]; then
+                        if realm_has_toml_special "$key"; then warn "$(L '路径含非法字符（\" 或 \），回退内置自签')"; REALM_TRANS_RESULT="tls;servername=${sni}"; return 0; fi
+                        case "$key" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退内置自签')"; REALM_TRANS_RESULT="tls;servername=${sni}"; return 0 ;; esac
+                        REALM_TRANS_RESULT="tls;cert=${crt};key=${key}"
+                    else
+                        warn "$(L '证书或私钥文件不存在，回退内置自签')"
+                        REALM_TRANS_RESULT="tls;servername=${sni}"
+                    fi
+                else
+                    REALM_TRANS_RESULT="tls;servername=${sni}"
+                fi
+            else
+                if confirm "$(L '目标证书由 CA 签发（可校验）？')" n; then
+                    REALM_TRANS_RESULT="tls;sni=${sni}"
+                else
+                    REALM_TRANS_RESULT="tls;sni=${sni};insecure"
+                fi
+            fi
+            ;;
+        4)
+            read -rp "    $(L '伪装域名 Host/SNI（如 cdn.example.com）: ')" host || { [ -n "$host" ] || return 0; }
+            read -rp "    $(L 'WS Path（回车默认 /ws）: ')" path || { [ -n "$path" ] || return 0; }
+            path="${path:-/ws}"; [[ "$path" == /* ]] || path="/${path}"
+            is_safe_host "$host" || { warn "$(L '域名不合法，回退标准透传')"; return 0; }
+            realm_has_toml_special "$path" && { warn "$(L '路径含非法字符（\" 或 \），回退标准透传')"; return 0; }
+            case "$path" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退标准透传')"; return 0 ;; esac
+            if [ "$is_server" = "1" ]; then
+                REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"
+            else
+                if confirm "$(L '目标证书由 CA 签发（可校验）？')" n; then
+                    REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;sni=${host}"
+                else
+                    REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;sni=${host};insecure"
+                fi
+            fi
+            ;;
+    esac
+}
+
+realm_add_rule() {
+    realm_installed || { warn "$(L '尚未安装 Realm，请先安装')"; return 1; }
+    step "$(L '添加 Realm 转发规则')"
+    divider
+
+    local id remark proto lip lport rhost rport proto_c def_lip occ
+    local extra_remotes="" balance="" through="" out_if="" in_if=""
+    local ltrans="" rtrans="" send_proxy=0 accept_proxy=0 send_mptcp=0 accept_mptcp=0
+
+    read -rp "$(L '规则备注（可选，如 香港VPC落地）: ')" remark || { [ -n "$remark" ] || return 1; }
+    if realm_has_toml_special "$remark"; then warn "$(L '备注含非法字符（\" 或 \），请去掉后重试')"; return 1; fi
+
+    echo "$(L '转发协议：')"
+    echo "  1) $(L 'TCP + UDP 双栈（默认）')"
+    echo "  2) $(L '纯 TCP')"
+    echo "  3) $(L '纯 UDP（自动跳过 WS/TLS 隧道选项）')"
+    read -rp "$(L '选择 [1-3，默认 1]: ')" proto_c || { [ -n "$proto_c" ] || return 1; }
+    case "${proto_c:-1}" in 2) proto="tcp" ;; 3) proto="udp" ;; *) proto="both" ;; esac
+
+    def_lip="$(realm_default_listen_ip)"
+    read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
+    lip="${lip:-$def_lip}"
+    local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
+    is_ip "$_lip_check" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+
+    while true; do
+        read -rp "$(L '本机监听端口 (1-65535): ')" lport || { [ -n "$lport" ] || return 1; }
+        validate_port "$lport" && break
+        warn "$(L '端口不合法')"
+    done
+    lport=$((10#$lport))
+
+    # 冲突检测：同协议下是否被其他进程占用（排除 realm 自身监听）
+    if command -v ss >/dev/null 2>&1; then
+        occ=""
+        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" || true)"
+        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" || true)"
+        if [ -n "$occ" ]; then
+            warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
+            echo "$occ"
+            confirm "$(L '仍要继续添加？')" n || return 0
+        fi
+    fi
+
+    while true; do
+        read -rp "$(L '目标地址（域名、公网 IP 或同区免费内网 IP）: ')" rhost || { [ -n "$rhost" ] || return 1; }
+        rhost="${rhost//[[:space:]]/}"
+        is_safe_host "$rhost" && break
+        warn "$(L '目标地址格式不合法')"
+    done
+    while true; do
+        read -rp "$(L '目标端口 (1-65535): ')" rport || { [ -n "$rport" ] || return 1; }
+        validate_port "$rport" && break
+        warn "$(L '端口不合法')"
+    done
+    rport=$((10#$rport))
+
+    # 可选：负载均衡（单中转多出口）
+    if confirm "$(L '配置多目标负载均衡（extra_remotes）？')" n; then
+        read -rp "$(L '  额外目标列表（逗号分隔，格式 host:port,host2:port）: ')" extra_remotes || { [ -n "$extra_remotes" ] || return 1; }
+        if [ -n "$extra_remotes" ]; then
+            # 逐项校验 host:port，无效项剔除
+            local _clean="" _item _ih _ip
+            local -a _eitems=()
+            IFS=',' read -r -a _eitems <<< "$extra_remotes"
+            for _item in "${_eitems[@]}"; do
+                _item="${_item//[[:space:]]/}"
+                [ -n "$_item" ] || continue
+                _ih="${_item%:*}"; _ip="${_item##*:}"
+                if [ "$_ih" = "$_item" ] || ! is_safe_host "$_ih" || ! validate_port "$_ip"; then
+                    warn "$(L '已剔除无效目标：')${_item}"
+                    continue
+                fi
+                _clean="${_clean:+${_clean},}${_item}"
+            done
+            extra_remotes="$_clean"
+            if [ -z "$extra_remotes" ]; then
+                warn "$(L '额外目标全部无效，已跳过负载均衡')"
+            else
+                echo "$(L '  负载策略：1) roundrobin（加权轮询）  2) iphash（源 IP 哈希）')"
+                local lb_c lb_algo="roundrobin" lb_w=""
+                read -rp "$(L '  选择 [1/2，默认 1]: ')" lb_c || { [ -n "$lb_c" ] || return 1; }
+                [ "${lb_c:-1}" = "2" ] && lb_algo="iphash"
+                read -rp "$(L '  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ')" lb_w || { [ -n "$lb_w" ] || return 1; }
+                local _cnt=1 _e
+                local -a _arr=()
+                IFS=',' read -r -a _arr <<< "$extra_remotes"
+                for _e in "${_arr[@]}"; do [ -n "${_e//[[:space:]]/}" ] && _cnt=$((_cnt + 1)); done
+                if [ -n "$lb_w" ]; then
+                    # 权重数量须等于目标总数（主目标 + 额外目标）且全为数字
+                    local _wc=0 _wok=1 _wi
+                    local -a _warr=()
+                    IFS=',' read -r -a _warr <<< "$lb_w"
+                    for _wi in "${_warr[@]}"; do
+                        _wi="${_wi//[[:space:]]/}"
+                        [ -n "$_wi" ] || continue
+                        _wc=$((_wc + 1))
+                        [[ "$_wi" =~ ^[0-9]+$ ]] || _wok=0
+                    done
+                    if [ "$_wok" != "1" ] || [ "$_wc" -ne "$_cnt" ]; then
+                        warn "$(L '权重数量与目标数不符或含非数字，已按等权生成')"
+                        lb_w=""
+                    fi
+                fi
+                if [ -z "$lb_w" ]; then
+                    lb_w="$(printf '1, %.0s' $(seq 1 "$_cnt") | sed 's/, $//')"
+                fi
+                balance="${lb_algo}: ${lb_w}"
+            fi
+        fi
+    fi
+
+    # 可选：双端隧道（仅 TCP/双栈）
+    if [ "$proto" != "udp" ] && confirm "$(L '配置 WS / TLS / WSS 双端加密隧道？')" n; then
+        echo "$(L '  当前机器角色：1) 中转入口机（向外加密 remote_transport）  2) 落地出口机（入站解密 listen_transport）')"
+        local trole
+        read -rp "$(L '  选择 [1/2，默认 1]: ')" trole || { [ -n "$trole" ] || return 1; }
+        if [ "${trole:-1}" = "2" ]; then
+            realm_prompt_transport "$(L '入站解密')" 1
+            ltrans="$REALM_TRANS_RESULT"
+        else
+            realm_prompt_transport "$(L '出站加密')" 0
+            rtrans="$REALM_TRANS_RESULT"
+        fi
+    fi
+
+    # 可选：多 IP / 多网卡 / Proxy Protocol / MPTCP
+    if confirm "$(L '配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？')" n; then
+        read -rp "$(L '  出站源 IP through（回车默认自动）: ')" through || { [ -n "$through" ] || return 1; }
+        if [ -n "$through" ] && ! is_ip "$through" 0; then warn "$(L '非合法 IP，已忽略')"; through=""; fi
+        read -rp "$(L '  出站网卡 interface（如 eth1，回车默认自动）: ')" out_if || { [ -n "$out_if" ] || return 1; }
+        if [ -n "$out_if" ] && [[ ! "$out_if" =~ ^[A-Za-z0-9_.-]+$ ]]; then warn "$(L '网卡名格式不合法，已忽略')"; out_if=""; fi
+        read -rp "$(L '  入站网卡 listen_interface（如 eth0，回车默认自动）: ')" in_if || { [ -n "$in_if" ] || return 1; }
+        if [ -n "$in_if" ] && [[ ! "$in_if" =~ ^[A-Za-z0-9_.-]+$ ]]; then warn "$(L '网卡名格式不合法，已忽略')"; in_if=""; fi
+        if [ "$proto" != "udp" ]; then
+            confirm "$(L '  向目标发送 Proxy Protocol v2（send_proxy）？')" n && send_proxy=1
+            confirm "$(L '  接收来源 Proxy Protocol（accept_proxy）？')" n && accept_proxy=1
+            confirm "$(L '  启用出站 MPTCP（send_mptcp）？')" n && send_mptcp=1
+            confirm "$(L '  启用入站 MPTCP（accept_mptcp）？')" n && accept_mptcp=1
+        fi
+    fi
+
+    id="$(realm_next_id)"
+    local env_file="${REALM_RULE_DIR}/${id}.env"
+    cat > "$env_file" << RULEEOF
+RULE_ID="${id}"
+RULE_ENABLED="1"
+RULE_REMARK="$(dq_escape "$remark")"
+RULE_PROTO="${proto}"
+RULE_LIP="${lip}"
+RULE_LPORT="${lport}"
+RULE_RHOST="${rhost}"
+RULE_RPORT="${rport}"
+RULE_EXTRA_REMOTES="$(dq_escape "$extra_remotes")"
+RULE_BALANCE="$(dq_escape "$balance")"
+RULE_THROUGH="${through}"
+RULE_OUT_IF="${out_if}"
+RULE_IN_IF="${in_if}"
+RULE_LTRANS="$(dq_escape "$ltrans")"
+RULE_RTRANS="$(dq_escape "$rtrans")"
+RULE_SEND_PROXY="${send_proxy}"
+RULE_ACCEPT_PROXY="${accept_proxy}"
+RULE_SEND_MPTCP="${send_mptcp}"
+RULE_ACCEPT_MPTCP="${accept_mptcp}"
+RULEEOF
+    chmod 600 "$env_file"
+
+    if ! realm_reload_service; then
+        rm -f "$env_file"
+        realm_reload_service >/dev/null 2>&1 || true
+        error "$(L '新规则未能生效，已自动撤回（原有规则不受影响）')"
+    fi
+
+    local -a fw_specs=()
+    [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
+    [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
+    fw_allow_for_service "${fw_specs[@]}"
+    success "$(L '规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
+}
+
+realm_list_rules() {
+    step "$(L 'Realm 转发规则列表')"
+    divider
+    local f idx=0 tags status
+    while IFS= read -r f; do
+        idx=$((idx + 1))
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            tags=""
+            [ "${RULE_PROTO:-both}" = "tcp" ] && tags="${tags}[$(L '纯TCP')]"
+            [ "${RULE_PROTO:-both}" = "udp" ] && tags="${tags}[$(L '纯UDP')]"
+            [ -n "${RULE_LTRANS:-}" ] && tags="${tags}[$(L '入站隧道')]"
+            [ -n "${RULE_RTRANS:-}" ] && tags="${tags}[$(L '出站隧道')]"
+            [ -n "${RULE_EXTRA_REMOTES:-}" ] && tags="${tags}[LB]"
+            [ -n "${RULE_THROUGH:-}" ] && tags="${tags}[$(L '源IP:')${RULE_THROUGH}]"
+            [ -n "${RULE_OUT_IF:-}" ] && tags="${tags}[$(L '出网卡:')${RULE_OUT_IF}]"
+            if [ "${RULE_ENABLED:-0}" = "1" ]; then
+                status="${GREEN}$(L '启用')${NC}"
+            else
+                status="${YELLOW}$(L '停用')${NC}"
+            fi
+            echo -e "  ${BOLD}${idx})${NC} [${RULE_ID}] ${status}  ${CYAN}${RULE_LIP}:${RULE_LPORT}${NC} -> ${GREEN}${RULE_RHOST}:${RULE_RPORT}${NC} ${tags}${RULE_REMARK:+  # ${RULE_REMARK}}"
+        )
+    done < <(realm_rule_files)
+    if [ "$idx" -eq 0 ]; then
+        info "$(L '暂无转发规则')"
+    fi
+}
+
+realm_pick_rule_file() {
+    local -a files=()
+    local f choice
+    while IFS= read -r f; do files+=("$f"); done < <(realm_rule_files)
+    [ "${#files[@]}" -gt 0 ] || { info "$(L '暂无规则')"; return 1; }
+    realm_list_rules
+    echo ""
+    read -rp "$(L '输入规则序号（回车取消）: ')" choice || { [ -n "$choice" ] || return 1; }
+    [[ -n "$choice" && "$choice" =~ ^[0-9]+$ ]] || return 1
+    choice=$((10#$choice))
+    [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ] || { warn "$(L '序号无效')"; return 1; }
+    PICKED_RULE_FILE="${files[$((choice - 1))]}"
+    return 0
+}
+
+realm_toggle_rule() {
+    realm_pick_rule_file || return 0
+    local f="$PICKED_RULE_FILE" cur next
+    cur="$(grep -m1 '^RULE_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
+    if grep -q '^RULE_ENABLED=' "$f"; then
+        sed -i "s|^RULE_ENABLED=.*|RULE_ENABLED=\"${next}\"|" "$f" || { warn "$(L '规则状态切换失败')"; return 1; }
+    else
+        printf '%s\n' "RULE_ENABLED=\"${next}\"" >> "$f"
+    fi
+    realm_reload_service && success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+}
+
+realm_delete_rule() {
+    realm_pick_rule_file || return 0
+    local f="$PICKED_RULE_FILE" old_port old_proto rid rlip rrhost rrport
+    rid="$(grep -m1 '^RULE_ID=' "$f" | cut -d'"' -f2 || true)"
+    rlip="$(grep -m1 '^RULE_LIP=' "$f" | cut -d'"' -f2 || true)"
+    old_port="$(grep -m1 '^RULE_LPORT=' "$f" | cut -d'"' -f2 || true)"
+    old_proto="$(grep -m1 '^RULE_PROTO=' "$f" | cut -d'"' -f2 || true)"
+    rrhost="$(grep -m1 '^RULE_RHOST=' "$f" | cut -d'"' -f2 || true)"
+    rrport="$(grep -m1 '^RULE_RPORT=' "$f" | cut -d'"' -f2 || true)"
+    confirm "$(L '确认删除规则 [')${rid}] ${rlip}:${old_port} -> ${rrhost}:${rrport}$(L ']？')" n || return 0
+    rm -f "$f"
+    if ! realm_reload_service; then
+        warn "$(L '服务重载失败，删除未生效，请检查日志')"
+        return 1
+    fi
+    if ufw_installed && validate_port "$old_port"; then
+        local old_specs=""
+        [ "$old_proto" != "udp" ] && old_specs="${old_specs} ${old_port}/tcp"
+        [ "$old_proto" != "tcp" ] && old_specs="${old_specs} ${old_port}/udp"
+        fw_prune_old_specs "$old_specs"
+    fi
+    success "$(L '已删除规则 ')${rid}"
+}
+
+# TCP 目标连通性与延迟检测（类似 xwPF 链路检测，支持 IPv4/IPv6）
+realm_test_rules() {
+    step "$(L '转发目标连通性测试（TCP 握手延迟）')"
+    divider
+    local f any=0
+    while IFS= read -r f; do
+        any=1
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            local res
+            if [ "${RULE_PROTO:-both}" = "udp" ]; then
+                echo -e "  [${RULE_ID}] ${RULE_RHOST}:${RULE_RPORT}  $(L '跳过（纯 UDP 无法做 TCP 握手探测）')  ${RULE_REMARK}"
+                exit 0
+            fi
+            res="$(probe_tcp_host_port "$RULE_RHOST" "$RULE_RPORT")"
+            if [[ "$res" == OK* ]]; then
+                echo -e "  [${RULE_ID}] ${RULE_RHOST}:${RULE_RPORT}  ${GREEN}${res}${NC}  ${RULE_REMARK}"
+            else
+                echo -e "  [${RULE_ID}] ${RULE_RHOST}:${RULE_RPORT}  ${RED}${res}${NC}  ${RULE_REMARK}"
+            fi
+        )
+    done < <(realm_rule_files)
+    [ "$any" -eq 0 ] && info "$(L '暂无可测试的规则')"
+}
+
+realm_export_rules() {
+    [ -d "$REALM_DIR" ] || { warn "$(L '未找到 Realm 配置目录')"; return 1; }
+    local out="/root/adam-realm-$(date +%Y%m%d-%H%M%S).tgz"
+    tar -czf "$out" -C / etc/adam-realm 2>/dev/null || error "$(L '导出失败')"
+    chmod 600 "$out"
+    success "$(L '规则已导出至: ')${out}"
+}
+
+realm_import_rules() {
+    realm_installed || { warn "$(L '尚未安装 Realm，请先安装')"; return 1; }
+    local fpath members old_ports bakdir m
+    read -rp "$(L '输入导出的 .tgz 备份文件路径: ')" fpath || { [ -n "$fpath" ] || return 1; }
+    [ -f "$fpath" ] || error "$(L '找不到文件: ')${fpath}"
+    tar -tzf "$fpath" >/dev/null 2>&1 || error "$(L '压缩包损坏或格式无效')"
+    members="$(tar -tzf "$fpath" 2>/dev/null || true)"
+    [ -n "$members" ] || error "$(L '备份为空或格式无效')"
+    # 成员校验：只允许 etc/adam-realm/**，.. 穿越即拒（与 do_restore 同款）
+    while IFS= read -r m; do
+        case "$m" in
+            *".."*) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
+            etc/adam-realm|etc/adam-realm/*) : ;;
+            *) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
+        esac
+    done < <(printf '%s\n' "$members")
+    old_ports="$(realm_ports 2>/dev/null | tr '\n' ' ' || true)"
+    confirm "$(L '导入将覆盖 /etc/adam-realm 现有规则并重启服务，确认？')" n || return 0
+    # 先备份现有配置：导入是"替换"而非"合并"，失败时可恢复
+    bakdir="$(mktemp -d /tmp/adam-realm-import.XXXXXX)" || error "$(L '创建临时文件失败')"
+    [ -d "$REALM_DIR" ] && cp -a "$REALM_DIR" "$bakdir/realm"
+    rm -rf "${REALM_RULE_DIR}" "${REALM_CONF_D}"/rule-*.toml
+    if ! tar -xzf "$fpath" -C /; then
+        warn "$(L '解包失败，已恢复原配置')"
+        rm -rf "$REALM_DIR"
+        [ -d "$bakdir/realm" ] && cp -a "$bakdir/realm" "$REALM_DIR"
+        rm -rf "$bakdir"
+        error "$(L '压缩包损坏或格式无效')"
+    fi
+    # 内容校验：外来 .env 不可直接 source，先逐个验
+    local _ef _ok=1
+    while IFS= read -r _ef; do
+        realm_env_file_safe "$_ef" || { warn "$(L '规则文件内容非法，已恢复原配置'): ${_ef}"; _ok=0; break; }
+    done < <(find "${REALM_RULE_DIR}" -maxdepth 1 -name '*.env' 2>/dev/null)
+    if [ "$_ok" != "1" ]; then
+        rm -rf "$REALM_DIR"
+        [ -d "$bakdir/realm" ] && cp -a "$bakdir/realm" "$REALM_DIR"
+        rm -rf "$bakdir"
+        error "$(L '导入的规则文件内容非法，已恢复原配置')"
+    fi
+    rm -rf "$bakdir"
+    if realm_reload_service; then
+        fw_sync_managed
+        [ -n "${old_ports// /}" ] && fw_prune_old_specs "$old_ports"
+        success "$(L '规则导入完成')"
+    else
+        warn "$(L '规则已导入，但服务重载失败，请检查日志')"
+        return 1
+    fi
+}
+
+realm_uninstall_do() {
+    local old_specs
+    old_specs="$(realm_ports 2>/dev/null | tr '\n' ' ' || true)"
+    systemctl disable --now adam-realm 2>/dev/null || true
+    rm -f "$REALM_SERVICE" "$REALM_BIN" "$REALM_BIN_BACKUP"
+    systemctl daemon-reload || true
+    if confirm "$(L '同时删除规则配置目录') ${REALM_DIR}$(L '？')" n; then
+        rm -rf "$REALM_DIR"
+    else
+        warn "$(L '已保留规则目录') ${REALM_DIR}"
+    fi
+    if [ -n "${old_specs// /}" ] && ufw_installed && confirm "$(L '同时删除防火墙中 Realm 端口的放行规则（')${old_specs}$(L '）？')" y; then
+        fw_prune_old_specs "$old_specs"
+    fi
+    success "$(L 'Realm 已卸载')"
+}
+
+realm_uninstall() {
+    step "$(L '卸载 Realm')"
+    divider
+    confirm "$(L '确认卸载 Realm（含服务与二进制）？')" n || return 0
+    realm_uninstall_do
+}
+
+realm_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        echo -e "${BOLD}${CYAN}━━━ $(L 'Realm 端口转发管理') ━━━${NC}"
+        echo -e "  $(L '当前状态:') $(realm_state_text)"
+        divider
+        echo -e "  ${GREEN}1)${NC}  $(L '安装 / 更新 Realm')"
+        echo -e "  ${GREEN}2)${NC}  $(L '添加转发规则（TCP/UDP/LB/隧道/多网卡）')"
+        echo -e "  ${GREEN}3)${NC}  $(L '查看转发规则列表')"
+        echo -e "  ${GREEN}4)${NC}  $(L '启用 / 停用单条规则')"
+        echo -e "  ${GREEN}5)${NC}  $(L '删除转发规则')"
+        echo -e "  ${GREEN}6)${NC}  $(L '测试目标连通性与延迟')"
+        echo -e "  ${GREEN}7)${NC}  $(L '重启服务 / 查看状态与日志')"
+        echo -e "  ${GREEN}8)${NC}  $(L '导出规则（迁移备份）')"
+        echo -e "  ${GREEN}9)${NC}  $(L '导入规则（从备份恢复）')"
+        echo -e "  ${GREEN}10)${NC} ${RED}$(L '卸载')${NC} Realm"
+        echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
+        divider
+        read -rp "$(L '请选择') [0-10]: " choice
+        case "$choice" in
+            1)  run_action realm_install ;;
+            2)  run_action realm_add_rule ;;
+            3)  run_action realm_list_rules ;;
+            4)  run_action realm_toggle_rule ;;
+            5)  run_action realm_delete_rule ;;
+            6)  run_action realm_test_rules ;;
+            7)  run_action bash -c 'systemctl restart adam-realm 2>/dev/null || true; systemctl status adam-realm --no-pager || true; journalctl -u adam-realm -n 20 --no-pager || true' ;;
+            8)  run_action realm_export_rules ;;
+            9)  run_action realm_import_rules ;;
+            10) run_action realm_uninstall ;;
+            0)  return 0 ;;
+            *)  warn "$(L '无效选择')" ;;
+        esac
+        pause_return
+    done
+}
+
+realm_cli() {
+    local sub="${1:-menu}"
+    [ "$#" -gt 0 ] && shift
+    case "$sub" in
+        menu)      realm_menu ;;
+        install|update) realm_install ;;
+        add)       realm_add_rule ;;
+        list)      realm_list_rules ;;
+        toggle)    realm_toggle_rule ;;
+        delete)    realm_delete_rule ;;
+        test)      realm_test_rules ;;
+        restart)   realm_reload_service && success "$(L 'Realm 已重启')" ;;
+        status)    systemctl status adam-realm --no-pager || true ;;
+        logs)      journalctl -u adam-realm -f || true ;;
+        export)    realm_export_rules ;;
+        import)    realm_import_rules ;;
+        uninstall) realm_uninstall ;;
+        *) error "$(L '未知的 realm 子命令:') ${sub}$(L '（可用: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall）')" ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════
+#   Xray 端口转发（dokodemo-door，3x-ui 面板 tunnel 同款）
+#   存储：${XRAY_CONF_DIR}/forward/fXX.env（600 权限）
+#   渲染：${XRAY_CONF_D}/20-forward.json（单个文件含全部已启用规则的 inbounds）
+#   无启用规则时删除 20-forward.json；重载失败时用 .bak 恢复并再次重载
+# ══════════════════════════════════════════════════════════════
+
+xray_fwd_rule_files() {
+    local f
+    [ -d "$XRAY_FWD_DIR" ] || return 0
+    for f in "${XRAY_FWD_DIR}"/*.env; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+xray_fwd_tags() {
+    local f
+    [ -d "$XRAY_FWD_DIR" ] || return 0
+    for f in "$XRAY_FWD_DIR"/*.env; do
+        [ -f "$f" ] || continue
+        basename "$f" .env
+    done
+    return 0
+}
+
+xray_fwd_rule_count() {
+    local n=0 f
+    while IFS= read -r f; do n=$((n + 1)); done < <(xray_fwd_rule_files)
+    printf '%s' "$n"
+}
+
+xray_fwd_enabled_count() {
+    local f n=0
+    while IFS= read -r f; do
+        grep -q '^FWD_ENABLED="1"$' "$f" 2>/dev/null && n=$((n + 1))
+    done < <(xray_fwd_rule_files)
+    printf '%s' "$n"
+}
+
+# 读取转发规则元数据到 FWD_* 变量（调用方应在子 shell 或 local 环境里用）
+xray_fwd_load() {
+    FWD_ID=""; FWD_ENABLED=""; FWD_REMARK=""; FWD_PROTO=""; FWD_LIP=""; FWD_LPORT=""; FWD_RHOST=""; FWD_RPORT=""; FWD_FOLLOW="0"
+    [ -f "${XRAY_FWD_DIR}/$1.env" ] || return 1
+    # shellcheck disable=SC1090
+    source "${XRAY_FWD_DIR}/$1.env" 2>/dev/null || return 1
+    return 0
+}
+
+# 单个 env 文件的某字段值（仅数字/枚举类字段用，不含 remark 等转义值）
+xray_fwd_env_get() {
+    grep -m1 "^$2=" "$1" 2>/dev/null | cut -d'"' -f2 || true
+}
+
+xray_fwd_state_text() {
+    local total enabled
+    total="$(xray_fwd_rule_count)"
+    enabled="$(xray_fwd_enabled_count)"
+    if [ ! -x "$XRAY_BIN" ]; then
+        printf '%s' "${YELLOW}$(L '未安装')${NC}"
+        return 0
+    fi
+    printf '%s' "${enabled}/${total} $(L '条规则') · $(svc_state adam-xray)"
+}
+
+# 全部已启用转发规则的 ufw 端口规格（供 xray_ports / managed_ports 调用）
+xray_fwd_ports() {
+    local f
+    while IFS= read -r f; do
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            [ "${FWD_ENABLED:-0}" = "1" ] || exit 0
+            validate_port "${FWD_LPORT:-}" || exit 0
+            case "${FWD_PROTO:-both}" in
+                tcp)  echo "${FWD_LPORT}/tcp" ;;
+                udp)  echo "${FWD_LPORT}/udp" ;;
+                both) echo "${FWD_LPORT}/tcp"; echo "${FWD_LPORT}/udp" ;;
+            esac
+        )
+    done < <(xray_fwd_rule_files) | sort -u
+}
+
+xray_fwd_default_listen_ip() {
+    if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)" = "1" ]; then
+        printf '0.0.0.0'
+    else
+        printf '::'
+    fi
+}
+
+xray_fwd_next_id() {
+    local i=1 id
+    while true; do
+        id="$(printf 'f%02d' "$i")"
+        [ ! -f "${XRAY_FWD_DIR}/${id}.env" ] && { printf '%s' "$id"; return 0; }
+        i=$((i + 1))
+    done
+}
+
+# 单条已启用规则的 inbound JSON（未启用/非法时不输出）
+xray_fwd_rule_json() {
+    local f="$1" id enabled lip lport proto rhost rport follow network fr
+    id="$(xray_fwd_env_get "$f" FWD_ID)"
+    enabled="$(xray_fwd_env_get "$f" FWD_ENABLED)"
+    [ "$enabled" = "1" ] || return 0
+    lip="$(xray_fwd_env_get "$f" FWD_LIP)"
+    lport="$(xray_fwd_env_get "$f" FWD_LPORT)"
+    proto="$(xray_fwd_env_get "$f" FWD_PROTO)"
+    rhost="$(xray_fwd_env_get "$f" FWD_RHOST)"
+    rport="$(xray_fwd_env_get "$f" FWD_RPORT)"
+    follow="$(xray_fwd_env_get "$f" FWD_FOLLOW)"
+    validate_port "$lport" || return 0
+    validate_port "$rport" || return 0
+    is_ip "$lip" 0 || return 0
+    is_safe_host "$rhost" || return 0
+    lport=$((10#$lport))
+    rport=$((10#$rport))
+    case "$proto" in
+        tcp) network="tcp" ;;
+        udp) network="udp" ;;
+        *)   network="tcp,udp" ;;
+    esac
+    fr="false"; [ "$follow" = "1" ] && fr="true"
+    printf '%s' "{\"tag\":\"fwd-${id}\",\"listen\":\"${lip}\",\"port\":${lport},\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"${rhost}\",\"port\":${rport},\"network\":\"${network}\",\"followRedirect\":${fr}}}"
+}
+
+# 重建 20-forward.json 并重载；失败时用 .bak 恢复并再次重载
+xray_fwd_rebuild() {
+    local tmpf first=1 count=0 f frag
+    install -d -m 750 "$XRAY_FWD_DIR" 2>/dev/null || true
+    tmpf="$(mktemp "${XRAY_CONF_D}/.20-forward.XXXXXX")" || { warn "$(L '创建临时文件失败')"; return 1; }
+    {
+        printf '%s\n' '{' '  "inbounds": ['
+        while IFS= read -r f; do
+            frag="$(xray_fwd_rule_json "$f")"
+            [ -n "$frag" ] || continue
+            if [ "$first" = "1" ]; then first=0; else printf '%s\n' ','; fi
+            printf '%s' "    ${frag}"
+            count=$((count + 1))
+        done < <(xray_fwd_rule_files)
+        printf '\n%s\n' '  ]' '}'
+    } > "$tmpf" || { rm -f "$tmpf"; return 1; }
+    if [ "$count" -eq 0 ]; then
+        rm -f "$tmpf" "$XRAY_FWD_JSON" "${XRAY_FWD_JSON}.bak"
+    else
+        [ -f "$XRAY_FWD_JSON" ] && cp -f "$XRAY_FWD_JSON" "${XRAY_FWD_JSON}.bak" || true
+        mv -f "$tmpf" "$XRAY_FWD_JSON" || { rm -f "$tmpf"; warn "$(L '转发配置文件写入失败')"; return 1; }
+        chmod 644 "$XRAY_FWD_JSON" || true
+    fi
+    if [ ! -x "$XRAY_BIN" ]; then
+        info "$(L 'Xray 未安装，转发配置已保存，重装 Xray 后生效')"
+        return 0
+    fi
+    if xray_reload; then
+        return 0
+    fi
+    if [ "$count" -eq 0 ]; then
+        warn "$(L '转发配置已移除，但 Xray 重载失败，请检查日志')"
+        return 1
+    fi
+    warn "$(L '转发配置重载失败，恢复上一版本')"
+    if [ -f "${XRAY_FWD_JSON}.bak" ]; then mv -f "${XRAY_FWD_JSON}.bak" "$XRAY_FWD_JSON"; else rm -f "$XRAY_FWD_JSON"; fi
+    xray_reload >/dev/null 2>&1 || warn "$(L '恢复后重载仍失败，请检查 Xray 配置与日志')"
+    return 1
+}
+
+xray_fwd_add() {
+    xray_require || return 1
+    step "$(L '添加 Xray 端口转发')"
+    divider
+
+    local id remark proto lip lport rhost rport follow=0 proto_c def_lip occ
+    read -rp "$(L '规则备注（可选）: ')" remark || { [ -n "$remark" ] || return 1; }
+
+    echo "$(L '转发协议：')"
+    echo "  1) $(L 'TCP + UDP 双栈（默认）')"
+    echo "  2) $(L '纯 TCP')"
+    echo "  3) $(L '纯 UDP')"
+    read -rp "$(L '选择 [1-3，默认 1]: ')" proto_c || { [ -n "$proto_c" ] || return 1; }
+    case "${proto_c:-1}" in 2) proto="tcp" ;; 3) proto="udp" ;; *) proto="both" ;; esac
+
+    def_lip="$(xray_fwd_default_listen_ip)"
+    read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
+    lip="${lip:-$def_lip}"
+    is_ip "$lip" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+
+    while true; do
+        read -rp "$(L '本机监听端口 (1-65535): ')" lport || { [ -n "$lport" ] || return 1; }
+        validate_port "$lport" && break
+        warn "$(L '端口不合法')"
+    done
+    lport=$((10#$lport))
+
+    # 冲突检测：同协议下是否被其他进程占用（排除 Xray 自身监听）
+    if command -v ss >/dev/null 2>&1; then
+        occ=""
+        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" || true)"
+        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" || true)"
+        if [ -n "$occ" ]; then
+            warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
+            echo "$occ"
+            confirm "$(L '仍要继续添加？')" n || return 0
+        fi
+    fi
+
+    while true; do
+        read -rp "$(L '目标地址（域名或 IP）: ')" rhost || { [ -n "$rhost" ] || return 1; }
+        rhost="${rhost//[[:space:]]/}"
+        is_safe_host "$rhost" && break
+        warn "$(L '目标地址格式不合法')"
+    done
+    while true; do
+        read -rp "$(L '目标端口 (1-65535): ')" rport || { [ -n "$rport" ] || return 1; }
+        validate_port "$rport" && break
+        warn "$(L '端口不合法')"
+    done
+    rport=$((10#$rport))
+
+    if confirm "$(L '跟随系统重定向（followRedirect，仅配合 iptables 转发规则使用）？')" n; then follow=1; fi
+
+    id="$(xray_fwd_next_id)"
+    local env_file="${XRAY_FWD_DIR}/${id}.env"
+    install -d -m 750 "$XRAY_FWD_DIR"
+    cat > "$env_file" << FWDEOF
+FWD_ID="${id}"
+FWD_ENABLED="1"
+FWD_REMARK="$(dq_escape "$remark")"
+FWD_PROTO="${proto}"
+FWD_LIP="${lip}"
+FWD_LPORT="${lport}"
+FWD_RHOST="${rhost}"
+FWD_RPORT="${rport}"
+FWD_FOLLOW="${follow}"
+FWDEOF
+    chmod 600 "$env_file"
+
+    if ! xray_fwd_rebuild; then
+        rm -f "$env_file"
+        xray_fwd_rebuild >/dev/null 2>&1 || true
+        error "$(L '新转发规则未能生效，已自动撤回')"
+    fi
+
+    local -a fw_specs=()
+    [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
+    [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
+    fw_allow_for_service "${fw_specs[@]}"
+    success "$(L '转发规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
+}
+
+xray_fwd_list() {
+    step "$(L 'Xray 转发规则列表')"
+    divider
+    local f idx=0 tags status
+    while IFS= read -r f; do
+        idx=$((idx + 1))
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            tags=""
+            [ "${FWD_PROTO:-both}" = "tcp" ] && tags="${tags}[$(L '纯TCP')]"
+            [ "${FWD_PROTO:-both}" = "udp" ] && tags="${tags}[$(L '纯UDP')]"
+            [ "${FWD_FOLLOW:-0}" = "1" ] && tags="${tags}[followRedirect]"
+            if [ "${FWD_ENABLED:-0}" = "1" ]; then
+                status="${GREEN}$(L '启用')${NC}"
+            else
+                status="${YELLOW}$(L '停用')${NC}"
+            fi
+            echo -e "  ${BOLD}${idx})${NC} [${FWD_ID}] ${status}  ${CYAN}${FWD_LIP}:${FWD_LPORT}${NC} -> ${GREEN}${FWD_RHOST}:${FWD_RPORT}${NC} ${tags}${FWD_REMARK:+  # ${FWD_REMARK}}"
+        )
+    done < <(xray_fwd_rule_files)
+    if [ "$idx" -eq 0 ]; then
+        info "$(L '暂无转发规则')"
+    fi
+}
+
+xray_fwd_pick() {
+    local -a files=()
+    local f choice
+    while IFS= read -r f; do files+=("$f"); done < <(xray_fwd_rule_files)
+    [ "${#files[@]}" -gt 0 ] || { info "$(L '暂无规则')"; return 1; }
+    xray_fwd_list
+    echo ""
+    read -rp "$(L '输入规则序号（回车取消）: ')" choice || { [ -n "$choice" ] || return 1; }
+    [[ -n "$choice" && "$choice" =~ ^[0-9]+$ ]] || return 1
+    choice=$((10#$choice))
+    [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ] || { warn "$(L '序号无效')"; return 1; }
+    PICKED_FWD_FILE="${files[$((choice - 1))]}"
+    return 0
+}
+
+xray_fwd_toggle() {
+    xray_fwd_pick || return 0
+    local f="$PICKED_FWD_FILE" cur next
+    cur="$(grep -m1 '^FWD_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
+    if grep -q '^FWD_ENABLED=' "$f"; then
+        sed -i "s|^FWD_ENABLED=.*|FWD_ENABLED=\"${next}\"|" "$f" || { warn "$(L '规则状态切换失败')"; return 1; }
+    else
+        printf '%s\n' "FWD_ENABLED=\"${next}\"" >> "$f"
+    fi
+    xray_fwd_rebuild && success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+}
+
+xray_fwd_delete() {
+    xray_fwd_pick || return 0
+    local f="$PICKED_FWD_FILE" old_port old_proto fid flip frhost frport
+    fid="$(grep -m1 '^FWD_ID=' "$f" | cut -d'"' -f2 || true)"
+    flip="$(grep -m1 '^FWD_LIP=' "$f" | cut -d'"' -f2 || true)"
+    old_port="$(grep -m1 '^FWD_LPORT=' "$f" | cut -d'"' -f2 || true)"
+    old_proto="$(grep -m1 '^FWD_PROTO=' "$f" | cut -d'"' -f2 || true)"
+    frhost="$(grep -m1 '^FWD_RHOST=' "$f" | cut -d'"' -f2 || true)"
+    frport="$(grep -m1 '^FWD_RPORT=' "$f" | cut -d'"' -f2 || true)"
+    confirm "$(L '确认删除规则 [')${fid}] ${flip}:${old_port} -> ${frhost}:${frport}$(L ']？')" n || return 0
+    rm -f "$f"
+    if ! xray_fwd_rebuild; then
+        warn "$(L '服务重载失败，删除未生效，请检查日志')"
+        return 1
+    fi
+    if ufw_installed && validate_port "$old_port"; then
+        local old_specs=""
+        [ "$old_proto" != "udp" ] && old_specs="${old_specs} ${old_port}/tcp"
+        [ "$old_proto" != "tcp" ] && old_specs="${old_specs} ${old_port}/udp"
+        fw_prune_old_specs "$old_specs"
+    fi
+    success "$(L '已删除规则 ')${fid}"
+}
+
+# TCP 目标连通性与延迟检测（与 realm_test_rules 共用 probe_tcp_host_port）
+xray_fwd_test() {
+    step "$(L '转发目标连通性测试（TCP 握手延迟）')"
+    divider
+    local f any=0
+    while IFS= read -r f; do
+        any=1
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            local res
+            if [ "${FWD_PROTO:-both}" = "udp" ]; then
+                echo -e "  [${FWD_ID}] ${FWD_RHOST}:${FWD_RPORT}  $(L '跳过（纯 UDP 无法做 TCP 握手探测）')  ${FWD_REMARK}"
+                exit 0
+            fi
+            res="$(probe_tcp_host_port "$FWD_RHOST" "$FWD_RPORT")"
+            if [[ "$res" == OK* ]]; then
+                echo -e "  [${FWD_ID}] ${FWD_RHOST}:${FWD_RPORT}  ${GREEN}${res}${NC}  ${FWD_REMARK}"
+            else
+                echo -e "  [${FWD_ID}] ${FWD_RHOST}:${FWD_RPORT}  ${RED}${res}${NC}  ${FWD_REMARK}"
+            fi
+        )
+    done < <(xray_fwd_rule_files)
+    [ "$any" -eq 0 ] && info "$(L '暂无可测试的规则')"
+}
+
+xray_fwd_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        echo -e "${BOLD}${CYAN}━━━ $(L 'Xray 端口转发（dokodemo-door）') ━━━${NC}"
+        echo -e "  $(L '当前状态:') $(xray_fwd_state_text)"
+        divider
+        echo -e "  ${GREEN}1)${NC}  $(L '添加转发规则')"
+        echo -e "  ${GREEN}2)${NC}  $(L '查看转发规则列表')"
+        echo -e "  ${GREEN}3)${NC}  $(L '启用 / 停用单条规则')"
+        echo -e "  ${GREEN}4)${NC}  $(L '删除转发规则')"
+        echo -e "  ${GREEN}5)${NC}  $(L '测试目标连通性与延迟')"
+        echo -e "  ${GREEN}6)${NC}  $(L '重启服务 / 查看状态与日志')"
+        echo -e "  ${GREEN}0)${NC}  $(L '返回 Xray 菜单')"
+        divider
+        read -rp "$(L '请选择') [0-6]: " choice
+        case "$choice" in
+            1) run_action xray_fwd_add ;;
+            2) run_action xray_fwd_list ;;
+            3) run_action xray_fwd_toggle ;;
+            4) run_action xray_fwd_delete ;;
+            5) run_action xray_fwd_test ;;
+            6) run_action bash -c 'systemctl restart adam-xray 2>/dev/null || true; systemctl status adam-xray --no-pager || true; journalctl -u adam-xray -n 20 --no-pager || true' ;;
+            0) return 0 ;;
+            *) warn "$(L '无效选择')" ;;
+        esac
+        pause_return
+    done
+}
+
+xray_fwd_cli() {
+    local sub="${1:-menu}"
+    [ "$#" -gt 0 ] && shift
+    case "$sub" in
+        menu)      xray_fwd_menu ;;
+        add)       xray_fwd_add ;;
+        list)      xray_fwd_list ;;
+        toggle)    xray_fwd_toggle ;;
+        delete)    xray_fwd_delete ;;
+        test)      xray_fwd_test ;;
+        restart)   xray_fwd_rebuild && success "$(L 'Xray 转发已重启')" ;;
+        status)    systemctl status adam-xray --no-pager || true ;;
+        *) error "$(L '未知的 xray fwd 子命令:') ${sub}$(L '（可用: add / list / toggle / delete / test / restart / status）')" ;;
+    esac
+}
+
 usage() {
     cat << USAGEEOF
 $(L '用法'): adam [$(L '命令')]          $(L '（')$(L '不带参数 = 打开主菜单')$(L '）')
 
-$(L '主菜单'): 1 Nowhere · 2 Snell · 3 Xray · 4 $(L '脚本更新') · 5 $(L '防火墙') · 6 Fail2ban · 7 $(L '系统调优') · 8 $(L '自动维护')
+$(L '主菜单'): 1 Nowhere · 2 Snell · 3 Xray · 4 $(L '脚本更新') · 5 $(L '防火墙') · 6 Fail2ban · 7 $(L '系统调优') · 8 $(L '自动维护') · 9 Realm $(L '端口转发')
 
 Nowhere:
   $(L 'nowhere                    打开 Nowhere 菜单')
@@ -10943,6 +12530,11 @@ Snell v${SNELL_MAJOR}:
 Xray (SS / VLESS):
   $(L 'xray                       打开 Xray 菜单')
   xray install | add | list | links | delete | update | health | repair | status | logs | restart | cnblock [on|off] | uninstall
+  xray fwd add | list | toggle | delete | test | restart | status    $(L '端口转发') (dokodemo-door)
+
+Realm $(L '端口转发'):
+  $(L 'realm                      打开 Realm 端口转发菜单')
+  realm install | add | list | toggle | delete | test | restart | status | logs | export | import | uninstall
 
 $(L '系统与网络调优:')
   $(L 'tune                       打开调优菜单')
@@ -10991,6 +12583,7 @@ run_interactive_menu() {
             6) f2b_menu ;;
             7) tune_menu ;;
             8) maint_menu ;;
+            9) realm_menu ;;
             0) exit 0 ;;
             *) warn "$(L '无效选择')"; pause_return ;;
         esac
@@ -11024,6 +12617,7 @@ case "$ACTION" in
     nowhere)    nowhere_menu ;;
     script)     script_menu ;;
     xray)       xray_cli "${ACTION_ARGS[@]}" ;;
+    realm)      realm_cli "${ACTION_ARGS[@]}" ;;
     tune)       tune_cli "${ACTION_ARGS[@]}" ;;
     auto|maint) maint_menu ;;
     watchdog)   maint_watchdog ;;
