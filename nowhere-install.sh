@@ -150,6 +150,37 @@ set -o pipefail
 #     - 主菜单不再显示管理脚本版本：该行改为当前时间 + 公网 IP（时间取 date，
 #       IP 复用 detect_public_host；同一进程内只探测一次，避免每次刷新菜单都等网络，
 #       取不到显示未知）。版本号仍在「脚本更新」菜单与 adam version 里看。
+#   ── 脚本 v8.5 修订（2026-11-23，全面深审修复 + 协议自动更新 + Realm 多转发增强 + 一键域名反代）──
+#     修复（全文件深审）：
+#     - do_restore：修复 tr -d ' \\r\\n' 误删 portal 里的字母 r 导致备份恢复必报角色不一致；
+#     - Xray 端口转发路由：00-base.json 为所有已启用的 fwd-* 入站注入最高优先级 direct 路由，
+#       解决转发到 VPC 内网 IP（geoip:private）或国内中转（geoip:cn）被全局黑洞阻断的问题；
+#       dokodemo-door 自动剥离 IPv6 目标地址方括号；xray_ports 不再因节点目录不存在而跳过转发端口；
+#       xray_install / xray_upgrade_to 同步统计纯转发场景的配置校验与重启；
+#     - Xray 自动更新：解除主版本号锁死（Xray 采用 CalVer v26→v27），避免跨年自动更新停摆；
+#     - set -e 陷阱：修复 snell_autoupdate / xray_autoupdate 的 autoupdate_check 返回值捕获，
+#       以及 parse_egress_url 缺少可选 query 参数时触发 set -e 提前退出的问题；
+#     - Nowhere 低权证书续期：sync_portal_cert_copy 不再覆写源路径 CRT/KEY_PEM，改用独立运行时路径
+#       CRT_RUNTIME/KEY_PEM_RUNTIME，彻底修复每日同步与 acme.sh cert-sync.sh 自己比对/拷贝自己的问题；
+#     - Certbot pre/post 钩子与卸载：仅 HTTP-01 且 nowhere 实际占用 80 端口时才停机（DNS-01 不再无故停机）；
+#       HTTP-01 的 80 端口占用检查移入 obtain_portal_cert（已有有效证书时不再误拦）；
+#       修复 do_uninstall 先删 restart-nowhere.sh 再判存在的死分支，并清理 pre/post 与 cert-sync.sh；
+#     - Egress 粘贴串：egress_query_param 新增 urldecode（修复 IPv6 dial/dial6 误报），清洗后重建 eg_url；
+#     - 端口占用检测：check_port_occupied_by_other 支持自定义排除进程名，Realm / Xray 转发与 SS2022 UDP
+#       分别精准检测冲突并防止同模块重复监听；realm_uninstall_do 保留配置时正确清理防火墙规则；
+#     - 其他修复：version_ge 预发布号自然排序（b10 >= b2）；do_install 双栈同时校验 TCP+UDP 监听与确认页
+#       展示握手超时；do_doctor 修正 Snell -v 检测与明文 CDN 节点误报；services_adapt_ipv6 同步适配
+#       Realm 与 Xray 转发监听地址；L() 1850+ 词条改用 Bash 关联数组按需懒加载（中文模式零开销）。
+#     增强：
+#     - 全协议官方仓库自动更新：新增 Nowhere（NW3 同代安全更新）与 Realm 官方仓库自动更新，与 Snell /
+#       Xray / Caddy / cloudflared 一并纳入每日自动维护与自动回滚体系；Xray 节点严格校验随机密钥非空，
+#       CDN 分享链接默认 mode=packet-up 提升过 Cloudflare 连通率；
+#     - Realm 多转发深度增强（参考 zhboner/realm 与 zywe03/realm-xwPF）：新增端口段/多端口批量添加、
+#       编辑已有规则（失败自动回滚）、多目标（含 extra_remotes）全量延迟测试、WSS 自定义证书、
+#       查看渲染后的完整 TOML 与全局网络/DNS 调优；
+#     - 新增一键域名反代模块（主菜单 10 / adam proxy / adam caddy / adam tunnel）：集成 Caddy 多域名
+#       自动 HTTPS 反代（多预设模板、caddy validate 校验撤回、零停机重载）与 Cloudflare Tunnel（Token
+#       持久化 systemd 隧道 + 临时快速隧道），完整接入防火墙、保活、备份、恢复、诊断与中英双语。
 #   ── 脚本 v8.4 修订（2026-11-19，新增 Realm 与 Xray 端口转发）──
 #     - 新增 Realm 端口转发（参考 zywe03/realm-xwPF）：目录模式 realm -c /etc/adam-realm/conf.d，
 #       规则存 /etc/adam-realm/rules/<id>.env，渲染为 conf.d/rule-<id>.toml；主菜单 9 与 adam realm 子命令；
@@ -294,7 +325,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="8.4"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="8.5"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -351,6 +382,25 @@ REALM_CONF_D="${REALM_DIR}/conf.d"
 REALM_RULE_DIR="${REALM_DIR}/rules"
 REALM_VERSION_FILE="${REALM_DIR}/version.txt"
 REALM_SERVICE="/etc/systemd/system/adam-realm.service"
+REALM_STATE_FILE="${REALM_DIR}/adam-realm.env"
+
+# 一键域名反代（Caddy 多域名自动 HTTPS + Cloudflare Tunnel）
+CADDY_REPO="caddyserver/caddy"
+CADDY_BIN="/usr/local/bin/caddy"
+CADDY_BIN_BACKUP="/usr/local/bin/caddy.previous"
+CADDY_DIR="/etc/adam-caddy"
+CADDY_SITES_DIR="${CADDY_DIR}/sites"
+CADDY_FILE="${CADDY_DIR}/Caddyfile"
+CADDY_STATE_FILE="${CADDY_DIR}/adam-caddy.env"
+CADDY_DATA_DIR="/var/lib/adam-caddy"
+CADDY_SERVICE="/etc/systemd/system/adam-caddy.service"
+
+CF_TUNNEL_REPO="cloudflare/cloudflared"
+CF_TUNNEL_BIN="/usr/local/bin/cloudflared"
+CF_TUNNEL_BIN_BACKUP="/usr/local/bin/cloudflared.previous"
+CF_TUNNEL_DIR="/etc/adam-cloudflared"
+CF_TUNNEL_ENV="${CF_TUNNEL_DIR}/tunnel.env"
+CF_TUNNEL_SERVICE="/etc/systemd/system/adam-cloudflared.service"
 
 # Xray 端口转发（dokodemo-door，3x-ui 式 tunnel）
 XRAY_FWD_DIR="${XRAY_CONF_DIR}/forward"
@@ -401,1866 +451,1967 @@ load_lang() {
     # 环境变量 ADAM_LANG 优先于持久化文件（临时覆盖：ADAM_LANG=en adam）
     [ -n "$env_lang" ] && ADAM_LANG="$env_lang"
     case "$ADAM_LANG" in zh|en) : ;; *) ADAM_LANG="zh" ;; esac
+    [ "$ADAM_LANG" = "en" ] && init_i18n_en
     _ADAM_LANG_LOADED=1
 }
 
+declare -A I18N=()
+_I18N_INIT=0
+init_i18n_en() {
+    [ "$_I18N_INIT" = "1" ] && return 0
+    I18N=(
+        ['信息']='INFO'
+        ['成功']='OK'
+        ['警告']='WARN'
+        ['错误']='ERROR'
+        ['已取消']='Cancelled'
+        ['无效选择']='Invalid choice'
+        ['按回车返回菜单...']='Press Enter to return to the menu...'
+        ['请选择操作']='Choose an action'
+        ['请选择']='Choose'
+        ['协议安装']='Protocols'
+        ['系统管理']='System'
+        ['退出']='Exit'
+        ['返回主菜单']='Back to main menu'
+        ['安装与配置']='Install & configure'
+        ['运行与排查']='Run & diagnose'
+        ['证书']='Certificates'
+        ['版本']='Versions'
+        ['当前状态']='Status'
+        ['脚本更新']='Script update'
+        ['自动维护']='Auto maintenance'
+        ['防火墙']='Firewall'
+        ['系统调优']='System tuning'
+        ['一键诊断']='One-click diagnostics'
+        ['备份配置']='Back up config'
+        ['恢复配置']='Restore config'
+        ['清理日志']='Clean up logs'
+        ['保活巡检定时器']='Watchdog timer'
+        ['每日维护定时器']='Daily maintenance timer'
+        ['运行中']='running'
+        ['未启用']='disabled'
+        ['未安装']='not installed'
+        ['开']='on'
+        ['关']='off'
+        ['当前版本']='Current version'
+        ['每日自动从仓库更新']='Daily auto-update from repo'
+        ['一键管理脚本']='Manager'
+        ['调优']='Tuning'
+        ['安装、配置、连接信息、证书、版本']='Install, config, links, certs, versions'
+        ['安装、跟随测试版更新、健康检查、配置']='Install, beta updates, health check, config'
+        ['更新本管理脚本 / 重装快捷命令']='Update manager / reinstall shortcuts'
+        ['ufw：安装、放行与删除端口、启停']='ufw: install, allow/remove ports, on/off'
+        ['封禁时长、被封 IP、启停']='Ban time, banned IPs, on/off'
+        ['TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6']='TCP tuning tcpfit / XanMod kernel / DNS / IPv4/IPv6 priority / disable IPv6'
+        ['保活巡检 / 脚本与内核自动更新']='Watchdog / auto-update scripts & kernels'
+        ['提示：可直接输入']='Tip: run'
+        ['唤出此菜单，或用']='for this menu, or use'
+        ['快捷执行；']='for shortcuts;'
+        ['查看全部子命令']='to see all commands'
+        ['安装']='Install'
+        ['（向导）']=' (wizard)'
+        ['本机安装为 Egress 服务']='Install this machine as Egress'
+        ['（出口机用，QUIC 或 TLS 载体）']=' (exit node, QUIC or TLS)'
+        ['重新配置']='Reconfigure'
+        ['（修改参数）']=' (change settings)'
+        ['查看连接信息 / 导入链接']='Show connection info / import links'
+        ['生成 v3 共享密钥']='Generate v3 shared key'
+        ['（32 位十六进制）']=' (32 hex chars)'
+        ['查看服务状态']='Show service status'
+        ['（含 nowhere status）']=' (incl. nowhere status)'
+        ['查看实时日志']='Show live logs'
+        ['重启服务']='Restart service'
+        ['连通性探测 probe']='Connectivity probe'
+        ['（真实 TCP Flow 测试）']=' (real TCP Flow test)'
+        ['查看证书指纹']='Show cert fingerprint'
+        ['（tls=1 自签 / tls=2 文件证书）']=' (tls=1 self-signed / tls=2 file cert)'
+        ['检查证书状态 / 手动续期']='Check cert status / manual renewal'
+        ['查看当前版本 / 检查更新']='Show version / check updates'
+        ['更新 Nowhere 二进制']='Update Nowhere binary'
+        ['（更新到最新版）']=' (to latest)'
+        ['选择指定版本']='Select version'
+        ['（版本切换 / 回退到历史版本）']=' (switch / roll back)'
+        ['快速回退到上一个版本']='Quick rollback to previous version'
+        ['卸载']='Uninstall'
+        ['tls=1 升级为真实证书 (tls=2)']='Upgrade tls=1 to a real cert (tls=2)'
+        ['立即更新本管理脚本']='Update manager now'
+        ['（从仓库拉取）']=' (pull from repo)'
+        ['重装快捷命令']='Reinstall shortcuts'
+        ['（adam / zt / pz / cxpz / cq）']=' (adam / zt / pz / cxpz / cq)'
+        ['语言（中文 / English）']='Language (中文 / English)'
+        ['保活巡检（每 5 分钟；服务未运行或端口未监听时自动重启）']='Watchdog (every 5 min; restart when down or port not listening)'
+        ['管理脚本自动从仓库拉取更新（每日）']='Daily auto-update of manager from repo'
+        ['每日定时重启 Snell / Xray / Nowhere（随每日维护执行）']='Daily scheduled restart of Snell / Xray / Nowhere'
+        ['立即执行一次维护与巡检']='Run maintenance & watchdog once now'
+        ['查看维护记录']='Show maintenance log'
+        ['重装定时器（修复）']='Reinstall timers (repair)'
+        ['备份全部配置']='Back up all configs'
+        ['恢复配置（从备份文件）']='Restore config (from backup file)'
+        ['清理日志（保留 200M）']='Clean up logs (keep 200M)'
+        ['用法']='Usage'
+        ['主菜单']='Main menu'
+        ['回车默认']='Enter for default'
+        ['管理']='Management'
+        ['不带参数 = 打开主菜单']='Open the main menu when no argument is given'
+        ['命令']='command'
+        ['切换界面语言']='Switch UI language'
+        ['升级为真实证书']='Upgrade to a real certificate'
+        ['移除']='Remove '
+        ['全部定时器']='all timers'
+        ['跟随官方发布自动更新']='Auto-update following official releases'
+        ['通道']='channel'
+        ['保活巡检']='Watchdog'
+        ['端口']='Port'
+        ['通道）']='channel)'
+        ['请选择:']='Please choose:'
+        ['天']='days'
+        ['天，域名匹配），跳过申请']='days, domain matches), skipping issuance'
+        ['当前版本:']='Current version:'
+        ['检测到有效证书（剩余']='Detected a valid certificate (remaining '
+        ['证书申请成功']='Certificate issued successfully'
+        ['附加端口']='Additional ports'
+        ['TCP 端口']='TCP port'
+        ['当前状态:']='Current status:'
+        ['服务状态']='Service status'
+        ['查看连接信息」重试']='view connection info" and retry'
+        ['次']='times'
+        ['脚本']='script'
+        ['Fail2ban 已重启']='Fail2ban restarted'
+        ['PSK 不符合要求']='PSK does not meet the requirements'
+        ['dial4（IPv4 源地址，回车默认 auto）:']='dial4 (IPv4 source address, Enter = auto):'
+        ['dial6（IPv6 源地址，回车默认 auto）:']='dial6 (IPv6 source address, Enter = auto):'
+        ['仍要继续？']='Continue anyway?'
+        ['保活']='keepalive'
+        ['内失败']=', '
+        ['域名格式不正确']='Invalid domain format'
+        ['安装完成']='Installation complete'
+        ['实时日志']='Live logs'
+        ['实时日志（Ctrl+C 返回）']='Live logs (Ctrl+C to go back)'
+        ['将安装:']='Will install:'
+        ['已保留']='Kept'
+        ['当前最新版为']='Latest version:'
+        ['最新版本:']='Latest version:'
+        ['未找到配置文件，请先执行安装']='Config file not found; please install first'
+        ['未知']='unknown'
+        ['正在获取最新版本号...']='Fetching the latest version...'
+        ['确认继续']='Confirm to continue'
+        ['端口不合法（1-65535）']='Invalid port (1-65535)'
+        ['自动更新:']='Auto-update:'
+        ['证书签发后校验未通过，请看上方告警']='Certificate verification failed after issuance; see the warnings above'
+        ['输入不合法，未做任何修改']='Invalid input; nothing changed'
+        ['随机 PSK 生成失败']='Failed to generate a random PSK'
+        ['（当前']=' (current '
+        [',端口...']=', ports...'
+        ['1-4，默认1']='1-4, default 1'
+        ['4=仅IPv4 / 6=仅IPv6 / 回车=不限']='4 = IPv4 only / 6 = IPv6 only / Enter = no limit'
+        ['Egress出口机  :']='Egress machine  :'
+        ['IP 地址格式不合法:']='Invalid IP address format:'
+        ['Morph Prelude 策略']='Morph Prelude policy'
+        ['Portal 出口   :']='Portal egress   :'
+        ['Portal 地址 :']='Portal address :'
+        ['Prelude 策略  :']='Prelude policy  :'
+        ['REALITY 密钥生成失败']='Failed to generate the REALITY key'
+        ['dial 不是合法 IP 字面量，已重置为 auto']='dial is not a valid IP literal; reset to auto'
+        ['dial4 不是合法 IPv4 字面量，已重置为 auto']='dial4 is not a valid IPv4 literal; reset to auto'
+        ['tcpfit 子命令']='tcpfit subcommand'
+        ['tls=1 升级为真实证书']='Upgrade tls=1 to a real certificate'
+        ['tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（Nowhere 菜单 4 或 pz 命令）']='The tls=1 certificate lives only in memory; its fingerprint changes on every Nowhere restart, so pin= must be regenerated in sync (Nowhere menu 4 or the pz command)'
+        ['unsafe-raw 为明文传输，确认？']='unsafe-raw sends traffic in plaintext. Confirm?'
+        ['unsafe-raw（明文，仅可信内网）']='unsafe-raw (plaintext, trusted internal networks only)'
+        ['一键导入深链（手机点击，需 Anywhere 已支持 NW3）：']='One-tap import deep link (tap on your phone; Anywhere must already support NW3):'
+        ['下载失败:']='Download failed:'
+        ['严格']='strict'
+        ['传输模式      :']='Transport mode      :'
+        ['依赖安装失败，请检查 apt 源/网络']='Failed to install dependencies; please check your apt sources / network'
+        ['保活巡检定时器未运行']='Keepalive watchdog timer is not running'
+        ['保活巡检定时器运行中（每 5 分钟）']='Keepalive watchdog timer is running (every 5 minutes)'
+        ['停用']='Disable '
+        ['健康检查通过']='Health check passed'
+        ['健康检查（只检测）']='Health check (check only)'
+        ['共享密钥      :']='Shared key      :'
+        ['出站源IP      :']='Outbound source IP      :'
+        ['删除']='Delete '
+        ['删除后可能无法再通过 SSH 登录，确认删除？']='After deletion you may no longer be able to log in via SSH. Confirm deletion?'
+        ['升级到']='Upgrade to'
+        ['发现']='Found'
+        ['启用']='Enable '
+        ['启用失败，请查看: ufw status verbose']='Failed to enable; see: ufw status verbose'
+        ['回源证书剩余']='Origin certificate remaining'
+        ['GitHub API 被限流，取不到预发布标记；stable 通道暂按最新发布继续，请稍后确认是否为正式版']='GitHub API rate-limited, prerelease flag unavailable; stable channel proceeds with the latest release for now, please confirm it is a stable release later'
+        ['未能确定公网地址，无法生成 Snell 分享行']='Could not determine the public address, cannot generate the Snell share line'
+        ['证书剩余']='Certificate remaining'
+        ['证书同步失败']='Certificate sync failed'
+        ['备份文件包含非法路径，已中止']='Backup contains an illegal path, aborted'
+        ['Cloudflare 凭证仍被 Nowhere 使用（域名证书续期），未删除']='Cloudflare credentials are still used by Nowhere (domain certificate renewal), not deleted'
+        ['删除保存的 Cloudflare API 凭证（/etc/cloudflare/credentials.ini）？']='Delete the saved Cloudflare API credentials (/etc/cloudflare/credentials.ini)?'
+        ['已删除 Cloudflare 凭证']='Cloudflare credentials deleted'
+        ['已移除 Xray 的 certbot 续期 cron 任务']='Xray certbot renewal cron entry removed'
+        ['（REALITY Vision / XHTTP REALITY / XHTTP CDN / XHTTP TLS / VLESS Encryption / SS2022）']='(REALITY Vision / XHTTP REALITY / XHTTP CDN / XHTTP TLS / VLESS Encryption / SS2022)'
+        ['新内核未通过现有配置校验，保持当前版本不变（上游可能有不兼容改动）']='The new kernel failed the existing config check, keeping the current version (upstream may have incompatible changes)'
+        ['现有节点在该版本下未能启动，正在回滚到旧内核']='Existing nodes failed to start with this version, rolling back to the previous kernel'
+        ['已回滚到旧内核并重启']='Rolled back to the previous kernel and restarted'
+        ['回滚后仍未启动，请查看日志：journalctl -u adam-xray -n 50']='Still not running after rollback, check the logs: journalctl -u adam-xray -n 50'
+        ['本地已是仓库最新版本']='Local copy is already the latest from the repo'
+        ['Xray 配置改动后校验失败，已恢复原文件']='Xray config failed validation after the change, restored the original files'
+        ['端口不合法（1-65535），已用默认 443']='Invalid port (1-65535), using the default 443'
+        ['回车保持']='Press Enter to keep'
+        ['在手机浏览器打开，自动跳转 Anywhere 导入（需 Anywhere 支持 NW3）：']='Open in your phone browser to auto-jump to Anywhere import (Anywhere must support NW3):'
+        ['域名']='Domain'
+        ['官方最新:']='Official latest:'
+        ['官方有新版本']='A newer official version is available'
+        ['已切换到']='Switched to'
+        ['已启用']='Enabled'
+        ['已回滚，服务恢复运行']='Rolled back; service is running again'
+        ['已固定在']='Pinned to'
+        ['已安装']='Installed'
+        ['已是']='Already'
+        ['已是仓库最新（']='Already the latest in the repo ('
+        ['已是最新:']='Already the latest:'
+        ['已更新:']='Updated:'
+        ['已经是最新版本']='Already the latest version'
+        ['已设为开机自启']='Set to start on boot'
+        ['已跳过']='Skipped'
+        ['已重启']='Restarted'
+        ['序号无效']='Invalid number'
+        ['恢复为修改前    0']='Restore to before changes    0'
+        ['放行失败:']='Failed to allow:'
+        ['无法获取版本号（GitHub API 与 releases/latest 跳转均失败），请检查网络']='Cannot fetch the version (both the GitHub API and the releases/latest redirect failed); please check the network'
+        ['是否改用 dial4/dial6 分别绑定 IPv4/IPv6 目标出站源地址？']='Use dial4/dial6 to bind IPv4/IPv6 outbound source addresses separately?'
+        ['更新时间:']='Updated at:'
+        ['服务未运行（状态:']='Service not running (status: '
+        ['服务运行中（systemd 自动重启次数:']='Service running (systemd auto-restart count: '
+        ['未加入内核保留端口']='Not added to kernel reserved ports'
+        ['未监听']='Not listening'
+        ['格式不合法:']='Invalid format:'
+        ['正在查询官方发布 ...']='Querying the official releases ...'
+        ['正在监听']='Listening'
+        ['没有在监听']='Not listening'
+        ['版本     :']='Version     :'
+        ['版本通道：']='Version channel:'
+        ['生成失败：未能获取到有效的连接参数，可稍后通过Nowhere 菜单「4']='Failed to generate: could not get valid connection parameters; retry later via Nowhere menu "4'
+        ['生成（载体']='Generating (carrier'
+        ['的配置？（使用该端口的客户端将无法连接）']=' config? (Clients using this port will no longer be able to connect)'
+        ['监听     :']='Listening     :'
+        ['监听中']='Listening'
+        ['目标版本']='Target version'
+        ['端口:']='Port:'
+        ['端口超出范围:']='Port out of range:'
+        ['续期失败，请看上方报错']='Renewal failed; see the error above'
+        ['自动更新 :']='Auto-update :'
+        ['自动更新已开启（']='Auto-update enabled ('
+        ['自动更新未开启']='Auto-update is off'
+        ['自定义']='Custom'
+        ['节点']='Node'
+        ['解压失败']='Extraction failed'
+        ['证书已过期']='Certificate expired'
+        ['证书申请失败，请检查：1']='Certificate issuance failed; please check: 1'
+        ['证书签发后校验未通过']='Certificate verification failed after issuance'
+        ['说明：']='Note:'
+        ['输入不合法（须为 0..2147483647 的整数），重置为0']='Invalid input (must be an integer in 0..2147483647); reset to 0'
+        ['输入不合法，重置为 0']='Invalid input; reset to 0'
+        ['连接串：']='Connection string:'
+        ['选择:']='Select:'
+        ['通道:']='Channel:'
+        ['通道最新版本']='Latest version on this channel'
+        ['通道有 v']='Channel has v'
+        ['链接：']='Link:'
+        ['防火墙未放行']='Firewall has not allowed it'
+        ['项问题，可用「一键修复」处理']=' issue(s); use "One-click repair"'
+        ['（暂无记录）']='(no records yet)'
+        ['（适配 Nowhere']=' (for Nowhere '
+        ['，不自动更新']=', no auto-update'
+        ['，实际']=', actual '
+        ['，开始更新']=', updating now'
+        ['.bak），重新运行 adam 生效']='.bak), re-run adam to take effect'
+        ['.conf、jail.local 之后，同名项以这里为准。']='.conf and jail.local; same-named items here take precedence.'
+        ['.dgst，为安全起见中止']='.dgst; aborted for safety'
+        ['.local：读取顺序在 jail.conf、jail.d/']='.local: read order is after jail.conf and jail.d/'
+        ['/boot 可用空间只有']='/boot has only '
+        ['/etc/resolv.conf 被加了不可修改属性（chattr +i）—— 通常是 cnblock 的 DNS 黑洞在接管解析']='/etc/resolv.conf has the immutable attribute (chattr +i) — usually cnblock'\''s DNS blackhole has taken over resolution'
+        ['/tcpfit.sh），请检查到 GitHub 的网络']='/tcpfit.sh); please check the network to GitHub'
+        ['1-5，默认1']='1-5, default 1'
+        ['1/2/3/4，默认4']='1/2/3/4, default 4'
+        ['1/2，回车取消']='1/2, Enter to cancel'
+        ['1/2，默认']='1/2, default '
+        ['2022-blake3-aes-128-gcm（默认）  2']='2022-blake3-aes-128-gcm (default)  2'
+        ['3 秒后重启 ...']='Restarting in 3 seconds ...'
+        ['300 MB），装新内核可能失败，请先清理旧内核']='300 MB); installing a new kernel may fail, please clean up old kernels first'
+        ['80 端口是否对外开放 3']='Is port 80 open to the outside? 3'
+        [':443（推荐）']=':443 (recommended)'
+        ['>，如 adam fw allow 443/tcp,8000-8100']='>, e.g. adam fw allow 443/tcp,8000-8100'
+        ['ACME 邮箱（Let']='ACME email (Let'
+        ['ALPN   : nw3（v3 固定，不可改，App 内无需/无法填写 alpn 时忽略此项）']='ALPN   : nw3 (fixed in v3, cannot be changed; ignore this if the app does not need/cannot fill in alpn)'
+        ['ARM 机器的发行版内核自带 BBR + fq，直接用「1']='ARM machines ship BBR + fq in the distro kernel; just use "1'
+        ['Anywhere/第三方客户端无法与本服务端互通，升级需整条链路一起升。']='Anywhere/third-party clients cannot talk to this server; upgrades must cover the whole chain together.'
+        ['CDN 回源方式：']='CDN origin-pull method:'
+        ['CDN 域名:']='CDN domain:'
+        ['CF API Key/Token 是否正确 2']='Is the CF API Key/Token correct? 2'
+        ['CPU 指令集等级: x86-64-v']='CPU instruction level: x86-64-v'
+        ['Cloudflare + Google（1.1.1.1 / 8.8.8.8，含 IPv6）']='Cloudflare + Google (1.1.1.1 / 8.8.8.8, incl. IPv6)'
+        ['Cloudflare API Key（输入不回显）:']='Cloudflare API Key (input hidden):'
+        ['Cloudflare API Token（建议）或 Global API Key（输入不回显）:']='Cloudflare API Token (recommended) or Global API Key (input hidden):'
+        ['Cloudflare DNS-01 - 需要 CF API Key/Token（自动续期，推荐；80 端口可不开）']='Cloudflare DNS-01 - needs a CF API Key/Token (auto-renewal, recommended; port 80 may stay closed)'
+        ['Cloudflare DNS-01 - 需要 CF API Key（自动续期，推荐）']='Cloudflare DNS-01 - needs a CF API Key (auto-renewal, recommended)'
+        ['DNS 偏好 :']='DNS preference :'
+        ['DNS 服务商：']='DNS provider:'
+        ['DNS 设置（查看 / 修改 / 恢复）']='DNS settings (view / change / restore)'
+        ['DNS 预检通过：']='DNS pre-check passed:'
+        ['DNSPod Token（输入不回显）:']='DNSPod Token (input hidden):'
+        ['Egress dial 不是合法 IP 字面量，已重置为 auto']='Egress dial is not a valid IP literal; reset to auto'
+        ['Egress dial4 不是合法 IPv4 字面量，已重置为 auto']='Egress dial4 is not a valid IPv4 literal; reset to auto'
+        ['Egress dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto']='Egress dial6 is not a valid IPv6 literal (IPv4-mapped addresses are not accepted by v3); reset to auto'
+        ['Egress 到目标的出站源 IP dial（回车默认 auto，只影响目标连接，不影响回连 Portal）:']='Egress outbound source IP dial to the target (Enter = auto; only affects target connections, not the return link to the Portal):'
+        ['Egress 回连载体（v3.3.0 起两种都可用；一个连接串只选一种，多台出口机可以混用）']='Egress return carrier (both work since v3.3.0; one connection string uses one carrier, different exit machines may mix them)'
+        ['Egress 服务已启动（注册结果请看日志：ACCEPTED 为成功；BUSY 表示 Portal 的待命注册容量已满（主要出现在 TLS 载体），本机会自动重试）']='Egress service started (check the log for the registration result: ACCEPTED = success; BUSY = the Portal'\''s standby registration capacity is full (mainly on TLS carriers); this machine will retry automatically)'
+        ['Egress 服务未能启动，日志如下：']='Egress service failed to start; log:'
+        ['Egress 端出站源 IP dial（在出口机上绑定目标连接源地址，回车默认 auto）:']='Egress outbound source IP dial (binds the target-connection source address on the exit machine, Enter = auto):'
+        ['Fail2ban 仍未能正常启动，最近日志：']='Fail2ban still failed to start; recent log:'
+        ['Fail2ban 已停用（现有封禁随服务停止而解除，配置保留）']='Fail2ban disabled (existing bans are lifted when the service stops; config kept)'
+        ['Fail2ban 已卸载']='Fail2ban uninstalled'
+        ['Fail2ban 已启动，SSH 防护生效']='Fail2ban started; SSH protection active'
+        ['Fail2ban 已启用（开机自启）']='Fail2ban enabled (start on boot)'
+        ['Fail2ban 并启用 SSH 防护']='Fail2ban and enable SSH protection'
+        ['Fail2ban 服务未运行，请先执行「10']='Fail2ban is not running; please run "10'
+        ['Fail2ban 管理（SSH 防爆破）']='Fail2ban management (SSH brute-force protection)'
+        ['Fail2ban（开机自启）']='Fail2ban (start on boot)'
+        ['Google + Cloudflare（8.8.8.8 / 1.1.1.1，含 IPv6）']='Google + Cloudflare (8.8.8.8 / 1.1.1.1, incl. IPv6)'
+        ['HOST/tcp:PORT）、多台 Egress 可同时注册、NOW_MORPH_UDP_PRELUDE、握手超时默认按共享密钥派生（3–30s）']='HOST/tcp:PORT); multiple Egress machines can register at once; NOW_MORPH_UDP_PRELUDE; handshake timeout defaults to derivation from the shared key (3–30s)'
+        ['IPv4 / IPv6 优先级']='IPv4 / IPv6 priority'
+        ['IPv4 优先']='IPv4 first'
+        ['IPv4 优先    2']='IPv4 first    2'
+        ['IPv6 优先    3']='IPv6 first    3'
+        ['IPv6 优先（系统默认）']='IPv6 first (system default)'
+        ['IPv6 地址已配置，但实际无法连通外网（VPS常见问题：分配了地址却未正确路由）']='IPv6 address is configured but cannot actually reach the internet (common VPS issue: address assigned but not routed correctly)'
+        ['IPv6 已恢复启用（网卡的 IPv6 地址可能需要几秒，或重启网络 / 重启系统后才重新获取）']='IPv6 re-enabled (the NIC'\''s IPv6 address may take a few seconds, or come back after a network/system restart)'
+        ['IPv6 连通性正常，无需调整']='IPv6 connectivity is fine; no change needed'
+        ['MB（建议']='MB (recommended '
+        ['ML-KEM-768（抗量子，默认）  2']='ML-KEM-768 (quantum-resistant, default)  2'
+        ['Morph 是否开启（须与 Portal 一致）']='Enable Morph? (must match the Portal)'
+        ['Morph 流量乱形']='Morph traffic shaping'
+        ['NOW_HANDSHAKE_TIMEOUT；v3.3.0 起未设置时默认值从 Shared Key 派生（3s–30s，换密钥会变），显式设置可固定行为。持续时间格式，如 10s / 500ms / 1m / 1h，须为正数+单位；非法值会被 v3.3 启动拒绝']='NOW_HANDSHAKE_TIMEOUT; since v3.3.0 the unset default is derived from the Shared Key (3s–30s, changes when the key changes); setting it explicitly pins the behavior. Duration format, e.g. 10s / 500ms / 1m / 1h, must be a positive number + unit; invalid values are rejected at v3.3 startup'
+        ['NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE，后者为 v3.3.0 新增。只对发起端（Vector / Egress）生效，Portal 自身不使用；这里的选择会写进下方生成的 Vector / Egress 启动命令。接收端三种通吃、两端无需一致、不进分享链接']='NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE, the latter new in v3.3.0. Only effective on the initiating side (Vector / Egress); the Portal itself does not use it; your choice here goes into the Vector / Egress launch commands generated below. The receiver accepts all three, both ends need not match, and it is not included in share links'
+        ['Nowhere Egress 连接信息（']='Nowhere Egress connection info ('
+        ['Nowhere Portal 连接信息（']='Nowhere Portal connection info ('
+        ['Nowhere 已卸载']='Nowhere uninstalled'
+        ['Nowhere 本地实例快照（nowhere status，v3 内置遥测）：']='Nowhere local instance snapshot (nowhere status, built-in v3 telemetry):'
+        ['Portal 侧必须已设 out=egress，并放行所选载体的端口（QUIC = UDP 端口，TLS = TCP 端口）']='The Portal side must already have out=egress set, and the selected carrier'\''s port must be allowed (QUIC = UDP port, TLS = TCP port)'
+        ['Portal 公网地址（域名或 IP，Egress 回连用）:']='Portal public address (domain or IP, used by Egress to connect back):'
+        ['Portal 出口 out=（Portal 固定出口，运行期间不可变）：']='Portal egress out= (fixed Portal egress, cannot change while running):'
+        ['Portal 的']='Portal'\''s '
+        ['Portal 端点   :']='Portal endpoint   :'
+        ['Portal 自签证书指纹 pin（64 位 hex，可从 Portal 机 Nowhere 菜单 10 查看，输入不回显，回车=暂不填）:']='Portal self-signed certificate fingerprint pin (64 hex chars; view it on the Portal machine under Nowhere menu 10; input hidden; Enter = leave empty for now):'
+        ['Portal 证书信任方式：']='Portal certificate trust method:'
+        ['QUIC/UDP 端口（回车默认2001）:']='QUIC/UDP port (Enter = 2001):'
+        ['Quad9 + Cloudflare（9.9.9.9 / 1.1.1.1，含 IPv6）']='Quad9 + Cloudflare (9.9.9.9 / 1.1.1.1, incl. IPv6)'
+        ['REALITY 伪装站点（需是境外、支持 TLS 1.3 + HTTP/2 的站点；握手会转发到它的 443 端口）：']='REALITY decoy site (must be an overseas site supporting TLS 1.3 + HTTP/2; the handshake is forwarded to its port 443):'
+        ['SHA256 与仓库 SHA256SUMS 一致']='SHA256 matches the repo SHA256SUMS'
+        ['SHA256 与仓库 SHA256SUMS 不一致（仓库']='SHA256 does not match the repo SHA256SUMS (repo '
+        ['SHA256 校验失败（']='SHA256 verification failed ('
+        ['SHA256 校验失败（官方']='SHA256 verification failed (official '
+        ['SHA256 校验失败：官方 digest=']='SHA256 verification failed: official digest='
+        ['SHA256 校验通过（']='SHA256 verification passed ('
+        ['SHA256 校验通过（GitHub 官方资产 digest）']='SHA256 verification passed (GitHub official asset digest)'
+        ['SHA256 校验通过（官方 .dgst）']='SHA256 verification passed (official .dgst)'
+        ['SNI 格式不合法，已忽略']='Invalid SNI format; ignored'
+        ['SNI（证书域名与回连地址不一致时填，回车=用回连地址）:']='SNI (fill in when the certificate domain differs from the return address; Enter = use the return address):'
+        ['SOCKS5 上游 - 经一层 SOCKS5 代理出站（链式代理）']='SOCKS5 upstream - outbound via one SOCKS5 proxy layer (chained proxy)'
+        ['SOCKS5 地址，格式 user:pass']='SOCKS5 address, format user:pass'
+        ['SOCKS5 格式不合法，已重置为 none 并改回 direct']='Invalid SOCKS5 format; reset to none and switched back to direct'
+        ['SSH 端口:']='SSH port:'
+        ['Shadowsocks 2022 加密方式：']='Shadowsocks 2022 cipher:'
+        ['Snell Server 管理（Surge 官方，v']='Snell Server management (Surge official, v'
+        ['Snell 一键修复']='Snell one-click repair'
+        ['Snell 二进制已更新到']='Snell binary updated to'
+        ['Snell 健康检查']='Snell health check'
+        ['Snell 官方未提供该架构的二进制:']='Snell does not officially provide a binary for this architecture:'
+        ['Snell 尚未安装，请先执行「1']='Snell is not installed yet; please run "1'
+        ['Snell 已卸载']='Snell uninstalled'
+        ['Snell 已更新:']='Snell updated:'
+        ['Snell 已重启（含全部附加端口）']='Snell restarted (incl. all additional ports)'
+        ['Snell 未安装，跳过']='Snell not installed; skipped'
+        ['Snell 未能正常启动，最近日志：']='Snell failed to start; recent log:'
+        ['Snell 的监听地址已按当前 IPv6 状态调整']='Snell'\''s listen address adjusted to the current IPv6 state'
+        ['Snell 配置']='Snell config'
+        ['Surge 节点配置（粘贴到']='Surge node config (paste into '
+        ['Surge 节点配置：']='Surge node config:'
+        ['TCP 地址族']='TCP address family'
+        ['TCP 端口      :']='TCP port      :'
+        ['TCP 调优']='TCP tuning'
+        ['TCP 调优」即可']='TCP tuning" is enough'
+        ['TCP 调优」启用 BBR']='TCP tuning" to enable BBR'
+        ['TCP 调优（tcpfit）']='TCP tuning (tcpfit)'
+        ['TLS    : 开启']='TLS    : on'
+        ['TLS 与 QUIC 共用同一端口，如']='TLS and QUIC share one port, e.g.'
+        ['TLS 与 QUIC 分开端口，如']='TLS and QUIC use separate ports, e.g.'
+        ['TLS 回源 + 已有证书文件（「完全']='TLS origin-pull + existing certificate files ("Full'
+        ['TLS 回源 + 自签证书（默认；Cloudflare 的 SSL/TLS 模式选「完全 Full」，不是「完全']='TLS origin-pull + self-signed certificate (default; in Cloudflare'\''s SSL/TLS mode choose "Full", not "Full'
+        ['TLS 证书方式：']='TLS certificate method:'
+        ['TLS 载体下每条 Flow 独占一条连接，本机会自动预建待命连接；BUSY 表示 Portal 的待命容量已满。']='On the TLS carrier, each Flow uses its own connection; this machine pre-builds standby connections automatically; BUSY means the Portal'\''s standby capacity is full.'
+        ['TLS 载体的 Egress 需要 Nowhere']='TLS-carrier Egress needs Nowhere '
+        ['TLS/TCP 端口（回车默认2000）:']='TLS/TCP port (Enter = 2000):'
+        ['Token 是否有 Zone:DNS:Edit 权限']='Does the Token have Zone:DNS:Edit permission?'
+        ['UDP 地址族']='UDP address family'
+        ['UDP 端口      :']='UDP port      :'
+        ['VLESS + REALITY + Vision（TCP 直连，最常用）']='VLESS + REALITY + Vision (direct TCP, most common)'
+        ['VLESS + XHTTP + REALITY（直连，可叠加 VLESS Encryption）']='VLESS + XHTTP + REALITY (direct; VLESS Encryption can be stacked)'
+        ['VLESS + XHTTP + TLS / 明文回源（套 CDN，需要域名）']='VLESS + XHTTP + TLS / plaintext origin-pull (behind a CDN; needs a domain)'
+        ['VLESS Encryption + XHTTP（ML-KEM-768 抗量子，不依赖 TLS）']='VLESS Encryption + XHTTP (ML-KEM-768 quantum-resistant, no TLS needed)'
+        ['VLESS Encryption + XHTTP：不套 TLS / REALITY，由 VLESS 自身的加密保护（适合直连，或明文回源的 CDN 之后）。']='VLESS Encryption + XHTTP: no TLS / REALITY; protected by VLESS'\''s own encryption (for direct connections, or behind a CDN with plaintext origin-pull).'
+        ['Vector 载体（二选一，v3 一条连接只用一种载体）  1']='Vector carrier (pick one; in v3 one connection uses one carrier)  1'
+        ['Vector客户端  :']='Vector client  :'
+        ['Vector旧名']='Vector (old name)'
+        ['Vector（0=不限速）:']='Vector (0 = unlimited):'
+        ['X25519（密钥更短）']='X25519 (shorter keys)'
+        ['XHTTP 路径:']='XHTTP path:'
+        ['XanMod 仓库密钥下载或导入失败']='Failed to download or import the XanMod repo key'
+        ['XanMod 内核']='XanMod kernel'
+        ['XanMod 内核已卸载，重启后生效']='XanMod kernel uninstalled; takes effect after reboot'
+        ['XanMod 内核已安装:']='XanMod kernel installed:'
+        ['XanMod 官方只提供 x86_64 构建，本机是']='XanMod officially provides x86_64 builds only; this machine is '
+        ['Xray 一键修复']='Xray one-click repair'
+        ['Xray 健康检查']='Xray health check'
+        ['Xray 尚未安装，请先执行「1']='Xray is not installed yet; please run "1'
+        ['Xray 已卸载']='Xray uninstalled'
+        ['Xray 已重启']='Xray restarted'
+        ['Xray 未能正常启动，最近日志：']='Xray failed to start; recent log:'
+        ['Xray 模块暂不支持该架构:']='The Xray module does not support this architecture yet:'
+        ['Xray 管理（SS / VLESS）']='Xray management (SS / VLESS)'
+        ['Xray 自动更新:']='Xray auto-update:'
+        ['Xray 节点列表']='Xray node list'
+        ['Xray 节点的监听地址已按当前 IPv6 状态调整']='Xray nodes'\'' listen addresses adjusted to the current IPv6 state'
+        ['Xray 节点配置与分享链接']='Xray node configs and share links'
+        ['acme.sh cron 续期任务存在']='acme.sh cron renewal task exists'
+        ['acme.sh 安装后仍找不到可执行文件（']='acme.sh installed but the executable still cannot be found ('
+        ['acme.sh 安装失败，请检查网络后重试']='acme.sh installation failed; please check the network and retry'
+        ['adam-maintain.timer 启用失败']='Failed to enable adam-maintain.timer'
+        ['adam-watchdog.timer 启用失败']='Failed to enable adam-watchdog.timer'
+        ['apt-get remove 失败，请手动处理']='apt-get remove failed; please handle it manually'
+        ['apt-get update 失败，继续尝试安装']='apt-get update failed; trying to install anyway'
+        ['apt-get update 部分失败，继续尝试']='apt-get update partially failed; trying anyway'
+        ['auto                       打开自动维护菜单（保活巡检 / 自动更新开关）']='auto                       Open the auto-maintenance menu (keepalive watchdog / auto-update switches)'
+        ['beta   - 跟随官方最新测试版（b / rc），正式版发布后自动转到正式版（默认）']='beta   - follow the official latest beta (b / rc); switches to stable automatically once a stable release is out (default)'
+        ['certbot 安装失败']='certbot installation failed'
+        ['certbot.timer 启用失败，请手动执行：systemctl enable --now certbot.timer']='Failed to enable certbot.timer; please run manually: systemctl enable --now certbot.timer'
+        ['certbot.timer 未在运行，自动续期可能不工作，请手动检查']='certbot.timer is not running; auto-renewal may not work, please check manually'
+        ['certbot.timer 运行中']='certbot.timer is running'
+        ['cron 兜底续期任务存在']='cron fallback renewal task exists'
+        ['cron 续期任务已写入']='cron renewal task written'
+        ['default    - 流量整形混淆 + AES 加密（推荐）']='default    - traffic-shaping obfuscation + AES encryption (recommended)'
+        ['default（默认）  2']='default (default)  2'
+        ['dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto']='dial6 is not a valid IPv6 literal (IPv4-mapped addresses are not accepted by v3); reset to auto'
+        ['dial6 不是合法 IPv6 字面量，已重置为 auto']='dial6 is not a valid IPv6 literal; reset to auto'
+        ['direct - Portal 直接访问目标（默认）']='direct - Portal accesses the target directly (default)'
+        ['egress - 远程 Egress 出口（目标解析/拨号在另一台主动回连的机器上，该机无需开放入站端口；可同时接多台）']='egress - remote Egress exit (target resolution/dialing happens on another machine that connects back; that machine needs no inbound port; multiple machines can connect)'
+        ['en（当前：']='en (current: '
+        ['f2b                        打开 Fail2ban 菜单']='f2b                        Open the Fail2ban menu'
+        ['f2b bantime <时长>         例: adam f2b bantime 1h   （纯数字 = 分钟，-1 = 永久）']='f2b bantime <duration>      e.g. adam f2b bantime 1h   (plain number = minutes, -1 = forever)'
+        ['fade（默认）  2']='fade (default)  2'
+        ['fail2ban 与当前 Python 版本不兼容（缺 asynchat/asyncore，常见于 Ubuntu 24.04 的初版软件包），尝试升级 fail2ban ...']='fail2ban is incompatible with the current Python version (missing asynchat/asyncore, common in early Ubuntu 24.04 packages); trying to upgrade fail2ban ...'
+        ['findtime 格式不合法']='Invalid findtime format'
+        ['full8 - 全程全 8 位随机']='full8 - full 8-bit random throughout'
+        ['fw                         打开防火墙菜单']='fw                         Open the firewall menu'
+        ['fw allow <端口>            例: adam fw allow 443/tcp,8000-8100    （不写协议 = TCP+UDP）']='fw allow <port>            e.g. adam fw allow 443/tcp,8000-8100    (no protocol = TCP+UDP)'
+        ['fw deny  <端口>            删除放行规则']='fw deny  <port>            Remove an allow rule'
+        ['host:port（输入不回显）:']='host:port (input hidden):'
+        ['low7  - 全程低 7 位随机']='low7  - low 7-bit random throughout'
+        ['maintain-log               查看维护记录']='maintain-log               View maintenance records'
+        ['maxretry 必须是正整数']='maxretry must be a positive integer'
+        ['mix - TLS/TCP + QUIC/UDP 双栈（HOST:PORT，推荐）']='mix - TLS/TCP + QUIC/UDP dual-stack (HOST:PORT, recommended)'
+        ['mode（服务端与客户端必须一致）：']='mode (server and client must match):'
+        ['nowhere                    打开 Nowhere 菜单']='nowhere                    Open the Nowhere menu'
+        ['nowhere status 未能读取到实例（服务未运行，或二进制版本低于 v2.1.2 无此命令）']='nowhere status could not read any instance (service not running, or binary older than v2.1.2 without this command)'
+        ['off          开/关 跟随官方发布的自动更新（默认 beta 通道：跟随最新测试版）']='off          On/off for following official releases for auto-update (default beta channel: follow the latest beta)'
+        ['out=egress 时 Portal 不能再设置 dial/dial4/dial6（与官方约束一致），目标源地址请在 Egress 端配置']='When out=egress, the Portal can no longer set dial/dial4/dial6 (per the official constraint); configure the target source address on the Egress side'
+        ['pin        - 指定一个版本并固定，不自动更新']='pin        - pin to a specific version; no auto-update'
+        ['pin 必须是 64 位小写十六进制字符']='pin must be 64 lowercase hex chars'
+        ['prerelease - 跟随官方最新版（含预发布，默认）']='prerelease - follow the official latest (incl. pre-releases, default)'
+        ['s Encrypt DNS-01 通用 - 支持多种 DNS 服务商（自动续期）']='s Encrypt DNS-01 generic - supports many DNS providers (auto-renewal)'
+        ['s Encrypt HTTP-01 - 需要域名解析到本机 + 开放 80 端口（自动续期）']='s Encrypt HTTP-01 - needs the domain to resolve to this machine + port 80 open (auto-renewal)'
+        ['s Encrypt HTTP-01 - 需要开放 80 端口（自动续期）']='s Encrypt HTTP-01 - needs port 80 open (auto-renewal)'
+        ['s Encrypt 账户用）:']='s Encrypt account):'
+        ['script                     打开脚本更新菜单']='script                     Open the script-update menu'
+        ['snell                      打开 Snell 菜单']='snell                      Open the Snell menu'
+        ['stable     - 只跟官方标记为正式版的发布（官方近期没有这样的发布时会提示）']='stable     - only follow releases officially marked stable (you will be told if there has been no such release recently)'
+        ['stable - 只安装和跟随正式版']='stable - install and follow stable releases only'
+        ['systemd 显示服务 active，但未检测到端口实际在监听']='systemd shows the service as active, but no port is actually listening'
+        ['tcp - 仅 TLS/TCP（HOST/tcp:PORT）']='tcp - TLS/TCP only (HOST/tcp:PORT)'
+        ['tcp / TLS        - 每条 Flow 独占一条 TLS 连接，自动维护预建连接池（Hydra）；UDP 被限制的网络选这个']='tcp / TLS        - each Flow uses its own TLS connection; pre-built connection pool maintained automatically (Hydra); pick this on networks where UDP is restricted'
+        ['tcp / TLS  - 每条 Flow 独占一条 TLS 连接，出口机自动维护预建连接池；UDP 被限制的网络选这个（出口机需']='tcp / TLS  - each Flow uses its own TLS connection; the exit machine maintains a pre-built connection pool automatically; pick this on networks where UDP is restricted (exit machines need '
+        ['tcp:端口']='tcp:port'
+        ['tcpfit 以非 0 状态退出（如果是你主动退出菜单可忽略）']='tcpfit exited with a non-zero status (ignore this if you exited the menu yourself)'
+        ['tcpfit 会按本机实测结果推导缓冲区、BBR/fq、限速器拐点与整形参数，而不是套固定值。']='tcpfit derives buffer, BBR/fq, limiter inflection points and shaping parameters from measurements on this machine, instead of applying fixed values.'
+        ['tcpfit 已更新到']='tcpfit updated to'
+        ['tcpfit 是第三方开源脚本（']='tcpfit is a third-party open-source script ('
+        ['tcpfit 状态 / 回滚 / 更新']='tcpfit status / rollback / update'
+        ['tcpfit 的菜单需要在终端里运行，请直接执行: tcpfit']='The tcpfit menu must run in a terminal; please run directly: tcpfit'
+        ['tls=1 且无指纹记录文件，请用 Nowhere 菜单 10 生成']='tls=1 with no fingerprint record file; please generate one via Nowhere menu 10'
+        ['tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用']='tls=1 is a temporary self-signed certificate; its fingerprint changes on every restart; test use only'
+        ['tls=1 当前指纹见']='Current tls=1 fingerprint:'
+        ['tls=1 时 pin 随 Portal 重启变化，Portal 重启后需在本机更新 egress.env 里的 pin 并重启服务。']='With tls=1, pin changes when the Portal restarts; after a Portal restart, update the pin in egress.env on this machine and restart the service.'
+        ['tls=1 自签证书：必须用 pin= 锁定 Portal 证书指纹（指纹随 Portal 重启变化）']='tls=1 self-signed certificate: you must lock the Portal certificate fingerprint with pin= (the fingerprint changes on Portal restart)'
+        ['tls=2 真实证书：走系统 CA + 主机名校验（默认）']='tls=2 real certificate: system CA + hostname verification (default)'
+        ['tune                       打开调优菜单']='tune                       Open the tuning menu'
+        ['udp - 仅 QUIC/UDP（HOST/udp:PORT）']='udp - QUIC/UDP only (HOST/udp:PORT)'
+        ['udp / QUIC - 一条连接承载多条 Flow（推荐）']='udp / QUIC - one connection carries multiple Flows (recommended)'
+        ['udp / QUIC（默认）- 一条连接承载多条 Flow']='udp / QUIC (default) - one connection carries multiple Flows'
+        ['ufw 安装失败，请检查 apt 源/网络']='ufw installation failed; please check apt sources / network'
+        ['ufw 安装完成']='ufw installed'
+        ['ufw 已安装']='ufw is installed'
+        ['ufw 当前未启用，已预先保存放行规则:']='ufw is currently disabled; allow rules have been saved in advance:'
+        ['ufw 未启用（如有云厂商安全组，请确认已放行']='ufw is disabled (if your cloud provider has a security group, please confirm it allows '
+        ['unsafe-raw - 不加密、不混淆，明文转发（只适合可信内网 / 专线）']='unsafe-raw - no encryption, no obfuscation, plaintext forwarding (only for trusted internal networks / dedicated lines)'
+        ['unsafe-raw 下所有流量明文传输，公网使用等于裸奔']='With unsafe-raw all traffic is plaintext; using it on the public internet is like running naked'
+        ['v3 会直接拒绝用该密钥启动。请用Nowhere 菜单「3']='v3 will refuse to start with this key. Please use Nowhere menu "3'
+        ['v3 客户端默认校验系统 CA 与主机名，自签场景必须用 pin= 锁定指纹']='v3 clients verify the system CA and hostname by default; for self-signed certs you must lock the fingerprint with pin='
+        ['v3 的 alpn/net/log/pool/up/down/socks']='v3'\''s alpn/net/log/pool/up/down/socks'
+        ['v3 默认开启 morph=1；仅做流量形态混淆，不提供额外加密；两端必须一致，没有协商/回退']='v3 enables morph=1 by default; it only obfuscates traffic shape and adds no extra encryption; both ends must match, with no negotiation/fallback'
+        ['v3.1.0（建议与本机同版本）；QUIC 载体与 morph=0 不受这条影响']='v3.1.0 (same version as this machine recommended); QUIC carriers and morph=0 are not affected by this'
+        ['v3.1.0，再升级本机 Portal']='v3.1.0, then upgrade this machine'\''s Portal'
+        ['v3.1.0，更旧的版本会被静默拒绝。']='v3.1.0; older versions are silently rejected.'
+        ['v3.2.0 起 Portal 强制 Authenticated Prelude、不再有回退：仍停留在 v3.0.x 的 Vector/Egress/Anywhere 在 morph=1 的 TLS/TCP 载体上会被静默拒绝']='Since v3.2.0 the Portal enforces Authenticated Prelude with no fallback: Vector/Egress/Anywhere still on v3.0.x will be silently rejected on morph=1 TLS/TCP carriers'
+        ['v3.2.0 起 Portal 强制 Authenticated Prelude：morph=1 且走 TLS/TCP 的对端']='Since v3.2.0 the Portal enforces Authenticated Prelude: peers with morph=1 on TLS/TCP'
+        ['v3.3.0 新增：Egress 可走 TLS/TCP（egress://KEY']='New in v3.3.0: Egress can use TLS/TCP (egress://KEY'
+        ['v3.3.0 起同一 Portal 可同时接受多台 Egress（TLS / QUIC 可混用，Portal 按先进先出轮转，不保证均衡）。']='Since v3.3.0 one Portal can accept multiple Egress machines at once (TLS / QUIC can be mixed; the Portal rotates FIFO with no balance guarantee).'
+        ['v3.3.0 起同一 Portal 可同时接受多台 Egress（TLS / QUIC 可混用，Portal 按先进先出轮转，不保证均衡）；使用 tcp 载体的出口机需']='Since v3.3.0 one Portal can accept multiple Egress machines at once (TLS / QUIC can be mixed; the Portal rotates FIFO with no balance guarantee); exit machines using the tcp carrier need '
+        ['v3.3.0，本机现有二进制为']='v3.3.0; the binary currently on this machine is '
+        ['watchdog        立即执行一次每日维护 / 保活巡检（定时器调用的就是这两个）']='watchdog        Run one daily maintenance / keepalive check now (these are what the timers call)'
+        ['xray                       打开 Xray 菜单']='xray                       Open the Xray menu'
+        ['xray vlessenc 生成失败（当前内核版本可能不支持 VLESS Encryption）']='Failed to generate xray vlessenc (the current kernel may not support VLESS Encryption)'
+        ['· CDN 节点：连不通时把客户端的 XHTTP mode 从 auto 改成 packet-up 再试']='· CDN node: if unreachable, change the client'\''s XHTTP mode from auto to packet-up and retry'
+        ['· DNS 偏好']='· DNS preference'
+        ['· REALITY 节点：较新的 Xray 服务端（社区反馈自 v26.9.8 起）要求客户端握手带 X25519MLKEM768，']='· REALITY node: newer Xray servers (community reports say since v26.9.8) require the client handshake to carry X25519MLKEM768,'
+        ['· VLESS Encryption 的 encryption= 参数很长，属正常现象；客户端内核需支持该特性']='· The VLESS Encryption encryption= parameter is very long; that is normal; the client core must support this feature'
+        ['· Xray 官方近期的发布基本都标记为 Pre-release，「最新预发布版」通常就是官方最新一版']='· Recent official Xray releases are mostly tagged Pre-release; the "latest pre-release" is usually the official latest'
+        ['· mode 必须与服务端一致（官方要求），否则无法连通']='· mode must match the server (official requirement), otherwise it cannot connect'
+        ['· v6 已移除 QUIC Proxy Mode，UDP 走 UDP over TCP，防火墙只需放行 TCP']='· v6 removed QUIC Proxy Mode; UDP goes over UDP over TCP, so the firewall only needs to allow TCP'
+        ['· v6 的协议特征由 PSK 派生：更换 PSK 等于更换一套流量特征，客户端需同步修改']='· v6 protocol features are derived from the PSK: changing the PSK changes the whole traffic profile, and clients must update in sync'
+        ['· 如果你的客户端跟不上，可选「指定版本」固定在一个旧版本（如 v26.3.27）']='· If your client cannot keep up, use "Specify version" to pin an old version (e.g. v26.3.27)'
+        ['· 角色']='· Role'
+        ['· 较新版本的 REALITY 服务端要求客户端握手带 X25519MLKEM768（社区反馈自 v26.9.8 起）：']='· Newer REALITY servers require the client handshake to carry X25519MLKEM768 (community reports say since v26.9.8):'
+        ['· 需要支持 Snell v6 的 Surge 版本；官方未说明 v6 服务端兼容 v4/v5 客户端，第三方客户端是否支持请以其文档为准']='· Requires a Surge version supporting Snell v6; the official docs do not say whether the v6 server is compatible with v4/v5 clients — check third-party client docs for support'
+        ['· 预发布版偶有不兼容改动：自动更新会先用新内核校验现有配置，校验不过就不换；启动失败会自动回滚']='· Pre-releases occasionally contain breaking changes: auto-update first validates the current config with the new core and will not switch if validation fails; startup failure triggers an automatic rollback'
+        ['— 快速重启服务']='— Restart the service quickly'
+        ['— 打开管理菜单']='— Open the management menu'
+        ['— 查看服务状态']='— View service status'
+        ['— 查看节点/连接信息']='— View node / connection info'
+        ['— 重新修改配置']='— Reconfigure'
+        ['。要换版本或恢复跟随最新，请用「1']='. To switch versions or resume following the latest, use "1'
+        ['「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3']='"Other/Manual" requires interactive DNS TXT verification; this script does not take that over yet, please pick 1-3 instead'
+        ['」可用；证书续期后每日维护会自动同步）']='" is usable; after certificate renewal, daily maintenance syncs it automatically)'
+        ['【Anywhere 分享链接 —— QUIC/UDP（net=udp）】']='[Anywhere share link — QUIC/UDP (net=udp)]'
+        ['【Anywhere 分享链接 —— TLS/TCP（net=tcp，默认）】']='[Anywhere share link — TLS/TCP (net=tcp, default)]'
+        ['【Anywhere 手动填写】']='[Anywhere manual entry]'
+        ['【TLS 提示】']='[TLS note]'
+        ['【出口机启动参数（Egress URL，用于 systemd ExecStart）】']='[Exit-machine launch parameters (Egress URL, for systemd ExecStart)]'
+        ['【客户端连接参数】']='[Client connection parameters]'
+        ['【服务端启动参数（Portal URL，用于 systemd ExecStart）】']='[Server launch parameters (Portal URL, for systemd ExecStart)]'
+        ['【本地 Vector 客户端 —— 在电脑/路由器上跑本地 SOCKS5 入口】']='[Local Vector client — run a local SOCKS5 entry on your computer/router]'
+        ['【本地 Vector 客户端】']='[Local Vector client]'
+        ['【版本兼容提醒】']='[Version compatibility reminder]'
+        ['【说明】']='[Notes]'
+        ['【远程 Egress 出口机 —— 在出口机上运行，主动回连本 Portal，无需出口机开放入站端口】']='[Remote Egress exit machine — runs on the exit machine and connects back to this Portal; the exit machine needs no inbound port]'
+        ['【远程 Egress 出口机】']='[Remote Egress exit machine]'
+        ['【防火墙提醒】']='[Firewall reminder]'
+        ['一键修复']='One-click repair'
+        ['一键修复（单元 / 保留端口 / 防火墙 / 保活定时器）']='One-click repair (unit / reserved ports / firewall / keepalive timer)'
+        ['一键诊断（只读，不改任何配置）']='One-click diagnostics (read-only; changes nothing)'
+        ['上/下行限速   :']='Up/down rate limit   :'
+        ['上一个版本 tag    :']='Previous version tag    :'
+        ['上行限速 Mbps（0=不限速）:']='Upload limit Mbps (0 = unlimited):'
+        ['上行限速 Mbps，Vector']='Upload limit Mbps, Vector'
+        ['下行限速 Mbps（0=不限速）:']='Download limit Mbps (0 = unlimited):'
+        ['下行限速 Mbps，目标']='Download limit Mbps, target'
+        ['下载']='Download'
+        ['下载 ...']='Downloading ...'
+        ['下载 tcpfit 失败（']='Failed to download tcpfit ('
+        ['下载到的 tcpfit 不完整或不是脚本（传输被截断或被网关拦截），已放弃']='The downloaded tcpfit is incomplete or not a script (transfer truncated or blocked by a gateway); giving up'
+        ['下载到的 xray 无法在本机运行（架构不符？）']='The downloaded xray cannot run on this machine (wrong architecture?)'
+        ['下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动']='The downloaded binary cannot run on this machine (architecture or libc mismatch); aborted; the existing installation was not changed'
+        ['下载到的压缩包不完整或已损坏']='The downloaded archive is incomplete or damaged'
+        ['下载失败（该版本可能没有']='Download failed (this version may not have '
+        ['下载并校验']='Download and verify'
+        ['下载或校验失败，已中止']='Download or verification failed; aborted'
+        ['不一致（可能新版尚未推送到']='Mismatch (the new version may not have been pushed to '
+        ['不变（上游可能有不兼容改动）']='Unchanged (upstream may have breaking changes)'
+        ['不可达或页面结构变化）']='unreachable, or the page structure changed)'
+        ['不可达，或该架构']='unreachable, or this architecture '
+        ['不存在，已跳过']='does not exist; skipped'
+        ['不支持的架构:']='Unsupported architecture:'
+        ['不是合法 IP:']='Not a valid IP:'
+        ['不是本机的 Snell 端口配置（现有:']='Not one of this machine'\''s Snell port configs (current: '
+        ['且不同协议代的密钥格式、URL 参数可能不兼容，仅换二进制不重配大概率启动失败或连不上']='Also, key formats and URL parameters may differ across protocol generations; just swapping the binary without reconfiguring will most likely fail to start or connect'
+        ['个端口 ·']='ports ·'
+        ['个，累计']=', total '
+        ['中文']='Chinese'
+        ['临时禁用 IPv6（重启后自动恢复）？']='Temporarily disable IPv6 (auto-restored after reboot)?'
+        ['临时禁用（重启恢复）    2']='Temporarily disable (restored on reboot)    2'
+        ['主机/udp']='host/udp'
+        ['主端口']='Main port'
+        ['二进制下载失败，安装中止']='Binary download failed; installation aborted'
+        ['二进制可运行（']='Binary can run ('
+        ['二进制已更新到']='Binary updated to'
+        ['二进制无法运行:']='Binary cannot run:'
+        ['仅支持 Debian / Ubuntu（当前:']='Only Debian / Ubuntu are supported (current: '
+        ['仍要使用？']='Still use it?'
+        ['仍要安装吗？']='Still install it?'
+        ['仍要安装该旧版本吗？']='Still install this old version?'
+        ['仍要继续安装吗？']='Continue installing anyway?'
+        ['仍要继续安装该版本吗？']='Continue installing this version anyway?'
+        ['仍要继续（稍后需手动改 egress.env 补 pin）？']='Continue anyway (you will need to manually add the pin to egress.env later)?'
+        ['从官方仓库拉取最新版并安装到']='Fetch the latest version from the official repo and install it to '
+        ['从本机未能确认']='Could not be confirmed from this machine'
+        ['仓库版本']='Repo version'
+        ['仓库版本为']='Repo version:'
+        ['以下端口正在对外监听，但还没有在防火墙里放行（启用后外部将无法访问）：']='The following ports are listening externally but are not yet allowed in the firewall (they will be unreachable from outside once enabled):'
+        ['优先（新启动的程序生效；已在运行的服务重启后生效）']='Priority (applies to newly started programs; running services take effect after restart)'
+        ['传输模式（决定端点路径，TCP 与 UDP 都能承载 TCP/UDP 业务流）：']='Transport mode (decides the endpoint path; both TCP and UDP can carry TCP/UDP traffic):'
+        ['伪装站点:']='Decoy site:'
+        ['低7位']='Low 7-bit'
+        ['低于本地']='Lower than local'
+        ['你当前是通过 IPv6（']='You are currently connected via IPv6 ('
+        ['例：80,443,2053    400-500    443/tcp,51820/udp   （不写协议 = TCP 和 UDP 都放行）']='e.g. 80,443,2053    400-500    443/tcp,51820/udp   (no protocol = allow both TCP and UDP)'
+        ['依赖安装失败']='Failed to install dependencies'
+        ['依赖安装完成']='Dependencies installed'
+        ['保存 Egress 配置并创建 systemd 服务']='Save the Egress config and create the systemd service'
+        ['保活巡检 :']='Keepalive watchdog :'
+        ['保留现有端口和 PSK？（选 n 重新配置）']='Keep the current port and PSK? (choose n to reconfigure)'
+        ['保留的其他内核:']='Other kernels kept:'
+        ['保留端口   :']='Reserved ports   :'
+        ['修复后服务仍未正常监听，最近日志：']='The service is still not listening normally after the repair; recent log:'
+        ['修复完成']='Repair complete'
+        ['修复完成，服务运行正常']='Repair complete; service running normally'
+        ['修改 DNS 地址族偏好']='Change DNS address-family preference'
+        ['修改 mode']='Change mode'
+        ['修改主端口配置（端口 / PSK / mode / DNS 偏好 / 节点名）']='Change the main port config (port / PSK / mode / DNS preference / node name)'
+        ['修改分享链接用的公网地址']='Change the public address used in share links'
+        ['修改封禁时长']='Change the ban duration'
+        ['修改端口']='Change port'
+        ['修改节点名称 / 公网地址（只影响生成的 Surge 配置行）']='Change node name / public address (only affects the generated Surge config line)'
+        ['修改触发条件（失败次数 / 统计窗口）']='Change trigger conditions (failure count / time window)'
+        ['停用后所有端口不再受 ufw 过滤（已添加的规则会保留，可随时重新启用）']='After disabling, no ports are filtered by ufw anymore (added rules are kept and can be re-enabled anytime)'
+        ['先安装向导所需的基础工具:']='First install the basic tools the wizard needs:'
+        ['全8位渐变（默认，推荐）']='Full 8-bit fade (default, recommended)'
+        ['公网 IP/域名（用于 Anywhere/Vector/Egress 连接，回车使用探测值']='Public IP/domain (for Anywhere/Vector/Egress connections; Enter = detected value'
+        ['公网地址      :']='Public address      :'
+        ['公网地址（回车保持']='Public address (Enter = keep '
+        ['公钥']='Public key'
+        ['共享密钥    :']='Shared key    :'
+        ['共享密钥 Shared Key（输入不回显，回车自动生成 32 位十六进制）:']='Shared Key (input hidden; Enter = auto-generate 32 hex chars):'
+        ['共享密钥（必须与 Portal 完全一致，32 位小写十六进制，输入不回显）:']='Shared key (must exactly match the Portal; 32 lowercase hex chars; input hidden):'
+        ['关闭自动更新']='Disable auto-update'
+        ['其他/手动']='Other/Manual'
+        ['其他:']='Other:'
+        ['内核       :']='Kernel       :'
+        ['内核:']='Kernel:'
+        ['内核包安装失败']='Kernel package installation failed'
+        ['内核版本']='Kernel version'
+        ['内核版本 :']='Kernel version :'
+        ['写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）']='Write /etc/gai.conf so the system prefers IPv4 (IPv6 stays on; only address-selection priority changes)'
+        ['出口机启动命令（或在出口机上运行本脚本 Nowhere 菜单 2，直接粘贴上面的连接串装成 systemd 服务）：']='Exit-machine launch command (or run this script'\''s Nowhere menu 2 on the exit machine and paste the connection string above to install it as a systemd service):'
+        ['出站 DNS 地址族偏好 dns-ip-preference：']='Outbound DNS address-family preference dns-ip-preference:'
+        ['出站源 IP dial（回车默认 auto；填 IP 会限定地址族，绑定失败不回退）:']='Outbound source IP dial (Enter = auto; filling in an IP pins the address family, and a failed bind does not fall back):'
+        ['分享链接:']='Share link:'
+        ['分享链接与 anywhere:// 深链格式已按 v3 文档更新，但能否导入成功']='Share links and anywhere:// deep-link formats were updated to the v3 docs, but whether import succeeds'
+        ['分享链接用的公网地址（当前']='Public address used in share links (current '
+        ['切换失败，服务可能未正常启动，请检查日志']='Switch failed; the service may not have started properly, please check the log'
+        ['切换通道（当前']='Switch channel (current '
+        ['创建 adam-xray 系统用户失败']='Failed to create the adam-xray system user'
+        ['创建 snell 系统用户失败']='Failed to create the snell system user'
+        ['删除 Snell 端口配置']='Delete a Snell port config'
+        ['删除方式：']='Deletion method:'
+        ['删除节点']='Delete node'
+        ['删除规则']='Delete rule'
+        ['剩余端口配置：']='Remaining port configs:'
+        ['加密:']='Encryption:'
+        ['升级完成:']='Upgrade complete:'
+        ['协议代，与本脚本生成的 v3']='protocol generation; this script generates v3'
+        ['卸载 Fail2ban（保留 /etc/fail2ban 下你自己的其他配置）']='Uninstall Fail2ban (keep your own other configs under /etc/fail2ban)'
+        ['卸载 Nowhere']='Uninstall Nowhere'
+        ['卸载 XanMod 内核']='Uninstall the XanMod kernel'
+        ['卸载失败']='Uninstall failed'
+        ['压缩包损坏']='Archive is damaged'
+        ['压缩包里没有 snell-server']='No snell-server in the archive'
+        ['压缩包里没有 xray 二进制']='No xray binary in the archive'
+        ['参数），改为逐项填写']='parameters); fill in each item instead'
+        ['发行版:']='Distro:'
+        ['取不到仓库里的 SHA256SUMS，无法核对校验值（SHA256:']='Cannot fetch SHA256SUMS from the repo; cannot verify the checksum (SHA256: '
+        ['取决于你手机上的 Anywhere 版本是否已支持 NW3，请以实测为准。']='Depends on whether the Anywhere version on your phone already supports NW3; go by what actually works.'
+        ['取得完整脚本，本次跳过']='Got the full script; skipped this time'
+        ['取消']='Cancel'
+        ['叠加 VLESS Encryption（抗量子密钥交换的应用层加密；客户端需较新的 Xray 内核）？']='Stack VLESS Encryption (application-layer encryption with quantum-resistant key exchange; clients need a newer Xray core)?'
+        ['另一个维护任务仍在运行，本次跳过']='Another maintenance task is still running; skipped this time'
+        ['只移除本脚本的 SSH 防护配置（保留 Fail2ban 及其他 jail）']='Only remove this script'\''s SSH protection config (keep Fail2ban and other jails)'
+        ['可以直接粘贴 Portal 端（Nowhere 菜单 4 / pz）生成的 egress:// 连接串，跳过逐项填写']='You can paste the egress:// connection string generated on the Portal side (Nowhere menu 4 / pz) to skip filling in each item'
+        ['可手动补加：']='You can add manually:'
+        ['可手动输入版本号继续（如 v6.0.0，回车取消）:']='You can type a version number to continue (e.g. v6.0.0, Enter to cancel):'
+        ['可用:']='Available:'
+        ['可能不在 XanMod 支持列表里）']='may not be in the XanMod support list)'
+        ['可能是作者刚更新、两个文件的缓存不同步，也可能是下载被篡改']='The author may have just updated it and the two files'\'' caches are out of sync, or the download may have been tampered with'
+        ['同时删除全部节点配置']='Also delete all node configs'
+        ['同时删除配置目录']='Also delete the config directory'
+        ['同时删除防火墙里 Nowhere 端口的放行规则（']='Also delete the firewall allow rules for the Nowhere ports ('
+        ['同时删除防火墙里 Snell 端口（']='Also delete the firewall allow rules for the Snell ports ('
+        ['同时删除防火墙里这些节点端口的放行规则（']='Also delete the firewall allow rules for these node ports ('
+        ['名称只能包含字母、数字和 . _ -，已使用默认值']='Name may only contain letters, digits and . _ -; the default was used'
+        ['名称格式不合法，未修改']='Invalid name format; not changed'
+        ['启动命令：']='Launch command:'
+        ['启动失败: journalctl -u fail2ban -n 30 --no-pager']='Startup failed: journalctl -u fail2ban -n 30 --no-pager'
+        ['启动失败，回滚到']='Startup failed; rolling back to '
+        ['启用 DNS over TLS（opportunistic：上游支持就加密，不支持自动回退）？']='Enable DNS over TLS (opportunistic: encrypt when the upstream supports it, fall back automatically otherwise)?'
+        ['启用」或「9']='Enable" or "9'
+        ['启用前先放行 SSH 端口（']='Before enabling, first allow the SSH port ('
+        ['回滚 tcpfit 的全部改动    3']='Roll back all tcpfit changes    3'
+        ['回滚后仍未启动: journalctl -u adam-xray -n 50']='Still not started after rollback: journalctl -u adam-xray -n 50'
+        ['回滚后服务仍未启动，请查看: journalctl -u snell -n 50 --no-pager']='Service still not started after rollback; see: journalctl -u snell -n 50 --no-pager'
+        ['回滚后服务仍未启动，请立即查看日志: journalctl -u nowhere -n 50 --no-pager']='Service still not started after rollback; check the log now: journalctl -u nowhere -n 50 --no-pager'
+        ['回连载体:']='Return carrier:'
+        ['回连载体（须与 Portal 已开放的监听对应；v3.3.0 起两种都可用）：']='Return carrier (must match the Portal'\''s open listeners; both work since v3.3.0):'
+        ['回退后服务启动失败，日志如下：']='Service failed to start after rollback; log:'
+        ['回退目标 :']='Rollback target :'
+        ['地址优先级 :']='Address priority :'
+        ['地址族（回车=不限；4=仅 IPv4；6=仅 IPv6）:']='Address family (Enter = no limit; 4 = IPv4 only; 6 = IPv6 only):'
+        ['地址格式不合法，未修改']='Invalid address format; not changed'
+        ['域名       :']='Domain       :'
+        ['域名/主机     :']='Domain/host     :'
+        ['域名/公网地址 :']='Domain/public address :'
+        ['域名不合法，已中止']='Invalid domain; aborted'
+        ['域名不能为空']='Domain cannot be empty'
+        ['域名只能包含字母、数字、点和连字符']='Domain may only contain letters, digits, dots and hyphens'
+        ['域名是否在该 CF 账号下 3']='Is the domain under this CF account? 3'
+        ['域名是否已指向本 VPS（见上方 DNS 预检结果）']='Has the domain already pointed to this VPS (see the DNS pre-check above)?'
+        ['域名是否正确 2']='Is the domain correct? 2'
+        ['域名（须已解析到本机）:']='Domain (must already resolve to this machine):'
+        ['基础工具安装失败，后续的输入校验可能不准确']='Basic tools failed to install; later input validation may be inaccurate'
+        ['备份仅在执行过「更新」或「选择版本」之后才会生成']='Backups are only created after an "Update" or "Select version" run'
+        ['备份含共享密钥与证书私钥，只能放本机，勿外发、勿传网盘']='The backup contains shared keys and certificate private keys; keep it on this machine only, do not send it out or upload it to any cloud drive'
+        ['备份已保存：']='Backup saved:'
+        ['备份文件损坏或不是有效的 tgz']='Backup file is damaged or not a valid tgz'
+        ['备份文件路径（/root/adam-backup-']='Backup file path (/root/adam-backup-'
+        ['复用现有二进制:']='Reuse the existing binary:'
+        ['多端口：列出 / 新增 / 删除某个端口配置']='Multiple ports: list / add / delete a port config'
+        ['天！请立即手动续期']='days! Please renew manually now'
+        ['天（30 天内到期），建议立即手动续期']='days (expiring within 30 days); manual renewal recommended now'
+        ['失败']='Failed'
+        ['失败，当前仍为']='Failed; still '
+        ['如果本机用 DHCP，续租或重启网络时该文件可能被改回（那种情况需在 DHCP / 网络配置里固定 DNS）']='If this machine uses DHCP, the file may be reverted on lease renewal or network restart (in that case, pin the DNS in the DHCP / network config)'
+        ['它的改动只写在自己的文件里（/etc/sysctl.d/99-tcpfit.conf 等），可用 tcpfit rollback 整体回滚']='Its changes only go into its own files (/etc/sysctl.d/99-tcpfit.conf etc.); use tcpfit rollback to revert them all'
+        ['安装 / 更新 XanMod 内核（BBR v3，仅 x86_64）']='Install / update the XanMod kernel (BBR v3, x86_64 only)'
+        ['安装 / 更新 XanMod 内核（内置 BBR v3）']='Install / update the XanMod kernel (built-in BBR v3)'
+        ['安装 / 重装」重新选择通道']='Install / reinstall" to choose a channel again'
+        ['安装 Fail2ban 并启用 SSH 防护']='Install Fail2ban and enable SSH protection'
+        ['安装 Fail2ban」生成']='Install Fail2ban" to generate'
+        ['安装 Fail2ban」（或 adam f2b install）']='Install Fail2ban" (or adam f2b install)'
+        ['安装 Snell Server（Surge 官方，v']='Install Snell Server (Surge official, v'
+        ['安装 Snell」（或 adam snell install）']='Install Snell" (or adam snell install)'
+        ['安装 Xray」（或 adam xray install）']='Install Xray" (or adam xray install)'
+        ['安装 Xray（SS / VLESS）']='Install Xray (SS / VLESS)'
+        ['安装 acme.sh...']='Installing acme.sh...'
+        ['安装中止']='Installation aborted'
+        ['安装中止：请按日志排查（常见：密钥 / pin / 端口 / Portal 未设 out=egress / 载体与 Portal 监听不对应）']='Installation aborted: please troubleshoot using the log (common causes: key / pin / port / Portal not set to out=egress / carrier does not match the Portal'\''s listeners)'
+        ['安装包 SHA256 校验失败，已中止']='Package SHA256 verification failed; aborted'
+        ['安装失败，请检查 apt 源/网络']='Installation failed; please check apt sources / network'
+        ['安装快捷命令']='Install the shortcut commands'
+        ['安装测试版']='Install the beta'
+        ['安装系统依赖']='Install system dependencies'
+        ['安装防火墙」（或 adam fw install）']='Install the firewall" (or adam fw install)'
+        ['安装防火墙（ufw）']='Install the firewall (ufw)'
+        ['官方已发布更高大版本']='A newer major version has been released'
+        ['官方已有更高大版本']='A newer major version is already available'
+        ['官方目前只有 v']='Officially there is currently only v'
+        ['实时日志（Ctrl+C 退出）']='Live logs (Ctrl+C to exit)'
+        ['客户端连接 CDN 的端口（回车默认 443）:']='Port clients use to connect to the CDN (Enter = 443):'
+        ['客户端连接用的公网地址（回车使用']='Public address clients connect to (Enter = use '
+        ['客户端需要同步修改，新的配置行如下']='Clients need to update in sync; the new config line:'
+        ['密码:']='Password:'
+        ['密钥   :']='Key   :'
+        ['密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符，不能回车自动生成（必须与 Portal 一致）']='Key does not meet the v3 spec: it must be exactly 32 lowercase hex chars; it cannot be auto-generated with Enter (must match the Portal)'
+        ['对端已就绪，继续升级']='Peers are ready; continue the upgrade'
+        ['封禁动作:']='Ban action:'
+        ['封禁失败（jail']='Ban failed (jail '
+        ['封禁日志 / 查看被封 IP']='Ban log / view banned IPs'
+        ['封禁时长 :']='Ban duration :'
+        ['封禁时长:']='Ban duration:'
+        ['封禁时长已改为']='Ban duration changed to'
+        ['将卸载:']='Will uninstall:'
+        ['将重新走一遍安装向导并覆盖当前配置']='Will run the install wizard again and overwrite the current config'
+        ['尚未安装 Fail2ban，请先执行「1']='Fail2ban is not installed yet; please run "1'
+        ['尚未安装 ufw，请先在防火墙菜单执行「1']='ufw is not installed yet; please run "1 in the firewall menu'
+        ['属于 NW']='belongs to NW'
+        ['属于新的协议代（NW']='belongs to a new protocol generation (NW'
+        ['已从仓库更新:']='Updated from the repo:'
+        ['已从备份恢复 /etc/resolv.conf']='Restored /etc/resolv.conf from backup'
+        ['已从当前服务启动日志读取到自签证书 SHA-256 指纹：']='Read the self-signed certificate SHA-256 fingerprint from the current service startup log:'
+        ['已保留，如需清除请手动删除）']='Kept; delete manually if you want to remove it)'
+        ['已修正为 IPv4 优先，现在可以正常连接 Let']='Fixed to prefer IPv4; can now connect to Let'
+        ['已停止']='Stopped'
+        ['已关闭 Snell 自动更新（保活巡检不受影响）']='Snell auto-update disabled (keepalive watchdog unaffected)'
+        ['已写入 /etc/resolv.conf:']='Written to /etc/resolv.conf:'
+        ['已切换，当前:']='Switched; current:'
+        ['已删除']='Deleted'
+        ['已删除放行规则:']='Deleted allow rules:'
+        ['已删除规则']='Deleted rules'
+        ['已加入内核保留端口']='Added to kernel reserved ports'
+        ['已取消安装']='Installation cancelled'
+        ['已取消，防火墙保持未启用']='Cancelled; firewall stays disabled'
+        ['已启动并监听 TCP']='Started and listening on TCP'
+        ['已回退到:']='Rolled back to:'
+        ['已在白名单中']='Already in the allowlist'
+        ['已安装的 XanMod 包:']='Installed XanMod packages:'
+        ['已安装续期 hook：证书更新后自动 restart nowhere']='Renewal hook installed: nowhere restarts automatically after a certificate update'
+        ['已封禁']='Banned'
+        ['已开启 Snell 自动更新：每日维护任务（凌晨 4–6 点）检查官方发布，']='Snell auto-update enabled: the daily maintenance task (04:00–06:00) checks official releases,'
+        ['已恢复']='Restored'
+        ['已恢复原来的 /etc/gai.conf']='Restored the original /etc/gai.conf'
+        ['已恢复附加端口']='Additional ports restored'
+        ['已恢复（原系统没有 /etc/gai.conf，已删除）']='Restored (the system had no /etc/gai.conf; deleted it)'
+        ['已接入 CDN 的域名（如 cdn.example.com）:']='Domain behind a CDN (e.g. cdn.example.com):'
+        ['已放行']='Allowed'
+        ['已放行本脚本服务端口:']='Allowed this script'\''s service ports:'
+        ['已放行的端口']='Allowed ports'
+        ['已是最新版本']='Already the latest version'
+        ['已更新']='Updated'
+        ['已检测到 nowhere 二进制（']='Detected a nowhere binary ('
+        ['已添加并生效']='Added and in effect'
+        ['已添加并监听']='Added and listening'
+        ['已生成 PSK:']='Generated PSK:'
+        ['已生成密钥:']='Generated key:'
+        ['已确认 SSH 端口放行:']='Confirmed the SSH port is allowed:'
+        ['已禁用（临时，重启恢复）']='Disabled (temporary; restored on reboot)'
+        ['已禁用（永久）']='Disabled (permanent)'
+        ['已移除 certbot 续期的 cron 兜底任务']='Removed the certbot renewal cron fallback task'
+        ['已移除本脚本的 SSH 防护配置']='Removed this script'\''s SSH protection config'
+        ['已移除本脚本的 systemd-resolved 配置，DNS 恢复为系统原设置']='Removed this script'\''s systemd-resolved config; DNS restored to system defaults'
+        ['已经是最新版本，无需更新']='Already the latest version; no update needed'
+        ['已经是本机的一份 Snell 附加端口配置']='Already one of this machine'\''s Snell additional-port configs'
+        ['已经是该版本，无需切换']='Already on this version; no switch needed'
+        ['已自动回滚，服务恢复运行:']='Auto-rolled back; service running again:'
+        ['已自动更新:']='Auto-updated:'
+        ['已被其他进程占用']='Already in use by another process'
+        ['已被占用，请换一个']='Already in use; please choose another'
+        ['已解封']='Unbanned'
+        ['已解封所有 IP']='Unbanned all IPs'
+        ['已设置为']='Set to'
+        ['已跳过启用防火墙，请确认云厂商安全组 / 其他防火墙已放行:']='Skipped enabling the firewall; please confirm your cloud security group / other firewall allows:'
+        ['已跳过演练：建议 90 天内用Nowhere 菜单「11']='Skipped the dry run: it is recommended to use Nowhere menu "11 within 90 days'
+        ['已通过 systemd-resolved 设置 DNS:']='DNS set via systemd-resolved:'
+        ['常用命令：']='Common commands:'
+        ['常用命令：systemctl status nowhere / journalctl -u nowhere -f /']='Common commands: systemctl status nowhere / journalctl -u nowhere -f /'
+        ['常见原因：证书路径错误、端口被抢占、密钥格式不合 v3 规范（必须 32 位小写十六进制）']='Common causes: wrong certificate path, port taken by another process, key format not meeting the v3 spec (must be 32 lowercase hex chars)'
+        ['并重新导入本链接（链接已带 support-x25519mlkem768=true，不认识该参数的客户端会忽略它）']='And re-import this link (it already carries support-x25519mlkem768=true; clients that do not recognize this parameter will ignore it)'
+        ['开启自动更新？']='Enable auto-update?'
+        ['开启自动更新？（每天检查一次官方发布，']='Enable auto-update? (checks official releases once a day, '
+        ['开启自动更新？（每日检查官方发布；先用新内核校验配置，失败不换，启动失败自动回滚）']='Enable auto-update? (checks official releases daily; validates the config with the new core first, does not switch on failure, auto-rolls back on startup failure)'
+        ['当前 DNS：']='Current DNS:'
+        ['当前 Portal 仅 QUIC/UDP，Vector 载体自动选 udp']='Current Portal is QUIC/UDP only; the Vector carrier is auto-selected as udp'
+        ['当前 Portal 仅 TLS/TCP，Egress 载体自动选 tcp（出口机需']='Current Portal is TLS/TCP only; the Egress carrier is auto-selected as tcp (exit machines need '
+        ['当前 Portal 仅 TLS/TCP，Vector 载体自动选 tcp']='Current Portal is TLS/TCP only; the Vector carrier is auto-selected as tcp'
+        ['当前 tcpfit 版本:']='Current tcpfit version:'
+        ['当前 tls=2 证书 SHA-256 指纹（续期后会变化）：']='Current tls=2 certificate SHA-256 fingerprint (changes after renewal):'
+        ['当前:']='Current:'
+        ['当前: IPv6']='Current: IPv6'
+        ['当前为纯 QUIC/UDP Portal，没有 TLS 监听，且启动日志中未找到指纹']='Current setup is a pure QUIC/UDP Portal with no TLS listener, and no fingerprint was found in the startup log'
+        ['当前为自签模式（tls=1），证书只存在内存中、无需续期']='Currently in self-signed mode (tls=1); the certificate lives only in memory and needs no renewal'
+        ['当前保存的共享密钥不符合 v3 规范（必须是恰好 32 位小写十六进制字符）']='The saved shared key does not meet the v3 spec (must be exactly 32 lowercase hex chars)'
+        ['当前内核:']='Current kernel:'
+        ['当前安装的是']='Currently installed: '
+        ['当前安装的是测试版']='The currently installed version is a beta'
+        ['当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置']='The current key does not meet the v3 spec and cannot be probed; please reconfigure via Nowhere menu 3 first'
+        ['当前封禁']='Currently banned:'
+        ['当前封禁列表：']='Current ban list:'
+        ['当前封禁时长:']='Current ban duration:'
+        ['当前已是 tls=2 真实证书模式，无需迁移（证书状态见 Nowhere 菜单 11）']='Already in tls=2 real-certificate mode; no migration needed (see Nowhere menu 11 for certificate status)'
+        ['当前是容器类虚拟化（']='Currently running in container-style virtualization ('
+        ['当前版本 :']='Current version :'
+        ['当前白名单（这些来源永远不会被封）:']='Current allowlist (these sources are never banned):'
+        ['当前系统与网络状态']='Current system and network status'
+        ['当前规则：']='Current rules:'
+        ['当前解析不到任何 A 记录（DNS 未生效或拼写错误），HTTP-01 很可能失败']='No A record resolves right now (DNS not in effect or a typo); HTTP-01 will most likely fail'
+        ['当前触发条件:']='Current trigger conditions:'
+        ['当前该域名的证书状态：']='Current certificate status for this domain:'
+        ['当前语言：']='Current language:'
+        ['当前运行的二进制  :']='Currently running binary  :'
+        ['当前：端口']='Current: port '
+        ['快捷命令已删除（管理脚本副本']='Shortcut commands deleted (management script copy '
+        ['快捷命令已安装完成']='Shortcut commands installed'
+        ['快捷命令无法安装']='Shortcut commands cannot be installed'
+        ['恢复启用    0']='Restore and enable    0'
+        ['恢复失败：可能有其他 sysctl 配置文件也禁用了 IPv6（grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf）']='Restore failed: other sysctl config files may also disable IPv6 (grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf)'
+        ['恢复完成（已重启启用的服务）']='Restore complete (enabled services restarted)'
+        ['恢复？']='Restore?'
+        ['您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云']='You previously chose the "Other/Manual" DNS provider: you must first complete DNS TXT verification manually to get the certificate; this script cannot take that over in one click. Please re-run and choose Cloudflare (recommended) / DNSPod / Alibaba Cloud instead'
+        ['手动封禁一个 IP']='Manually ban an IP'
+        ['手动解封一个 IP']='Manually unban an IP'
+        ['打包失败']='Packaging failed'
+        ['执行完毕']='Done'
+        ['扫码导入 Anywhere（QUIC/UDP）：']='Scan to import into Anywhere (QUIC/UDP):'
+        ['扫码导入 Anywhere（TLS/TCP）：']='Scan to import into Anywhere (TLS/TCP):'
+        ['找不到备份文件：']='Backup file not found:'
+        ['找不到节点']='Node not found'
+        ['把你当前的登录 IP（']='Add your current login IP ('
+        ['拥塞控制   :']='Congestion control   :'
+        ['拥塞控制:']='Congestion control:'
+        ['按日志文件方式启动失败（常见原因：系统没有 /var/log/auth.log），改用 systemd journal 后端重试 ...']='Failed to start in log-file mode (common cause: the system has no /var/log/auth.log); retrying with the systemd journal backend ...'
+        ['按端口']='By port'
+        ['按规则编号（上表方括号里的数字）']='By rule number (the numbers in square brackets in the table above)'
+        ['探测 :']='Probe :'
+        ['探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达']='Probe did not succeed (Result is not OK). Common causes: Portal egress unreachable, no available Egress (waits until the Flow setup timeout), peer Morph/pin/key mismatch, or the target itself unreachable'
+        ['接替为主配置（']='Taking over as the main config ('
+        ['接替后主服务未能启动，已恢复原样。日志：']='The main service failed to start after the takeover; restored as before. Log:'
+        ['提示：Cloudflare 回源 HTTPS 只支持 443/2053/2083/2087/2096/8443 这几个端口']='Note: Cloudflare origin-pull HTTPS only supports ports 443/2053/2083/2087/2096/8443'
+        ['提示：Docker 用 -p 发布的端口走 FORWARD 链，不受 ufw 入站规则限制']='Note: ports published by Docker with -p go through the FORWARD chain and are not limited by ufw inbound rules'
+        ['提示：官方已发布更高大版本']='Note: a newer major version has been released'
+        ['提示：官方已有更高大版本']='Note: a newer major version is already available'
+        ['提醒（v3 官方说明）：Vector/Egress 默认校验系统 CA + 主机名，自签证书必须改用 pin= 指纹锁定']='Reminder (official v3 docs): Vector/Egress verify the system CA + hostname by default; self-signed certificates must use pin= fingerprint locking instead'
+        ['握手超时      :']='Handshake timeout      :'
+        ['握手超时    :']='Handshake timeout    :'
+        ['握手超时 NOW_HANDSHAKE_TIMEOUT（v3.3.0 起未设置时从 Shared Key 派生 3s–30s；持续时间格式如 10s/500ms/1m/1h，回车默认 10s）:']='Handshake timeout NOW_HANDSHAKE_TIMEOUT (since v3.3.0, when unset it is derived from the Shared Key, 3s–30s; duration format e.g. 10s/500ms/1m/1h; Enter = 10s):'
+        ['操作完成！']='Done!'
+        ['支持 TLS 1.3 + HTTP/2（也可能只是本机到它的网络不通），如连不上请换一个站点']='Supports TLS 1.3 + HTTP/2 (or it may just be that the network from this machine to it is down); if you cannot connect, pick another site'
+        ['支持 TLS 1.3 + HTTP/2，可用']='Supports TLS 1.3 + HTTP/2; usable'
+        ['改为跟随最新预发布版']='Switch to following the latest pre-release'
+        ['放行']='Allow'
+        ['放行端口」添加后再启用']='Allow ports" first, then enable'
+        ['文件']='File'
+        ['新二进制无法在本机运行（缺少依赖库或架构不符）:']='The new binary cannot run on this machine (missing libraries or wrong architecture):'
+        ['新增']='Add '
+        ['新增 Snell 端口配置']='Add a Snell port config'
+        ['新版 Xray 内核客户端可连；mihomo 内核需较新版本并重新导入链接；部分客户端（如当时的 sing-box）连不上']='Clients with the new Xray core can connect; mihomo cores need a newer version and the link re-imported; some clients (e.g. sing-box at the time) cannot connect'
+        ['新版本即自动升级，启动失败自动回滚']='New versions auto-upgrade; auto-rollback on startup failure'
+        ['新版本启动失败，日志如下：']='New version failed to start; log:'
+        ['新版本就自动升级，失败自动回滚）']='New versions auto-upgrade; auto-rollback on failure)'
+        ['新的 PSK（12-255 位，仅限字母、数字、- 和 _）:']='New PSK (12-255 chars; letters, digits, - and _ only):'
+        ['新的封禁时长（纯数字=分钟；也可写 10m / 1h / 1d / 1w；-1=永久）']='New ban duration (plain number = minutes; also accepts 10m / 1h / 1d / 1w; -1 = forever)'
+        ['新的监听端口:']='New listen port:'
+        ['新端口使用独立的 PSK 与 mode，和现有端口互不影响（可以给不同设备 / 不同用途各用一份）']='A new port uses its own PSK and mode and does not affect existing ports (you can give each device / use case its own)'
+        ['新端口未能启动，已撤回。日志：']='The new port failed to start and was withdrawn. Log:'
+        ['新节点未能生效，已撤回本次改动']='The new node did not take effect; this change was withdrawn'
+        ['新配置启动失败，已恢复原配置。日志：']='The new config failed to start; the original config was restored. Log:'
+        ['无法取得官方校验值（API digest 与校验文件均不可用），跳过校验（本次经 HTTPS 直连 GitHub 下载）']='Cannot get the official checksum (neither the API digest nor the checksum file is available); skipping verification (this download goes directly to GitHub over HTTPS)'
+        ['无法查询最新版本，请检查网络']='Cannot query the latest version; please check the network'
+        ['无法获取版本号，请检查网络']='Cannot get the version number; please check the network'
+        ['无法识别发行版代号，不能添加 XanMod 软件源']='Cannot identify the distro codename; cannot add the XanMod repo'
+        ['无法识别的端口写法:']='Unrecognized port format:'
+        ['无法读取证书有效期（文件缺失或损坏），建议重新签发']='Cannot read the certificate validity (file missing or damaged); reissuing is recommended'
+        ['无法通过现有配置的校验，保持']='Cannot pass validation with the current config; keeping '
+        ['无节点']='No nodes'
+        ['日志 :']='Log :'
+        ['日志后端 :']='Log backend :'
+        ['日志清理完成']='Journal log cleanup complete'
+        ['旧客户端会表现为超时 / reality verification failed；请使用新版 Xray 内核客户端，mihomo 内核需较新版本']='Old clients will show timeouts / reality verification failed; please use a newer Xray core client; mihomo cores need a newer version'
+        ['旧版任意字符串/Base64 密钥在 v3 会被拒绝启动，请重新输入或直接回车自动生成']='Old-style arbitrary string/Base64 keys are rejected at v3 startup; please re-enter or just press Enter to auto-generate'
+        ['旧的 pin= 连接串随即失效，需用新生成的连接串同步所有对端。']='The old pin= connection strings stop working immediately; sync all peers with the newly generated ones.'
+        ['明文 HTTP 回源（Cloudflare 选「灵活 Flexible」；回源端口须是 80/8080/8880/2052/2082/2086/2095 之一）']='Plaintext HTTP origin-pull (choose "Flexible" in Cloudflare; the origin port must be one of 80/8080/8880/2052/2082/2086/2095)'
+        ['是 SSH 端口的放行规则:']='is an allow rule for the SSH port:'
+        ['是主端口配置：删除后由附加端口']='is the main port config: after deletion, an additional port '
+        ['是否同时删除快捷命令 adam/zt/pz/cxpz/cq？']='Also delete the shortcut commands adam/zt/pz/cxpz/cq?'
+        ['是否已启用？）']='already enabled?)'
+        ['是否开启']='Enable?'
+        ['是否改用 dial4/dial6 分别绑定 IPv4/IPv6 源地址？']='Use dial4/dial6 to bind IPv4/IPv6 source addresses separately?'
+        ['是否现在启用防火墙？（默认拒绝入站，仅放行已添加的端口）']='Enable the firewall now? (deny inbound by default; only allow added ports)'
+        ['是否生成 Egress 连接信息？']='Generate Egress connection info?'
+        ['是否生成 Vector 连接信息？']='Generate Vector connection info?'
+        ['是否立即做一次续期演练（certbot renew --dry-run，不消耗 LE 配额）？']='Run a renewal dry run now (certbot renew --dry-run; does not consume LE quota)?'
+        ['是否立即手动触发一次续期检查？（仅当证书满足续期条件时才会真的续签）']='Trigger a manual renewal check now? (it only actually renews when the certificate meets the renewal conditions)'
+        ['是否限制监听地址族？（默认不限；IPv6 未真正开通的 VPS 可选仅 IPv4）']='Limit the listen address family? (no limit by default; VPSes without real IPv6 can pick IPv4 only)'
+        ['是唯一的一份配置，删除它等于卸载 Snell']='is the only config; deleting it is the same as uninstalling Snell'
+        ['是当前的 SSH 端口']='is the current SSH port'
+        ['暂时取不到官方发布信息，无法判断是否有新版本']='Cannot fetch official release info right now; cannot tell whether a new version exists'
+        ['暂时连不上官方下载站，无法判断是否有新版本']='Cannot reach the official download site right now; cannot tell whether a new version exists'
+        ['暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100']='Fingerprint not fetched yet; you can run later: journalctl -u nowhere -n 100'
+        ['更换内核有风险：请确认服务商面板有 VNC / 救援模式，万一新内核起不来可以回到旧内核']='Changing the kernel is risky: please confirm your provider panel has VNC / rescue mode so you can go back to the old kernel if the new one fails to boot'
+        ['更新 Nowhere 二进制」升级']='Update Nowhere binary" to upgrade'
+        ['更新 Nowhere 二进制（更新到最新版）']='Update Nowhere binary (update to the latest)'
+        ['更新失败']='Update failed'
+        ['更新管理脚本']='Update the management script'
+        ['更新，按']='update, by '
+        ['最大失败次数 maxretry']='Max failures maxretry'
+        ['最快导入方式（QUIC/UDP）：']='Fastest import method (QUIC/UDP):'
+        ['最快导入方式（TLS/TCP）：']='Fastest import method (TLS/TCP):'
+        ['最近一次每日任务输出：']='Last daily task output:'
+        ['最近日志（20行）：']='Recent log (20 lines):'
+        ['最近的封禁 / 解封记录：']='Recent ban / unban records:'
+        ['最近的维护事件（']='Recent maintenance events ('
+        ['最近的维护记录：']='Recent maintenance records:'
+        ['最近错误日志（nowhere，5 行）：']='Recent error log (nowhere, 5 lines):'
+        ['有新版本可用:']='New version available:'
+        ['服务单元已启用崩溃自动拉起']='Service unit has crash auto-restart enabled'
+        ['服务单元未启用 Restart=always（旧版单元）']='Service unit does not have Restart=always enabled (old unit)'
+        ['服务启动成功，且已确认端口正在监听']='Service started; ports confirmed listening'
+        ['服务器 :']='Server :'
+        ['服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout']='Service is in an uncertain state; please troubleshoot before connecting clients, otherwise it will keep timing out'
+        ['服务未能启动，查看日志排查：']='Service failed to start; check the log:'
+        ['未修改（为空或格式不合法）']='Not changed (empty or invalid format)'
+        ['未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）']='Not added to kernel reserved ports (outbound connections may take them and cause bind failures after reboot)'
+        ['未发现 acme.sh 自动续期任务！']='No acme.sh auto-renewal task found!'
+        ['未发现有效的自动续期任务！']='No valid auto-renewal task found!'
+        ['未在 root 的 crontab 中找到 acme.sh 定时任务，自动续期可能不工作']='No acme.sh scheduled task found in root'\''s crontab; auto-renewal may not work'
+        ['未填 pin：自签证书走系统 CA 校验必然失败，服务会反复重连']='No pin filled in: self-signed certificates will always fail system CA verification, and the service will keep reconnecting'
+        ['未安装 ufw，已跳过防火墙配置（可用主菜单「5']='ufw not installed; firewall config skipped (use main menu "5'
+        ['未找到 Nowhere 二进制，请先安装']='Nowhere binary not found; please install first'
+        ['未找到 apt-get（本脚本仅支持 Debian/Ubuntu），请手动安装:']='apt-get not found (this script only supports Debian/Ubuntu); please install manually:'
+        ['未找到 certbot.timer，改用 cron 兜底（每天 3:00 / 15:00 检查续期）']='certbot.timer not found; using a cron fallback instead (checks renewal daily at 3:00 / 15:00)'
+        ['未找到本脚本的 SSH 防护配置，请先执行「1']='This script'\''s SSH protection config not found; please run "1'
+        ['未找到配置，请先安装']='Config not found; please install first'
+        ['未更新（服务刚重启时可稍等再用 Nowhere 菜单 10 查看）']='Not updated yet (if the service just restarted, wait a bit and check with Nowhere menu 10)'
+        ['未检测到 Snell 安装']='No Snell installation detected'
+        ['未检测到已安装的 Nowhere 二进制']='No installed Nowhere binary detected'
+        ['未检测到本模块安装的 Xray']='No Xray installed by this module detected'
+        ['未知参数会被静默忽略，千万不要再往启动串里手动拼旧参数。']='Unknown parameters are silently ignored; never manually append old parameters to the launch string again.'
+        ['未知操作:']='Unknown action:'
+        ['未知的 f2b 子命令:']='Unknown f2b subcommand:'
+        ['未知的 fw 子命令:']='Unknown fw subcommand:'
+        ['未知的 snell 子命令:']='Unknown snell subcommand:'
+        ['未知的 tune 子命令:']='Unknown tune subcommand:'
+        ['未知的 xray 子命令:']='Unknown xray subcommand:'
+        ['未能下载官方校验文件']='Failed to download the official checksum file'
+        ['未能从']='Could not get it from '
+        ['未能从官方发布页取得 v']='Could not get v from the official release page'
+        ['未能确定公网地址，无法生成 Egress 连接串，可稍后通过Nowhere 菜单「4']='Could not determine the public address; cannot generate the Egress connection string; retry later via Nowhere menu "4'
+        ['未能确定公网地址，无法生成 Vector 连接串，可稍后通过Nowhere 菜单「4']='Could not determine the public address; cannot generate the Vector connection string; retry later via Nowhere menu "4'
+        ['未能获取']='Could not fetch '
+        ['未能获取 Xray 官方发布信息（GitHub 不可达或被限流），请稍后重试，或选「指定版本」']='Could not fetch official Xray release info (GitHub unreachable or rate-limited); please retry later, or choose "Specify version"'
+        ['未能获取官方版本信息（']='Could not fetch official version info ('
+        ['未能获取版本列表，请检查网络']='Could not fetch the version list; please check the network'
+        ['未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）']='Could not fetch the self-signed certificate fingerprint; the Egress connection string is missing pin= for now (regenerate via Nowhere menu 4 after the service starts)'
+        ['未能获取自签证书指纹，Vector 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）']='Could not fetch the self-signed certificate fingerprint; the Vector connection string is missing pin= for now (regenerate via Nowhere menu 4 after the service starts)'
+        ['未能读取当前自签指纹，']='Could not read the current self-signed fingerprint, '
+        ['未设为开机自启']='Not set to start on boot'
+        ['未运行']='Not running'
+        ['未运行或没有在监听']='Not running or not listening'
+        ['本 Portal 已固定 out=egress：没有可用的 Egress 时，新连接会在 Flow 建立超时（NOW_FLOW_SETUP_TIMEOUT，默认 20s）内等待注册，超时即失败，不会回退直连']='This Portal has out=egress pinned: with no Egress available, new connections wait for registration within the Flow setup timeout (NOW_FLOW_SETUP_TIMEOUT, default 20s); on timeout they fail and do not fall back to direct'
+        ['本地 SOCKS5 监听 in=（回车默认']='Local SOCKS5 listener in= (Enter = default '
+        ['本地 Vector 客户端连接信息']='Local Vector client connection info'
+        ['本地监听 in=']='Local listener in='
+        ['本机']='This machine'
+        ['本机不再是 Portal：删除防火墙里原 Portal 端口的放行规则（']='This machine is no longer a Portal: delete the firewall allow rules for the original Portal ports ('
+        ['本机不是 Portal 角色（当前：']='This machine is not in the Portal role (current: '
+        ['本机为 Egress 角色，但未找到']='This machine is in the Egress role, but could not find '
+        ['本机将作为出口机（Egress），主动回连 Portal；这会覆盖本机现有的 nowhere.service']='This machine will act as an exit machine (Egress) and connect back to the Portal; this will overwrite this machine'\''s existing nowhere.service'
+        ['本机已安装的']='Already installed on this machine: '
+        ['本机当前是 Egress 角色：继续安装会把 nowhere.service 换成 Portal']='This machine is currently in the Egress role: continuing the install will replace nowhere.service with a Portal'
+        ['本机是 Egress 角色，不持有监听证书，无需续期']='This machine is in the Egress role and holds no listening certificate; no renewal needed'
+        ['本机是 Egress 角色，没有监听证书；Portal 的证书指纹请在 Portal 机上查看']='This machine is in the Egress role with no listening certificate; check the Portal'\''s certificate fingerprint on the Portal machine'
+        ['本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行']='This machine is in the Egress role: probe needs to connect to the Portal as a Vector; please run it on the Portal machine or a client machine'
+        ['本机角色          :']='This machine'\''s role          :'
+        ['本机角色    : Egress（主动回连 Portal，无需本机开放入站端口）']='This machine'\''s role    : Egress (connects back to the Portal; this machine needs no inbound port)'
+        ['本次升级会跨过 v3.2.0：此后 Portal 只接受带认证的 Morph TCP Prelude，仍在 v3.0.x 的 Vector/Egress/Anywhere（morph=1 + TLS/TCP）会连不上']='This upgrade crosses v3.2.0: after that, the Portal only accepts authenticated Morph TCP Prelude; Vector/Egress/Anywhere still on v3.0.x (morph=1 + TLS/TCP) will no longer connect'
+        ['本节点用于套 CDN（如 Cloudflare）：客户端连 CDN 的域名，CDN 再回源到本机。']='This node is for use behind a CDN (e.g. Cloudflare): clients connect to the CDN'\''s domain, and the CDN pulls from this machine.'
+        ['本配置为 NW3 协议：v1/v2 的 Portal/Vector 以及未支持 NW3 的']='This config uses the NW3 protocol: v1/v2 Portal/Vector and peers not supporting NW3'
+        ['某个端口配置（可选任意一个端口）']='A port config (any port can be chosen)'
+        ['查看 tcpfit 状态    2']='View tcpfit status    2'
+        ['查看当前 DNS    2']='View current DNS    2'
+        ['查看当前状态']='View current status'
+        ['查看当前状态」确认，再用「1']='View current status" to confirm, then use "1'
+        ['查看节点配置 / 分享链接']='View node configs / share links'
+        ['查看记录: adam maintain-log    或 journalctl -u adam-maintain --no-pager -n 30']='View records: adam maintain-log    or journalctl -u adam-maintain --no-pager -n 30'
+        ['查看配置 / Surge 节点配置行（全部端口）']='View config / Surge node config lines (all ports)'
+        ['校验时找不到已下载的安装包']='The downloaded package could not be found during verification'
+        ['格式不合法（须为正数+单位，如 10s / 500ms / 1m / 1h），已重置为 10s']='Invalid format (must be a positive number + unit, e.g. 10s / 500ms / 1m / 1h); reset to 10s'
+        ['格式不合法（须为正数+单位，如 10s），已重置为 10s']='Invalid format (must be a positive number + unit, e.g. 10s); reset to 10s'
+        ['格式：32 位小写十六进制（16 随机字节）。Portal、Vector、Egress、Anywhere 四端必须填完全相同的这串字符']='Format: 32 lowercase hex chars (16 random bytes). Portal, Vector, Egress and Anywhere must all fill in exactly the same string'
+        ['检查 Snell 更新']='Check for Snell updates'
+        ['检查 Xray 更新']='Check for Xray updates'
+        ['检查并更新 tcpfit    0']='Check and update tcpfit    0'
+        ['检查并更新内核']='Check and update the kernel'
+        ['检查并更新到官方最新版']='Check and update to the official latest'
+        ['检查证书状态 / 手动续期」验证一次']='Check certificate status / manual renewal" to verify once'
+        ['检测到 cnblock 的端口防火墙链 FWIN 已挂在 INPUT 上：两套入站防火墙会叠加（两边都放行才通），建议只保留一套（cnblock fw off，或不启用 ufw）']='Detected that cnblock'\''s port firewall chain FWIN is already attached to INPUT: two inbound firewalls stack (traffic passes only if both allow it); it is recommended to keep only one (cnblock fw off, or do not enable ufw)'
+        ['检测到 firewalld 正在运行，与 ufw 同时启用会互相覆盖规则，请只保留一个']='Detected firewalld is running; enabling it together with ufw will overwrite each other'\''s rules, please keep only one'
+        ['检测到已有 Snell 配置（端口']='Detected an existing Snell config (port '
+        ['检测到已有配置，已备份到']='Detected an existing config; backed up to '
+        ['检测到旧版配置：SOCKS5 已由 socks= 迁移为 Portal 的 out=，已自动沿用该地址']='Detected an old config: SOCKS5 has migrated from socks= to the Portal'\''s out=; the address was carried over automatically'
+        ['检测到旧版（NW1）配置文件。v3 还要求：密钥改为 32 位十六进制、删除 alpn/net/log/pool 参数，建议用Nowhere 菜单「3']='Detected an old (NW1) config file. v3 also requires: change the key to 32 hex chars and remove the alpn/net/log/pool parameters; it is recommended to use Nowhere menu "3'
+        ['检测到本机当前是 Portal 角色：继续会把本机切换为 Egress（Portal 配置文件保留，但服务被替换）']='Detected that this machine is currently in the Portal role: continuing will switch it to Egress (the Portal config file is kept, but the service is replaced)'
+        ['检测到本机还有其他 Xray（官方脚本安装的 xray.service 或 3x-ui）：本模块完全独立，互不影响，只需注意端口不要重复']='Detected other Xray installs on this machine (xray.service from the official script, or 3x-ui): this module is fully independent and does not interfere; just make sure ports do not overlap'
+        ['检测到本机配置了 IPv6 地址，测试实际是否能连通外网...']='Detected that this machine has an IPv6 address configured; testing whether it can actually reach the internet...'
+        ['检测到目标端口已被其他进程占用：']='Detected that the target port is already in use by another process:'
+        ['检测到证书已续期，已同步并重启']='Detected that the certificate was renewed; synced and restarted'
+        ['正在回滚到旧版本']='Rolling back to the old version'
+        ['正在安装 ufw ...']='Installing ufw ...'
+        ['正在安装:']='Installing:'
+        ['正在更新软件包列表 ...']='Updating the package list ...'
+        ['正在查询 GitHub 最新版本...']='Querying GitHub for the latest version...'
+        ['正在查询 Surge 官方发布页 ...']='Querying the official Surge release page ...'
+        ['正在查询官方最新版本（发布页 + 下载站探测，约几秒）...']='Querying the official latest version (release page + download-site probe, a few seconds)...'
+        ['正在自动回滚到备份二进制']='Auto-rolling back to the backup binary'
+        ['正在获取版本列表...']='Fetching the version list...'
+        ['正在获取自签证书 SHA-256 指纹...']='Fetching the self-signed certificate SHA-256 fingerprint...'
+        ['正式版通道暂无 v']='No v on the stable channel yet'
+        ['此时改系统 DNS 会让它失效或互相打架，已中止。请先执行 cnblock close，或改它的上游 DNS']='Changing the system DNS now would break it or cause conflicts; aborted. Please run cnblock close first, or change its upstream DNS'
+        ['段）：']='segment):'
+        ['每日维护 :']='Daily maintenance :'
+        ['每日重启']='Daily restart'
+        ['比发布页列出的']='newer than what the release page lists'
+        ['永久禁用    3']='Permanently disable    3'
+        ['永久禁用 IPv6（写入']='Permanently disable IPv6 (write to '
+        ['没有 v']='No v'
+        ['没有可回滚的备份二进制']='No backup binary to roll back to'
+        ['没有可用于回退的本地备份版本']='No local backup version to roll back to'
+        ['没有找到']='Not found'
+        ['没有找到任何端口配置']='No port configs found'
+        ['没有找到可备份的配置目录']='No config directories found to back up'
+        ['没有找到标记为正式版的发布（最新为']='No release marked as stable found (latest is '
+        ['没有本脚本做过的 DNS 改动可恢复']='No DNS changes made by this script to restore'
+        ['没有本脚本做过的优先级改动可恢复']='No priority changes made by this script to restore'
+        ['没有检测到已安装的 XanMod 内核包']='No installed XanMod kernel packages detected'
+        ['没有输入任何服务器']='No servers entered'
+        ['注意：v3 密钥与 URL 语法已变更，重新配置后务必把新的 Vector/Egress/Anywhere 连接信息同步到所有对端，旧链接无法继续使用']='Note: v3 keys and URL syntax have changed; after reconfiguring, sync the new Vector/Egress/Anywhere connection info to all peers; old links will no longer work'
+        ['注意：下载到的脚本版本为']='Note: the downloaded script version is '
+        ['注意：防火墙当前未启用，规则已保存，启用后才生效']='Note: the firewall is currently disabled; rules are saved and take effect once enabled'
+        ['添加 IP / 网段    2']='Add IP / subnet    2'
+        ['添加 Xray 节点']='Add an Xray node'
+        ['添加节点']='Add node'
+        ['添加节点」创建）']='Add node" to create)'
+        ['清理 journal 日志，只保留最近 200M？']='Clean journal logs, keeping only the latest 200M?'
+        ['清理失败']='Cleanup failed'
+        ['演练中（约需 30-90 秒）...']='Dry run in progress (about 30-90 seconds)...'
+        ['版本信息']='Version info'
+        ['版本号格式不合法']='Invalid version format'
+        ['版本号格式不正确']='Invalid version number format'
+        ['版本号相同，仍要用远端内容覆盖本地脚本？']='Version numbers are the same; still overwrite the local script with the remote content?'
+        ['版本回退']='Version rollback'
+        ['版本已固定在']='Version pinned to'
+        ['版本通道 :']='Version channel :'
+        ['版本）']='version)'
+        ['版本；测试版最新为']='version; latest beta is '
+        ['状态 :']='Status :'
+        ['状态异常（未运行或端口未监听），正在重启']='Status abnormal (not running or port not listening); restarting'
+        ['现在添加第一个节点？']='Add the first node now?'
+        ['现在重启？']='Restart now?'
+        ['现有 URL / 密钥 / 证书无需迁移；要用 TLS 载体的 Egress，出口机也需']='Existing URLs / keys / certificates need no migration; to use a TLS-carrier Egress, the exit machine also needs '
+        ['现有端口配置：']='Current port configs:'
+        ['现有节点在该版本下未能启动，请查看日志或换一个版本']='Existing nodes failed to start under this version; please check the log or pick another version'
+        ['现有节点已随新内核重启']='Existing nodes restarted with the new core'
+        ['生成分享链接用的公网地址（回车使用']='Public address used to generate share links (Enter = use '
+        ['生成失败：openssl 与 nowhere 二进制均不可用']='Failed to generate: neither openssl nor the nowhere binary is available'
+        ['生成（carrier=']='Generating (carrier='
+        ['用法: adam f2b ban <IP>']='Usage: adam f2b ban <IP>'
+        ['用法: adam f2b unban <IP>']='Usage: adam f2b unban <IP>'
+        ['用法: adam fw allow <端口']='Usage: adam fw allow <port'
+        ['用法: adam fw deny <端口']='Usage: adam fw deny <port'
+        ['用法：adam lang zh']='Usage: adam lang zh'
+        ['用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（Nowhere 菜单 4 或 pz 命令）']='Uses pin= certificate-fingerprint locking; the fingerprint changes on every Portal restart, so this connection string must be regenerated afterwards (Nowhere menu 4 or the pz command)'
+        ['由 Adam 管理脚本生成（adam -> Fail2ban 管理）。请通过菜单修改，手动改动会在下次调整时被覆盖。']='Generated by Adam'\''s management script (adam -> Fail2ban management). Please change it via the menu; manual edits will be overwritten on the next change.'
+        ['由 Adam 管理脚本生成（系统与网络调优 -> DNS）。删除本文件并重启 systemd-resolved 即恢复。']='Generated by Adam'\''s management script (system & network tuning -> DNS). Delete this file and restart systemd-resolved to restore.'
+        ['由 Adam 管理脚本生成（系统与网络调优 -> 禁用 IPv6）。删除本文件并执行 sysctl --system 即恢复。']='Generated by Adam'\''s management script (system & network tuning -> disable IPv6). Delete this file and run sysctl --system to restore.'
+        ['由 Adam 管理脚本生成；原文件备份在']='Generated by Adam'\''s management script; original file backup at '
+        ['由 Adam 管理脚本维护：Snell / Xray / Nowhere 的监听端口，避免被本机出站连接当作临时端口占用']='Maintained by Adam'\''s management script: listen ports of Snell / Xray / Nowhere, to keep them from being taken as ephemeral ports by this machine'\''s outbound connections'
+        ['申请方式   :']='Issuance method   :'
+        ['申请证书中（Cloudflare DNS-01，约需 30-60 秒）...']='Requesting the certificate (Cloudflare DNS-01, about 30-60 seconds)...'
+        ['申请证书中（DNS-01:']='Requesting the certificate (DNS-01: '
+        ['申请证书中（HTTP-01，需 80 端口）...']='Requesting the certificate (HTTP-01, needs port 80)...'
+        ['白名单   :']='Allowlist   :'
+        ['白名单已更新:']='Allowlist updated:'
+        ['白名单管理']='Allowlist management'
+        ['白名单里没有']='Not in the allowlist: '
+        ['的 XanMod 内核包（发行版']='XanMod kernel packages (distro '
+        ['的发布文件）:']='release files):'
+        ['的回源端口指到']='point the origin port to '
+        ['的放行规则']='allow rules'
+        ['的测试版（']='beta releases ('
+        ['的版本信息（']='version info ('
+        ['的端口与 PSK 不变）']='port and PSK stay the same)'
+        ['的证书装到本 Portal 并重启服务？']='certificate onto this Portal and restart the service?'
+        ['的配置已删除']='config deleted'
+        ['的配置格式管理，不自动跨大版本']='config format; no automatic cross-major-version upgrade'
+        ['监听地址      :']='Listen address      :'
+        ['监听地址格式不合法，已改为']='Invalid listen address format; changed to '
+        ['监听地址（回车=']='Listen address (Enter = '
+        ['监听端口（ss）：']='Listening ports (ss):'
+        ['监听端口（回车使用']='Listening port (Enter = use '
+        ['监听端口（回车默认443）:']='Listening port (Enter = 443):'
+        ['目标地址 host:port（回车默认 example.com:443）:']='Target address host:port (Enter = example.com:443):'
+        ['目标端口空闲，可以使用']='Target port is free and usable'
+        ['目标（0=不限速）:']='Target (0 = unlimited):'
+        ['直接运行（Snell 自动更新不受影响）']='Run directly (Snell auto-update unaffected)'
+        ['确认从']='Confirm restoring from '
+        ['确认使用 unsafe-raw？']='Confirm using unsafe-raw?'
+        ['确认停用防火墙？']='Confirm disabling the firewall?'
+        ['确认切换到']='Confirm switching to '
+        ['确认删除主端口']='Confirm deleting the main port'
+        ['确认删除节点']='Confirm deleting the node'
+        ['确认删除附加端口']='Confirm deleting the additional port'
+        ['确认卸载']='Confirm uninstall'
+        ['确认卸载 Fail2ban？']='Confirm uninstalling Fail2ban?'
+        ['确认卸载 Snell（全部端口配置:']='Confirm uninstalling Snell (all port configs: '
+        ['确认卸载 Xray（本模块安装的 adam-xray）？']='Confirm uninstalling Xray (adam-xray installed by this module)?'
+        ['确认卸载？（卸载后重启会回到发行版内核）']='Confirm uninstall? (after uninstalling, a reboot returns to the distro kernel)'
+        ['确认启用防火墙？（默认拒绝所有入站，仅放行已添加的端口）']='Confirm enabling the firewall? (deny all inbound by default; only allow added ports)'
+        ['确认回退']='Confirm rollback'
+        ['确认安装']='Confirm installation'
+        ['确认安装为 Egress 服务']='Confirm installing as an Egress service'
+        ['确认把']='Confirm putting '
+        ['确认本机有可用的 IPv4 登录方式并继续？']='Confirm this machine has a usable IPv4 login method and continue?'
+        ['确认解封当前所有被封禁的 IP？']='Confirm unbanning all currently banned IPs?'
+        ['确认跨代升级']='Confirm cross-generation upgrade'
+        ['磁盘：']='Disk:'
+        ['禁用 / 恢复 IPv6']='Disable / restore IPv6'
+        ['禁用失败（内核可能未编译 IPv6 或 sysctl 被限制）']='Failed to disable (the kernel may not have IPv6 compiled in, or sysctl is restricted)'
+        ['私钥文件路径（privkey.pem）:']='Private key file path (privkey.pem):'
+        ['私钥路径:']='Private key path:'
+        ['移除 IP / 网段    0']='Remove IP / subnet    0'
+        ['稳妥做法：先把对端升级到']='Safer approach: upgrade the peers to '
+        ['立即执行一次保活巡检...']='Running one keepalive check now...'
+        ['立即执行一次每日维护（脚本自更新 / Snell / Xray 更新检查）...']='Running one daily maintenance now (script self-update / Snell / Xray update checks)...'
+        ['端口   :']='Port   :'
+        ['端口不合法']='Invalid port'
+        ['端口不合法，重置为 443']='Invalid port; reset to 443'
+        ['端口不合法，重置为2000']='Invalid port; reset to 2000'
+        ['端口不合法，重置为2001']='Invalid port; reset to 2001'
+        ['端口不合法，重置为443']='Invalid port; reset to 443'
+        ['端口列表（带编号）']='Port list (numbered)'
+        ['端口已变更，清理旧的放行规则:']='Port changed; cleaning up old allow rules:'
+        ['端口模式      :']='Port mode      :'
+        ['端口模式（v3 端点路径语法）：']='Port mode (v3 endpoint path syntax):'
+        ['端口范围的起点必须小于终点:']='Port range start must be smaller than the end:'
+        ['端口配置（多端口：每个端口独立 PSK）']='Port config (multiple ports: each port has its own PSK)'
+        ['端口（TCP / UDP）']=' Ports (TCP / UDP)'
+        ['端口（回车默认 443）:']='Port (Enter = 443):'
+        ['第 1 步：选择证书获取方式']='Step 1: Choose how to get the certificate'
+        ['第 10 步：配置防火墙（先于服务启动，避免中间态连不通）']='Step 10: Configure the firewall (before the service starts, to avoid a half-configured unreachable state)'
+        ['第 11 步：创建并启动系统服务']='Step 11: Create and start the system service'
+        ['第 12 步：生成连接信息']='Step 12: Generate connection info'
+        ['第 13 步：安装快捷命令']='Step 13: Install the shortcut commands'
+        ['第 2 步：基础网络信息']='Step 2: Basic network info'
+        ['第 3 步：监听参数']='Step 3: Listen parameters'
+        ['第 4 步：协议与安全参数']='Step 4: Protocol and security parameters'
+        ['第 5 步：安装系统依赖']='Step 5: Install system dependencies'
+        ['第 6 步：申请 TLS 证书']='Step 6: Request the TLS certificate'
+        ['第 7 步：下载 Nowhere 二进制']='Step 7: Download the Nowhere binary'
+        ['第 8 步：保存配置']='Step 8: Save the config'
+        ['第 9 步：安装前端口占用检测']='Step 9: Pre-install port occupancy check'
+        ['等旧参数均已移除或改名，']='and other old parameters have been removed or renamed,'
+        ['管理脚本 :']='Management script :'
+        ['管理脚本已更新到']='Management script updated to'
+        ['管理脚本未能安装到']='Management script could not be installed to '
+        ['管理脚本版本      :']='Management script version      :'
+        ['粘贴 egress:// 连接串（输入不回显，回车 = 逐项填写）:']='Paste the egress:// connection string (input hidden; Enter = fill in each item):'
+        ['系列，自动更新不跨大版本，跳过']='series; auto-update does not cross major versions; skipped'
+        ['系统与网络调优']='System & network tuning'
+        ['系统与网络调优:']='System & network tuning:'
+        ['系统里没有其他已安装的内核镜像，卸载 XanMod 后将无法启动，已拒绝']='No other installed kernel images on the system; uninstalling XanMod would leave it unbootable; refused'
+        ['统计窗口 findtime（如 10m / 1h，纯数字=分钟）']='Time window findtime (e.g. 10m / 1h; plain number = minutes)'
+        ['继续安装 / 更新 XanMod 内核？']='Continue installing / updating the XanMod kernel?'
+        ['续期 deploy hook 存在（续期后自动重启 nowhere）']='Renewal deploy hook exists (nowhere restarts automatically after renewal)'
+        ['续期 deploy hook 缺失（续期后不会自动重启 nowhere）']='Renewal deploy hook missing (nowhere will not restart automatically after renewal)'
+        ['续期检查完成']='Renewal check complete'
+        ['续期检查完成（acme.sh 的 --reloadcmd 会自动重启 nowhere）']='Renewal check complete (acme.sh --reloadcmd restarts nowhere automatically)'
+        ['续期演练未通过：请根据上方报错排查（如 80 端口被占、DNS 凭证失效），否则证书到期后服务会中断']='Renewal dry run failed: please troubleshoot using the error above (e.g. port 80 taken, DNS credentials invalid); otherwise the service will break when the certificate expires'
+        ['续期演练通过，自动续期链路可信']='Renewal dry run passed; the auto-renewal chain is trustworthy'
+        ['编号']='Number'
+        ['自动更新 开 / 关']='Auto-update on / off'
+        ['自动更新 开 / 关 / 切换通道（beta']='Auto-update on / off / switch channel (beta'
+        ['自动更新到']='Auto-updated to '
+        ['自动更新已开启，但每日维护定时器未运行']='Auto-update is on, but the daily maintenance timer is not running'
+        ['自动更新当前为：关闭']='Auto-update is currently: off'
+        ['自动更新当前为：开启（']='Auto-update is currently: on ('
+        ['自动续期已就绪：acme.sh 的 cron 定时任务存在（每天检查，到期自动续签并执行 --reloadcmd 重启 nowhere）']='Auto-renewal ready: the acme.sh cron task exists (checks daily; auto-renews when due and runs --reloadcmd to restart nowhere)'
+        ['自动续期已就绪：certbot.timer 运行中（每天两次检查续期）']='Auto-renewal ready: certbot.timer is running (checks renewal twice daily)'
+        ['自动续期链路检查：']='Auto-renewal chain check:'
+        ['自动维护:']='Auto-maintenance:'
+        ['自定义 PSK']='Custom PSK'
+        ['自签指纹已更新到']='Self-signed fingerprint updated to '
+        ['自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志含 fingerprint 的一行获取']='In self-signed mode, get the Vector/Egress pin from the Portal startup log line containing "fingerprint"'
+        ['自签模式无需域名，将自动探测公网 IP 作为客户端连接地址']='Self-signed mode needs no domain; the public IP is auto-detected as the client connection address'
+        ['自签证书 tls=1  - 无需域名，快速测试（Vector/Egress 必须用 pin= 锁定指纹，指纹随重启变化）']='Self-signed certificate tls=1 - no domain needed, quick testing (Vector/Egress must lock the fingerprint with pin=; the fingerprint changes on restart)'
+        ['自签证书仅建议测试用，生产环境请用真实域名 + CA 签发证书（选 2/3/4）']='Self-signed certificates are for testing only; for production use a real domain + CA-issued certificate (choose 2/3/4)'
+        ['自签证书指纹已随本次重启变化，请用 pz / Nowhere 菜单 4 重新生成带新 pin= 的 Vector/Egress 连接串并同步到对端']='The self-signed certificate fingerprint changed with this restart; please regenerate the Vector/Egress connection strings with the new pin= via pz / Nowhere menu 4 and sync them to all peers'
+        ['自签证书生成失败']='Failed to generate the self-signed certificate'
+        ['节点列表']='Node list'
+        ['节点名称（回车使用']='Node name (Enter = use '
+        ['节点名称（回车保持']='Node name (Enter = keep '
+        ['节点数量 :']='Node count :'
+        ['若刚修改 DNS，请确认已传播：dig +short']='If you just changed DNS, please confirm it has propagated: dig +short'
+        ['规则']='Rule'
+        ['解包失败，现有配置可能已不完整，请检查']='Unpack failed; the existing config may now be incomplete, please check'
+        ['解压出的 snell-server 不是 Linux 可执行文件']='The extracted snell-server is not a Linux executable'
+        ['解压后未找到 nowhere 二进制']='No nowhere binary found after extraction'
+        ['解封失败（该 IP 可能本来就没有被封）']='Unban failed (this IP may never have been banned)'
+        ['解封失败，请查看: fail2ban-client status']='Unban failed; see: fail2ban-client status '
+        ['解封所有 IP']='Unban all IPs'
+        ['解析到']='Resolves to '
+        ['解析测试失败，请检查，或用「恢复 DNS」撤销']='Resolution test failed; please check, or use "Restore DNS" to revert'
+        ['解析测试通过']='Resolution test passed'
+        ['触发条件 :']='Trigger conditions :'
+        ['触发条件已改为:']='Trigger conditions changed to:'
+        ['认证方式：1']='Auth method: 1'
+        ['让本管理脚本每天自动从仓库拉取更新？（地址:']='Let this management script pull updates from the repo daily? (URL: '
+        ['记录的版本 tag    :']='Recorded version tag    :'
+        ['记得在 CDN 侧：把']='Remember to set on the CDN side: '
+        ['设置 DNS']='Set DNS'
+        ['设置 DNS    3']='Set DNS    3'
+        ['证书 SAN 中不包含域名']='The certificate SAN does not include the domain'
+        ['证书与私钥不匹配']='Certificate and private key do not match'
+        ['证书剩余约']='Certificate remaining: about '
+        ['证书复制失败']='Failed to copy the certificate'
+        ['证书安装（install-cert）失败']='Certificate install (install-cert) failed'
+        ['证书已过期或无法解析']='Certificate expired or unparseable'
+        ['证书或私钥文件不存在']='Certificate or private key file does not exist'
+        ['证书文件无法读取：']='Certificate file cannot be read:'
+        ['证书文件未生成：']='Certificate file not generated:'
+        ['证书文件路径（fullchain.pem）:']='Certificate file path (fullchain.pem):'
+        ['证书方式      :']='Certificate method      :'
+        ['证书有效，剩余约']='Certificate valid, about '
+        ['证书校验通过：']='Certificate verified:'
+        ['证书状态与续期']='Certificate status & renewal'
+        ['证书申请失败：检查 CF 凭证与域名归属']='Certificate issuance failed: check CF credentials and domain ownership'
+        ['证书申请失败：检查域名解析与 80 端口']='Certificate issuance failed: check domain resolution and port 80'
+        ['证书签发失败：请检查 DNS API 凭证是否正确、域名 DNS 是否由所选服务商托管']='Certificate issuance failed: please check whether the DNS API credentials are correct and whether the domain'\''s DNS is hosted by the selected provider'
+        ['证书路径   :']='Certificate path   :'
+        ['证书路径:']='Certificate path:'
+        ['该密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符（0-9a-f）']='This key does not meet the v3 spec: it must be exactly 32 lowercase hex chars (0-9a-f)'
+        ['该证书的域名列表里没有']='This certificate'\''s domain list does not include '
+        ['语言已切换为']='Language switched to'
+        ['请以 root 用户运行此脚本']='Please run this script as root'
+        ['请先停止占用该端口的服务（旧的 Nowhere 实例已自动排除在外），否则新服务会反复崩溃重启，客户端表现为一直 timeout']='Please stop the service occupying this port first (old Nowhere instances are already excluded); otherwise the new service will crash and restart repeatedly, and clients will see constant timeouts'
+        ['请先安装发行版内核：Debian 用 apt install linux-image-amd64，Ubuntu 用 apt install linux-image-generic']='Please install the distro kernel first: Debian: apt install linux-image-amd64, Ubuntu: apt install linux-image-generic'
+        ['请把上面新的连接串同步到全部 Vector / Egress / Anywhere 对端，旧 pin= 连接串已失效']='Please sync the new connection strings above to all Vector / Egress / Anywhere peers; the old pin= connection strings no longer work'
+        ['请把所有对端升级到']='Please upgrade all peers to '
+        ['请改用文件方式运行：curl -fsSL']='Please run it via a file instead: curl -fsSL'
+        ['请输入域名（如: nhk.example.com）:']='Please enter the domain (e.g. nhk.example.com):'
+        ['请输入邮箱（用于证书申请/找回）:']='Please enter your email (for certificate issuance/recovery):'
+        ['调整后仍无法连接，请检查 VPS 出网本身是否正常: ping -c 3 8.8.8.8']='Still cannot connect after the change; please check whether the VPS itself can reach the internet: ping -c 3 8.8.8.8'
+        ['跟随最新版本前请了解：']='Before following the latest version, please know:'
+        ['跨代升级后请接着用Nowhere 菜单「3']='After a cross-generation upgrade, continue with Nowhere menu "3'
+        ['软件源已保留（/etc/apt/sources.list.d/xanmod-release.list），之后 apt upgrade 或再次执行本项即可更新内核']='The repo source is kept (/etc/apt/sources.list.d/xanmod-release.list); a later apt upgrade or re-running this item will update the kernel'
+        ['软件源里没有适合 x86-64-v']='No suitable x86-64-v in the repo sources'
+        ['载体:']='Carrier:'
+        ['输入 DNS 服务器 IP（空格分隔，可混合 IPv4 / IPv6）:']='Enter DNS server IPs (space-separated; IPv4 / IPv6 can be mixed):'
+        ['输入域名（不带 https:// 和端口）:']='Enter a domain (without https:// and without a port):'
+        ['输入序号（回车取消）:']='Enter a number (Enter to cancel):'
+        ['输入版本号（如 v26.3.27）:']='Enter a version number (e.g. v26.3.27):'
+        ['输入要删除的序号（回车取消）:']='Enter the number to delete (Enter to cancel):'
+        ['输入要删除的端口（写法同放行，如 80,443 或 400-500）:']='Enter the port to delete (same format as allowing, e.g. 80,443 or 400-500):'
+        ['输入要删除的规则编号（逗号分隔，如 3,5）:']='Enter the rule numbers to delete (comma-separated, e.g. 3,5):'
+        ['输入要加入白名单的 IP 或 CIDR 网段:']='Enter the IP or CIDR subnet to add to the allowlist:'
+        ['输入要封禁的 IP 地址:']='Enter the IP address to ban:'
+        ['输入要放行的端口：逗号分隔，支持范围与协议后缀']='Enter the ports to allow: comma-separated, ranges and protocol suffixes supported'
+        ['输入要移除的 IP 或网段:']='Enter the IP or subnet to remove:'
+        ['输入要解封的 IP 地址:']='Enter the IP address to unban:'
+        ['迁移后 Portal 改用域名 + CA 证书（tls=2），Vector/Egress 不再需要 pin=；']='After migration the Portal uses a domain + CA certificate (tls=2), and Vector/Egress no longer need pin=;'
+        ['迁移完成：已是 tls=2，服务运行中']='Migration complete: already tls=2, service running'
+        ['运行 tcpfit（不带子命令 = 它的菜单），如 adam tune tcp status']='Run tcpfit (no subcommand = its menu), e.g. adam tune tcp status'
+        ['运行并监听中']='Running and listening'
+        ['还没有节点']='No nodes yet'
+        ['还没有节点，服务不会启动']='No nodes yet; the service will not start'
+        ['这会导致 curl/certbot 优先尝试 IPv6 而报错']='This makes curl/certbot try IPv6 first and fail'
+        ['这是你当前登录所用的 IP，封禁后会立刻断开且无法重连，已拒绝']='This is the IP you are currently logged in from; banning it would disconnect you immediately with no way back; refused'
+        ['这是跨协议代升级（NW']='This is a cross-protocol-generation upgrade (NW'
+        ['进入后选「1 一键调优」即可；所有改动可用其菜单 7 或 tcpfit rollback 回滚。']='Once inside, pick "1 One-click tuning"; all changes can be rolled back via its menu 7 or tcpfit rollback.'
+        ['远程 Egress 出口机连接信息']='Remote Egress exit-machine connection info'
+        ['远端版本:']='Remote version:'
+        ['连接串格式不合法（应为 egress://32位hex密钥']='Invalid connection string format (should be egress://32-hex-key'
+        ['连接串解析通过：']='Connection string parsed OK:'
+        ['连接信息']='Connection info'
+        ['连通性探测 probe（真实 TCP Flow，不发送业务数据）']='Connectivity probe (real TCP Flow; sends no application data)'
+        ['选择要切换到的版本序号:']='Enter the number of the version to switch to:'
+        ['选择要安装的版本（支持回退到历史版本）']='Choose the version to install (supports rolling back to older versions)'
+        ['通过管道/进程替换运行，无法直接复制自身，正在从脚本地址重新下载一份...']='Running via a pipe/process substitution, so it cannot copy itself directly; re-downloading a copy from the script URL...'
+        ['通道的版本信息（GitHub 不可达 / 被限流，或该通道暂无发布）']='version info for this channel (GitHub unreachable / rate-limited, or no releases on this channel)'
+        ['通配']='Wildcard'
+        ['通配，全监听；也可填具体 IP）:']='Wildcard, listen on all; a specific IP can also be entered):'
+        ['邮箱          :']='Email          :'
+        ['邮箱不能为空，已中止']='Email cannot be empty; aborted'
+        ['邮箱格式不正确']='Invalid email format'
+        ['部分依赖安装失败，继续尝试']='Some dependencies failed to install; trying anyway'
+        ['配置 :']='Config :'
+        ['配置/对端不互通']='Config / peers cannot talk to each other'
+        ['配置已保存至']='Config saved to '
+        ['配置已更新并重启']='Config updated and restarted'
+        ['配置文件 :']='Config file :'
+        ['配置文件里读不到监听端口']='Cannot read the listen port from the config file'
+        ['配置校验失败:']='Config validation failed:'
+        ['配置校验未通过：']='Config validation failed:'
+        ['配置校验通过']='Config validation passed'
+        ['配置确认：']='Config summary:'
+        ['重启 :']='Restart :'
+        ['重启」']='Restart"'
+        ['重启后仍异常，请查看: journalctl -u']='Still abnormal after restart; see: journalctl -u'
+        ['重启后未检测到服务正常监听：']='Service not detected listening normally after restart:'
+        ['重启失败: journalctl -u fail2ban -n 30']='Restart failed: journalctl -u fail2ban -n 30'
+        ['重启失败，请按上方日志排查']='Restart failed; please troubleshoot using the log above'
+        ['重启失败，请看 journalctl -u']='Restart failed; see journalctl -u'
+        ['重新下载脚本失败，管理脚本副本无法安装']='Failed to re-download the script; the management script copy cannot be installed'
+        ['重新生成 PSK（同时更换一套流量特征）']='Regenerate the PSK (also changes the traffic profile)'
+        ['重新配置」按 v3 向导重装一次']='Reconfigure" to reinstall once via the v3 wizard'
+        ['重新配置」按新版向导重建配置（新密钥 + 新 URL），再同步更新所有对端']='Reconfigure" to rebuild the config with the new wizard (new key + new URL), then sync all peers'
+        ['重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端']='Reconfigure" to generate a new key and sync all Vector/Egress/Anywhere peers'
+        ['重装']='Reinstall'
+        ['防护端口 :']='Protected port :'
+        ['防火墙」安装）；请确认云厂商安全组已放行:']='Firewall" to install); please confirm your cloud security group allows:'
+        ['防火墙已停用']='Firewall disabled'
+        ['防火墙已启用']='Firewall enabled'
+        ['防火墙已启用（开机自动生效）']='Firewall enabled (takes effect automatically on boot)'
+        ['防火墙已处于启用状态，补齐 SSH 与本脚本服务端口的放行规则']='Firewall is already enabled; adding allow rules for SSH and this script'\''s service ports'
+        ['防火墙已放行']='Firewall allowed it'
+        ['防火墙已放行:']='Firewall allowed:'
+        ['防火墙已是启用状态']='Firewall is already enabled'
+        ['防火墙当前未启用']='Firewall is currently disabled'
+        ['防火墙未启用时 ufw 不显示规则编号，请改用「按端口」删除']='When the firewall is disabled, ufw does not show rule numbers; please delete "By port" instead'
+        ['防火墙未启用，以下是已保存、启用后才生效的规则：']='Firewall is disabled; the rules below are saved and take effect once enabled:'
+        ['防火墙未放行附加端口']='Firewall has not allowed the additional ports'
+        ['防火墙状态（详细）']='Firewall status (detailed)'
+        ['防火墙管理（ufw）']='Firewall management (ufw)'
+        ['防火墙（自动放行 SSH 与本脚本服务端口）']=' Firewall (auto-allows SSH and this script'\''s service ports)'
+        ['阿里云  4']='Alibaba Cloud  4'
+        ['阿里云 AccessKey ID:']='Alibaba Cloud AccessKey ID:'
+        ['阿里云 AccessKey Secret（输入不回显）:']='Alibaba Cloud AccessKey Secret (input hidden):'
+        ['限速设置（Portal/Vector/Egress 通用语义，0=不限速）：']='Rate-limit settings (same semantics for Portal/Vector/Egress, 0 = unlimited):'
+        ['需要对外提供服务的端口，请用「3']='Ports that need to serve externally; please use "3'
+        ['需要重启才会切换到新内核。重启后可用本菜单「8']='A reboot is needed to switch to the new kernel. After reboot, use this menu'\''s "8'
+        ['默认 30']='default 30'
+        ['默认队列   :']='Default queue   :'
+        ['（-1 表示永久）']=' (-1 = forever)'
+        ['（32 位小写十六进制，两端必须完全一致）']=' (32 lowercase hex chars; both ends must match exactly)'
+        ['（Cloudflare 可用 Origin Rules），并开启 gRPC / HTTP/2 回源以获得更好的 XHTTP 表现']=' (Cloudflare can use Origin Rules), and enable gRPC / HTTP/2 origin-pull for better XHTTP performance'
+        ['（Egress 是发起端，这个设置在本机生效；Portal 三种都收，两端无需一致）：']=' (Egress is the initiating side; this setting takes effect on this machine; the Portal accepts all three, both ends need not match):'
+        ['（NOW_HANDSHAKE_TIMEOUT，v3.3.0 起未设置时从 Shared Key 派生 3s–30s）']=' (NOW_HANDSHAKE_TIMEOUT; since v3.3.0, when unset it is derived from the Shared Key, 3s–30s)'
+        ['（NOW_HANDSHAKE_TIMEOUT；v3.3.0 起未设置时从 Shared Key 派生 3s–30s，显式设置可固定）']=' (NOW_HANDSHAKE_TIMEOUT; since v3.3.0, when unset it is derived from the Shared Key, 3s–30s; setting it explicitly pins it)'
+        ['（NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE，只在发起端 Vector / Egress 上设置，Portal 不使用；接收端通吃、两端无需一致）']=' (NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE; only set on the initiating Vector / Egress side, the Portal does not use them; the receiver accepts all, both ends need not match)'
+        ['（Vector / Egress / Anywhere）必须']='(Vector / Egress / Anywhere) must '
+        ['（Vector/Egress 的 pin= 请同步改为新值）']=' (please sync the Vector/Egress pin= to the new value)'
+        ['（tcpfit：按本机实测推导参数，可回滚）']=' (tcpfit: derives parameters from measurements on this machine; can be rolled back)'
+        ['（zh=中文 / en=English）']=' (zh=Chinese / en=English)'
+        ['（zh=中文 / en=English），下次打开菜单生效']=' (zh=Chinese / en=English); takes effect next time you open the menu'
+        ['（zh=中文 / en=English，切换：adam lang zh']=' (zh=Chinese / en=English; switch with: adam lang zh'
+        ['（不自动跨大版本）']=' (does not cross major versions automatically)'
+        ['（保活 / 自动更新）']=' (keepalive / auto-update)'
+        ['（写入生成的 Vector / Egress 启动命令，Portal 自身不使用）']=' (written into the generated Vector / Egress launch commands; the Portal itself does not use it)'
+        ['（务必和服务端保持一致）']=' (must match the server)'
+        ['（只留最近 5 份）']=' (keep only the latest 5)'
+        ['（可在「自动更新」里切到 beta 通道）']=' (you can switch to the beta channel under "Auto-update")'
+        ['（可用: install / list / status / on / off / allow <端口> / deny <端口> / sync）']=' (available: install / list / status / on / off / allow <port> / deny <port> / sync)'
+        ['（可用: install / status / banned / log / bantime <时长> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall）']=' (available: install / status / banned / log / bantime <duration> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall)'
+        ['（可用: install / update / config / reconfig / ports / add-port / del-port']=' (available: install / update / config / reconfig / ports / add-port / del-port'
+        ['（可用: tcp']=' (available: tcp'
+        ['（可用「版本回退」快速切回）']=' (use "Version rollback" to switch back quickly)'
+        ['（可能签发了错误的域名）']=' (may have issued the wrong domain)'
+        ['（可选，在电脑/路由器上跑本地 SOCKS5 入口用 in=）：']=' (optional; in= for running a local SOCKS5 entry on your computer/router):'
+        ['（含 PSK）？']=' (incl. PSK)?'
+        ['（含密钥配置与证书文件），如需彻底清除请手动: rm -rf']=' (incl. key configs and certificate files); to remove everything, run manually: rm -rf'
+        ['（含密钥）？']=' (incl. keys)?'
+        ['（在出口机上运行 egress:// 主动回连本 Portal）：']=' (run egress:// on the exit machine to connect back to this Portal):'
+        ['（官方未公布校验值，仅供留档比对）']=' (no official checksum published; for your records only)'
+        ['（客户端端口']=' (client port'
+        ['（对之后的新封禁生效）']=' (applies to new bans after this)'
+        ['（或等待 10-30 分钟后重试）']=' (or wait 10-30 minutes and retry)'
+        ['（无）']='(none)'
+        ['（旧版备份']=' (old backup '
+        ['（旧版备份在']=' (old backup at '
+        ['（时长']=' (duration '
+        ['（暂无）']='(none yet)'
+        ['（未检测到 nowhere.service，未启动服务）']=' (nowhere.service not detected; service not started)'
+        ['（未检测到 snell.service，未启动服务）']=' (snell.service not detected; service not started)'
+        ['（本次安装中途失败时可手动恢复）']=' (can be restored manually if this install fails halfway)'
+        ['（没有启用的 jail）']='(no enabled jails)'
+        ['（真实 TCP Flow 连通性测试）']=' (real TCP Flow connectivity test)'
+        ['（示例：30 / 10m / 1h / 1d / -1）']=' (examples: 30 / 10m / 1h / 1d / -1)'
+        ['（端口模式']=' (port mode'
+        ['（还没有节点）']='(no nodes yet)'
+        ['（还没有节点，用「2']='(no nodes yet; use "2'
+        ['（这里修改的是主端口配置；附加端口请用「删除端口配置」+「新增端口配置」）']='(this changes the main port config; for additional ports use "Delete port config" + "Add port config")'
+        ['（通用 DNS-01 / acme.sh 请用 Nowhere 菜单 3 重新配置）']='(for generic DNS-01 / acme.sh, please reconfigure via Nowhere menu 3)'
+        ['（须与 Portal 一致）']=' (must match the Portal)'
+        ['）   回源:']=')   Origin:'
+        ['） 语言：']=') Language:'
+        ['）加入白名单，避免输错密码把自己封掉？']=') to the allowlist, to avoid locking yourself out by mistyping the password?'
+        ['）登录的：禁用 IPv6 会立刻断开，且之后只能用 IPv4 登录']=') you logged in with: disabling IPv6 will disconnect you immediately, and you can only log in via IPv4 afterwards'
+        ['）的放行规则？']=') allow rules?'
+        ['），与宿主机共用内核，无法更换内核']='), sharing the host kernel, so the kernel cannot be replaced'
+        ['），可用 Nowhere 菜单「13']='), use Nowhere menu "13'
+        ['），可用「检查并更新」升级']='), use "Check and update" to upgrade'
+        ['），将以 root 运行并修改 sysctl / qdisc 等网络参数']='), it will run as root and modify sysctl / qdisc and other network settings'
+        ['），已中止']='), aborted'
+        ['），无需迁移证书']='), no certificate migration needed'
+        ['），是否跳过下载直接使用？']='), skip the download and use it directly?'
+        ['），本脚本只适配 NW3：URL 语法、密钥格式、对端兼容性都可能已变化']='), this script only supports NW3: URL syntax, key format and peer compatibility may all have changed'
+        ['），管理命令将指向下载到的版本']='), management commands will point to the downloaded version'
+        ['），还没有正式版']='), no stable release yet'
+        ['），避免把自己锁在外面']='), so you don'\''t lock yourself out'
+        ['）：新旧对端不互通，Vector/Egress/Anywhere 必须一起升级']='): old and new peers cannot talk to each other; Vector/Egress/Anywhere must be upgraded together'
+        ['）：期望']='): expected '
+        ['）；本脚本的向导按 NW3 生成配置，可能无法直接使用']='); this script'\''s wizard generates NW3 configs, which may not work directly'
+        ['，不是 v']=', not v'
+        ['，不降级']=', no downgrade'
+        ['，与当前运行的']=', vs. the currently running '
+        ['，但本机公网 IP 疑似']=', but this machine'\''s public IP appears to be '
+        ['，低于 v3.0.0，与 NW3 配置不兼容，已中止']=', below v3.0.0, incompatible with NW3 configs, aborted'
+        ['，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）']=', below v3.0.0, incompatible with this script'\''s NW3 configs, aborted (please check the repo status)'
+        ['，剩余有效期约']=', about '
+        ['，可带 user:pass']=', may include user:pass'
+        ['，安装包可能被篡改或下载损坏']=', the package may be tampered with or corrupted during download'
+        ['，实算']=', computed '
+        ['，将下载最新版']=', the latest version will be downloaded'
+        ['，将按所选通道重装 / 切换版本（节点配置保留）']=', will reinstall / switch versions via the selected channel (node configs kept)'
+        ['，已进入新的协议代（NW']=', entered a new protocol generation (NW'
+        ['，无法启用定时任务']=', cannot enable scheduled tasks'
+        ['，更新？']=', update?'
+        ['，本地实算=']=', locally computed = '
+        ['，本脚本按 v']=', this script manages v'
+        ['，正在从']=', downloading from '
+        ['，请用 Nowhere 菜单 2 重新安装']=', please reinstall via Nowhere menu 2'
+        ['，重启后仍然生效）？']=', still effective after reboot)?'
+        ['，重装后节点可直接恢复']=', nodes can be restored directly after reinstall'
+        ['，重装时可直接沿用端口和 PSK（附加端口也会一并恢复）']=', ports and PSK can be reused directly on reinstall (additional ports restored too)'
+        ['，需要客户端同步升级，不会自动跨大版本']=', clients must upgrade in sync; no automatic cross-major-version upgrade'
+        ['：两者不一致时 HTTP-01 会失败']=': HTTP-01 will fail if they differ'
+        ['：官方标记为预发布，或当前取不到标记信息）']=': officially marked pre-release, or the tag could not be fetched)'
+        ['：客户端需使用支持该版本的 Surge 测试渠道，协议在正式版前仍可能变动，两端要同步']=': clients need a Surge beta channel supporting this version; the protocol may still change before stable, both ends must stay in sync'
+        ['：跨大版本需要客户端同步升级、配置格式也可能变化，本脚本不自动处理']=': cross-major upgrades require clients to upgrade in sync and config formats may change; this script does not handle that automatically'
+        ['；beta=跟随最新测试版 b/rc 及正式版，stable=只跟正式版）']='; beta = follow latest beta b/rc and stable releases, stable = stable releases only)'
+        ['；下载后校验完整性，版本不低于本地才替换）']='; integrity is verified after download, and it only replaces the local copy if the version is not lower)'
+        ['；不加 --force，避免重复签发触发 LE 频率限制）...']='; no --force, to avoid repeated issuance hitting LE rate limits)...'
+        ['；官方建议客户端屏蔽 QUIC 让应用回落到 HTTP/2']='; the official advice is for clients to block QUIC so apps fall back to HTTP/2'
+        ['？（之后的自动更新也会跟随测试通道）']='? (later auto-updates will also follow the beta channel)'
+        ['？（服务会重启，约 2 秒中断；启动失败自动回滚）']='? (the service will restart, ~2s interruption; auto-rollback on startup failure)'
+        ['未知版本']='unknown version'
+        ['未知版本（本地备份二进制）']='unknown version (local backup binary)'
+        ['未探测到，请手动输入']='not detected, please enter manually'
+        ['未设置']='not set'
+        ['无']='none'
+        ['旧版本']='old version'
+        ['版本未知']='unknown version'
+        ['新版本']='new version'
+        ['（自签模式不需要）']='(not needed in self-signed mode)'
+        ['选择']='Choose'
+        ['返回']='Back'
+        ['1/2/3，默认1']='1/2/3, default 1'
+        ['1/2，默认1']='1/2, default 1'
+        ['地址不能为空，且只能包含字母、数字和 . : - _']='Address cannot be empty; only letters, digits and . : - _ are allowed'
+        ['Morph 乱形    :']='Morph shaping    :'
+        ['PSK（回车自动生成 32 位随机串；自定义需 12-255 位，仅限字母、数字、- 和 _）:']='PSK (Enter = auto-generate a 32-char random string; custom must be 12-255 chars, letters, digits, - and _ only):'
+        ['发现新版本:']='New version found:'
+        ['/ 重装 Snell（自动获取官方最新版，默认跟随测试版）']='/ Reinstall Snell (auto-fetch the official latest; follows the beta channel by default)'
+        ['/ 重装 Xray 内核（选择通道：最新预发布 / 正式版 / 指定版本）']='/ Reinstall the Xray core (choose a channel: latest pre-release / stable / specific version)'
+        ['unshaped   - 仅 AES 加密、不做混淆，吞吐约高 10%（官方说明：相当于 Snell v3）']='unshaped   - AES encryption only, no obfuscation; throughput ~10% higher (official note: equivalent to Snell v3)'
+        ['用 jail.d/']='use jail.d/'
+        ['默认']='default'
+        ['第 0 步：选择语言']='Step 0: Choose a language'
+        ['.bak）']='.bak)'
+        ['.tgz）:']='.tgz):'
+        ['/ NW3）']='/ NW3)'
+        ['/ status）']='/ status)'
+        ['/ uninstall）']='/ uninstall)'
+        ['/acme.sh）']='/acme.sh)'
+        ['/tcp）']='/tcp)'
+        ['Fail2ban（']='Fail2ban('
+        ['Nowhere（Portal / Egress：']='Nowhere(Portal / Egress: '
+        ['Shadowsocks 2022（TCP + UDP）']='Shadowsocks 2022(TCP + UDP)'
+        ['Xray（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）']='Xray(SS2022 / VLESS: REALITY Vision, XHTTP REALITY, XHTTP CDN, VLESS Encryption)'
+        ['en）']='en)'
+        ['mode：1']='mode: 1'
+        ['stable）']='stable)'
+        ['v3.3.0）']='v3.3.0)'
+        ['」）']='")'
+        ['（']=' ('
+        ['（TCP']=' (TCP'
+        ['（linux-']=' (linux-'
+        ['）']=')'
+        ['）  mode']=')  mode'
+        ['）:']='):'
+        ['）：']='): '
+        ['）？']=')?'
+        ['，dial4=']=', dial4='
+        ['，dial=']=', dial='
+        ['，morph=']=', morph='
+        ['？']='?'
+        ['时间']='Time'
+        ['大陆流量拦截（geoip:cn / geosite:cn → 拦截）开 / 关']='Block mainland traffic (geoip:cn / geosite:cn) on / off'
+        ['大陆流量拦截（geoip:cn / geosite:cn → 拦截）：']='Mainland traffic block (geoip:cn / geosite:cn): '
+        ['大陆拦截:']='Mainland block:'
+        ['快捷命令已就绪：输入 adam 打开菜单']='Shortcuts ready: type adam to open the menu'
+        ['快捷命令未能安装（服务本身不受影响）']='Shortcuts could not be installed (services are unaffected)'
+        ['修复：重新运行安装脚本文件，或执行：']='Fix: re-run the installer file, or run:'
+        ['快捷命令 adam：正常（指向']='Shortcut adam: OK (points to'
+        ['快捷命令 adam 不可用：请执行']='Shortcut adam is unavailable: please run'
+        ['或重新运行安装脚本']='or re-run the installer'
+        ['该地址不是公网 IP（内网/保留地址），客户端连不上：']='That address is not a public IP (private/reserved); clients cannot connect: '
+        ['该域名解析不到任何 IP，请检查域名/DNS：']='That domain resolves to no IP; check the domain/DNS: '
+        ['该域名解析到的 IP 与本机公网 IP 不一致（可能是 CDN/多线，也可能是填错）：']='That domain resolves to IPs different from this machine'\''s public IP (may be CDN/multi-line, or a typo): '
+        ['本机公网 IP：']='This machine'\''s public IP: '
+        ['仍要使用这个地址？']='Use this address anyway?'
+        ['未能确定公网地址，分享链接暂不可用，请用 Xray 菜单 13 设置公网地址']='Could not determine the public address; share links are unavailable for now. Set it in Xray menu 13.'
+        ['geo 数据缺失，大陆拦截未开启']='Geo data missing; mainland block not enabled'
+        ['geo 数据缺失：本次安装先不开启大陆拦截，稍后用 Xray 菜单 15 再开']='Geo data missing: mainland block will not be enabled for this install; enable it later from Xray menu 15'
+        ['下载 geo 数据失败：']='Failed to download geo data: '
+        ['，大陆拦截暂不可用']='; mainland block unavailable'
+        ['用法：xray cnblock on|off']='Usage: xray cnblock on|off'
+        ['配置重载失败，拦截状态未生效，请查看日志']='Config reload failed; the block state did not take effect. Check the logs.'
+        ['公网地址为空']='Public address is empty'
+        ['未修改']='Not changed'
+        ['快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：']='Shortcut install failed: check that /usr/local/bin is writable and the manager copy exists: '
+        ['VLESS + XHTTP + TLS（直连域名证书，证书自动申请，IP 照常用）']='VLESS + XHTTP + TLS (direct domain cert, auto-issued; IP still works)'
+        ['直连域名证书节点：客户端连域名或本机 IP 均可（SNI 始终为域名，证书只验证域名）']='Direct domain-cert node: clients may connect by domain or by this machine'\''s IP (SNI is always the domain; the cert only validates the domain)'
+        ['域名（须已解析到本机，证书将签发给它）:']='Domain (must already resolve to this machine; the cert is issued for it): '
+        ['ACME 邮箱（证书账户用）:']='ACME email (for the certificate account): '
+        ['邮箱不能为空']='Email cannot be empty'
+        ['证书申请方式：']='Certificate method: '
+        ['HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）']='HTTP-01 (domain resolves to this machine + port 80 open, auto-renewal)'
+        ['Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）']='Cloudflare DNS-01 (needs a CF API key/token, auto-renewal, port 80 can stay closed)'
+        ['已有证书文件（fullchain.pem + privkey.pem）']='Existing certificate files (fullchain.pem + privkey.pem)'
+        ['检测到该域名已有有效证书，直接复用']='Found a valid certificate for this domain; reusing it'
+        ['证书申请中（HTTP-01，需 80 端口）...']='Requesting the certificate (HTTP-01, needs port 80)...'
+        ['证书申请中（Cloudflare DNS-01，约需 30-60 秒）...']='Requesting the certificate (Cloudflare DNS-01, about 30-60s)...'
+        ['域名解析未通过，HTTP-01 很可能失败，仍要继续申请？']='DNS check failed; HTTP-01 will probably fail. Continue anyway?'
+        ['Cloudflare 凭证文件已存在，直接复用']='Cloudflare credentials file already exists; reusing it'
+        ['同一节点两种连法：域名或本机 IP（SNI 始终为域名），用 Xray 菜单 13 切换分享链接地址']='Same node, two addresses: domain or this machine'\''s IP (SNI is always the domain); switch the share-link address in Xray menu 13'
+        ['备用链接（另一地址，SNI 仍为域名）:']='Alternate link (other address, SNI is still the domain): '
+        ['certbot Cloudflare 插件安装失败']='Failed to install the certbot Cloudflare plugin'
+        ['域名:']='Domain: '
+        ['已同步 REALITY serverNames（域名地址可用）']='REALITY serverNames synced (domain address now works)'
+        ['未找到 python3，无法同步 REALITY 域名']='python3 not found; cannot sync REALITY domain'
+        ['同步 REALITY 域名失败：']='Failed to sync REALITY domain: '
+        ['未能确定公网地址，无法生成 Anywhere 分享链接']='Could not determine the public address; cannot generate the Anywhere share link'
+        ['未能确定公网地址，无法生成 Vector 探针链接']='Could not determine the public address; cannot generate the Vector probe link'
+        ['检测到 firewalld 或 cnblock 防火墙链已在运行，跳过 ufw 安装（避免两套防火墙混用）；端口放行请用现有防火墙管理']='firewalld or a cnblock firewall chain is already active; skipping ufw install to avoid mixing two firewalls. Manage port rules with the existing firewall'
+        ['删除后 Snell / Xray / 防火墙 / Fail2ban 的管理入口需改用']='After deletion, use the Snell / Xray / firewall / Fail2ban management entries via '
+        ['Cloudflare 凭证仍被 Xray 域名证书节点使用（xhttp-tls，续期也依赖它），未删除；如 Xray 已卸载或不再用该凭证，请手动删除']='The Cloudflare credential is still used by an Xray domain-certificate node (xhttp-tls, renewal depends on it too) and was not deleted. If Xray no longer uses it, delete it manually'
+        ['Global API Key（需邮箱）']='Global API Key (needs the account email)'
+        ['API Token（建议，只需 Token，需 Zone:DNS:Edit 权限）']='API Token (recommended; only the token is needed, needs Zone:DNS:Edit permission)'
+        ['Cloudflare 邮箱不能为空']='Cloudflare email must not be empty'
+        ['Cloudflare 凭证不能为空']='Cloudflare credential must not be empty'
+        ['Cloudflare 凭证未提供，已中止']='Cloudflare credential not provided; aborted'
+        ['连接串里的 SNI 格式不合法，已忽略']='The SNI in the pasted URL is malformed and was ignored'
+        ['连接串里的 pin 不是 64 位小写十六进制，已忽略']='The pin in the pasted URL is not 64 lowercase hex chars and was ignored'
+        ['连接串里的 dial 不是合法 IP，已重置为 auto']='The dial in the pasted URL is not a valid IP; reset to auto'
+        ['连接串里的 dial4 不是合法 IPv4，已重置为 auto']='The dial4 in the pasted URL is not a valid IPv4 address; reset to auto'
+        ['连接串里的 dial6 不是合法 IPv6，已重置为 auto']='The dial6 in the pasted URL is not a valid IPv6 address; reset to auto'
+        ['连接串里的上行限速不合法，已重置为 0']='The upload rate in the pasted URL is invalid; reset to 0'
+        ['连接串里的下行限速不合法，已重置为 0']='The download rate in the pasted URL is invalid; reset to 0'
+        ['证书副本同步失败，服务可能无法读取新证书']='Failed to sync the certificate copy; the service may not be able to read the new certificate'
+        ['创建专用低权用户失败，继续以 root 运行']='Failed to create the dedicated low-privilege user; continuing to run as root'
+        ['证书副本同步失败，回退 root 运行']='Failed to sync the certificate copy; falling back to running as root'
+        ['低权用户启动失败，回退为 root 运行']='Failed to start as the low-privilege user; falling back to running as root'
+        ['创建临时工作目录失败']='Failed to create a temporary working directory'
+        ['HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80']='HTTP-01 conflicts with listening on port 80: certbot needs exclusive use of port 80 at renewal time'
+        ['80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01']='Port 80 is already in use by another process; stop that service or use DNS-01 before HTTP-01 issuance'
+        ['证书副本已同步']='Certificate copy synced'
+        ['新二进制试运行失败']='New binary failed its trial run'
+        ['DNSPod 凭证不能为空']='DNSPod credentials must not be empty'
+        ['阿里云凭证不能为空']='Alibaba Cloud credentials must not be empty'
+        ['80 端口仍被占用，证书签发已中止']='Port 80 is still in use; certificate issuance aborted'
+        ['注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 8）']='Note: timer unit files are not in the backup; after restoring on another machine, reinstall the timers (Auto-maintenance menu 8)'
+        ['Xray 仍在使用 acme.sh 续期，已保留 acme.sh 的 cron 任务']='Xray still uses acme.sh for renewal; the acme.sh cron task has been kept'
+        ['已移除 acme.sh 的 cron 续期任务']='Removed the acme.sh cron renewal task'
+        ['acme.sh 目录仍保留，如确认不再需要请手动删除：rm -rf ~/.acme.sh']='The acme.sh directory is kept; if you are sure it is no longer needed, delete it manually: rm -rf ~/.acme.sh'
+        ['备份内的角色与本机角色不一致，已中止恢复']='The role in the backup does not match this machine; restore aborted'
+        ['已停用多余的 Snell 附加端口实例：']='Stopped the extra Snell port instance that no longer has a config: '
+        ['分端口模式下 TCP 与 UDP 端口不能相同，已将 UDP 端口改为']='TCP and UDP ports must differ in split mode; the UDP port has been changed to'
+        ['本机现有二进制版本过低或无法识别（需要 Nowhere v3 及以上），将下载最新版']='The existing binary is too old or unrecognized (Nowhere v3 or later is required); downloading the latest version'
+        ['另一个维护或安装任务正在运行']='Another maintenance or install task is running'
+        ['仍要继续吗？']='Continue anyway?'
+        ['配置备份失败，仍要继续吗？']='Config backup failed; continue anyway?'
+        ['配置保存失败，已中止']='Failed to save the config; aborted'
+        ['安装完成，但快捷命令校验未通过（服务本身不受影响），请稍后执行 adam shortcuts 重新安装']='Install finished, but the shortcut check failed (the service itself is unaffected); run adam shortcuts later to reinstall the shortcuts'
+        ['已恢复旧配置']='Old config restored'
+        ['检测到跨大版本升级，确认继续吗？']='This is a cross-major upgrade; continue?'
+        ['迁移重启失败，已恢复旧配置并再次重启，请按日志排查']='Migration restart failed; the old config has been restored and the service restarted again; please check the log'
+        ['迁移失败：已恢复旧配置，但服务仍未启动，请按上方日志排查']='Migration failed: the old config was restored, but the service still did not start; please check the log above'
+        ['旧配置备份失败，迁移继续（失败时无法自动恢复）']='Failed to back up the old config; migration continues (automatic restore will not be possible on failure)'
+        ['已恢复旧配置，服务已恢复运行（仍为 tls=1）']='Old config restored and the service is running again (still tls=1)'
+        ['官方暂无可用版本，当前']='No usable release is available from upstream; current'
+        ['未能获取官方版本信息，本次跳过；当前']='Could not fetch upstream release info; skipping this time; current'
+        ['最新版本属于另一个大版本（v']='The latest release belongs to another major version (v'
+        ['），不自动跨大版本，当前']='); not auto-upgrading across major versions; current'
+        ['限速不合法，已清空（不限速）']='Invalid rate limit; cleared (no limit)'
+        ['出站源 IP 不合法，已重置为 auto']='Invalid outbound source IP; reset to auto'
+        ['，']=','
+        ['1/2，默认2']='1/2, default 2'
+        ['握手超时']='Handshake timeout'
+        ['备份当前二进制失败，回退中止']='Failed to back up the current binary; rollback aborted'
+        ['回退替换失败，当前二进制未动']='Rollback replacement failed; the current binary was not touched'
+        ['备份交换失败，已尽力恢复原二进制']='Backup swap failed; tried to restore the original binary'
+        ['未知证书方式']='Unknown certificate method'
+        ['certbot.timer 启用失败，自动续期可能不工作']='Failed to enable certbot.timer; auto-renewal may not work'
+        ['下载失败或远端内容不完整，请检查网络或脚本地址（现有脚本未改动）']='Download failed or the remote content is incomplete; please check the network or script URL (the existing script was not changed)'
+        ['保活巡检未开启']='Watchdog is off'
+        ['ss 工具缺失，无法列出监听端口（请安装 iproute2）']='The ss tool is missing; cannot list listening ports (please install iproute2)'
+        ['移除定时器后，Xray 证书同步与自动续期将停止（证书到期前需手动续期或重装定时器）']='Removing the timers will stop Xray certificate sync and auto-renewal (renew manually or reinstall the timers before certificates expire)'
+        ['（当前已是 tls=2）']='(already tls=2)'
+        ['Fail2ban 重启后校验失败，请查看: fail2ban-client status']='Fail2ban check failed after restart; see: fail2ban-client status'
+        ['警告：SHA256 校验已被跳过，安装包未经校验']='WARNING: SHA256 verification was skipped; the package was not verified'
+        ['（可能被 GitHub 限流，请稍后重试）']='(possibly rate-limited by GitHub; please retry later)'
+        ['备份二进制无法运行，回退已中止']='The backup binary cannot run; rollback aborted'
+        ['节点 tag 不合法，已跳过证书目录清理']='Invalid node tag; skipped certificate directory cleanup'
+        ['节点 tag 不合法，已中止删除']='Invalid node tag; deletion aborted'
+        ['  入站网卡 listen_interface（如 eth0，回车默认自动）: ']='  Inbound NIC listen_interface (e.g. eth0, Enter for auto): '
+        ['  出站源 IP through（回车默认自动）: ']='  Outbound source IP through (Enter for auto): '
+        ['  出站网卡 interface（如 eth1，回车默认自动）: ']='  Outbound NIC interface (e.g. eth1, Enter for auto): '
+        ['  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ']='  Weight per target (comma-separated, including the main target, e.g. 2,1; Enter for all weight 1): '
+        ['  向目标发送 Proxy Protocol v2（send_proxy）？']='  Send Proxy Protocol v2 to the target (send_proxy)?'
+        ['  启用入站 MPTCP（accept_mptcp）？']='  Enable inbound MPTCP (accept_mptcp)?'
+        ['  启用出站 MPTCP（send_mptcp）？']='  Enable outbound MPTCP (send_mptcp)?'
+        ['  当前机器角色：1) 中转入口机（向外加密 remote_transport）  2) 落地出口机（入站解密 listen_transport）']='  This machine role: 1) Relay entry (encrypt outbound, remote_transport)  2) Exit node (decrypt inbound, listen_transport)'
+        ['  接收来源 Proxy Protocol（accept_proxy）？']='  Accept Proxy Protocol from the source (accept_proxy)?'
+        ['  负载策略：1) roundrobin（加权轮询）  2) iphash（源 IP 哈希）']='  Balance strategy: 1) roundrobin (weighted round-robin)  2) iphash (source IP hash)'
+        ['  选择 [1/2，默认 1]: ']='  Choose [1/2, default 1]: '
+        ['  额外目标列表（逗号分隔，格式 host:port,host2:port）: ']='  Extra targets (comma-separated, host:port,host2:port): '
+        [' 失败']=' failed'
+        [' 安装完成（']=' installed ('
+        [' 已生效：']=' is now active: '
+        [' 已被其他进程占用：']=' is already in use by another process: '
+        ['Host 不合法，回退标准透传']='Invalid host, falling back to plain forwarding'
+        ['Realm ']='Realm '
+        ['Realm 下载或校验失败']='Realm download or verification failed'
+        ['Realm 已卸载']='Realm uninstalled'
+        ['Realm 已重启']='Realm restarted'
+        ['Realm 暂不支持该架构：']='Realm does not support this architecture: '
+        ['Realm 更新失败']='Realm update failed'
+        ['Realm 未安装，规则配置已保存，安装后生效']='Realm is not installed; the rule config is saved and will take effect after installation'
+        ['Realm 端口转发管理']='Realm port forwarding'
+        ['Realm 转发规则列表']='Realm forwarding rules'
+        ['TCP + UDP 双栈（默认）']='TCP + UDP (default)'
+        ['TLS SNI / 域名（如 example.com）: ']='TLS SNI / domain (e.g. example.com): '
+        ['WS Path（回车默认 /ws）: ']='WS path (Enter for /ws): '
+        ['Xray 未安装，转发配置已保存，重装 Xray 后生效']='Xray is not installed; the forwarding config is saved and will take effect after reinstalling Xray'
+        ['Xray 端口转发（dokodemo-door）']='Xray port forwarding (dokodemo-door)'
+        ['Xray 转发已重启']='Xray forwarding restarted'
+        ['Xray 转发规则列表']='Xray forwarding rules'
+        [']？']=']?'
+        ['adam-realm 以专用用户启动失败，改以 root 重试']='adam-realm failed to start as the dedicated user, retrying as root'
+        ['adam-realm 启动失败，请查看日志：journalctl -u adam-realm -n 20 --no-pager']='adam-realm failed to start, see the logs: journalctl -u adam-realm -n 20 --no-pager'
+        ['下载 Realm ']='Download Realm '
+        ['下载的 realm 无法在本机运行，尝试另一构建']='The downloaded realm binary cannot run on this machine, trying the other build'
+        ['仍要继续添加？']='Add it anyway?'
+        ['传输隧道：']=' transport tunnel:'
+        ['伪装 Host（如 cdn.example.com）: ']='Disguise host (e.g. cdn.example.com): '
+        ['伪装域名 Host/SNI（如 cdn.example.com）: ']='Disguise domain host/SNI (e.g. cdn.example.com): '
+        ['入站解密']='Inbound decrypt'
+        ['入站隧道']='inbound tunnel'
+        ['出站加密']='Outbound encrypt'
+        ['出站隧道']='outbound tunnel'
+        ['出网卡:']='out iface:'
+        ['创建 adam-realm 用户失败，改以 root 运行服务']='Failed to create the adam-realm user, running the service as root'
+        ['创建临时文件失败']='Failed to create a temporary file'
+        ['删除转发规则']='Delete a forwarding rule'
+        ['卸载 Realm']='Uninstall Realm'
+        ['压缩包损坏或格式无效']='The archive is damaged or not a valid format'
+        ['同时删除规则配置目录']='Also delete the rule config directory'
+        ['同时删除防火墙中 Realm 端口的放行规则（']='Also delete the firewall allow rules for the Realm ports ('
+        ['启用 / 停用单条规则']='Enable / disable a single rule'
+        ['域名不合法，回退标准透传']='Invalid domain, falling back to plain forwarding'
+        ['备份为空或格式无效']='The backup is empty or invalid'
+        ['备份包含 adam-realm 之外的成员，拒绝导入']='The backup contains entries outside adam-realm; import refused'
+        ['备注含非法字符（\" 或 \），请去掉后重试']='The remark contains illegal characters (" or \); remove them and retry'
+        ['安装 / 更新 Realm']='Install / update Realm'
+        ['导入将覆盖 /etc/adam-realm 现有规则并重启服务，确认？']='Import will overwrite the existing rules in /etc/adam-realm and restart the service. Continue?'
+        ['导入规则（从备份恢复）']='Import rules (restore from backup)'
+        ['导出规则（迁移备份）']='Export rules (migration backup)'
+        ['尚未安装 Realm，请先安装']='Realm is not installed yet, please install it first'
+        ['已保留规则目录']='Rule directory kept'
+        ['已删除规则 ']='Deleted rule '
+        ['已剔除无效目标：']='Removed invalid target: '
+        ['已是最新版本，仍要重新安装？']='Already the latest version. Reinstall anyway?'
+        ['当前没有已启用的转发规则，adam-realm 已停止']='No enabled forwarding rules; adam-realm has stopped'
+        ['恢复后重载仍失败，请检查 Xray 配置与日志']='Reload still failed after restore; check the Xray config and logs'
+        ['找不到文件: ']='File not found: '
+        ['新版本启动失败，自动回滚到旧二进制...']='The new version failed to start, rolling back to the old binary...'
+        ['新规则未能生效，已自动撤回（原有规则不受影响）']='The new rule did not take effect and was rolled back automatically (existing rules are unaffected)'
+        ['新转发规则未能生效，已自动撤回']='The new forwarding rule did not take effect and was rolled back automatically'
+        ['无法获取 Realm 最新版本号，请检查网络']='Cannot get the latest Realm version; check the network'
+        ['暂无可测试的规则']='No rules to test'
+        ['暂无规则']='No rules yet'
+        ['暂无转发规则']='No forwarding rules yet'
+        ['未取到官方 SHA256 摘要，跳过校验（']='Official SHA256 digest unavailable, skipping verification ('
+        ['未找到 Realm 配置目录']='Realm config directory not found'
+        ['未知的 realm 子命令:']='Unknown realm subcommand:'
+        ['未知的 xray fwd 子命令:']='Unknown xray fwd subcommand:'
+        ['本机监听 IP（回车默认 ']='Listen IP on this machine (Enter for default '
+        ['本机监听端口 (1-65535): ']='Listen port on this machine (1-65535): '
+        ['权重数量与目标数不符或含非数字，已按等权生成']='Weight count does not match the target count or contains non-numbers; equal weights generated'
+        ['条规则']='rules'
+        ['查看转发规则列表']='List forwarding rules'
+        ['标准透传（推荐，性能最高，适用于已加密协议）']='Plain forwarding (recommended, fastest, for already-encrypted protocols)'
+        ['正在查询 Realm 官方最新版本...']='Querying the latest official Realm version...'
+        ['测试目标连通性与延迟']='Test target connectivity and latency'
+        ['添加 Realm 转发规则']='Add a Realm forwarding rule'
+        ['添加 Xray 端口转发']='Add Xray port forwarding'
+        ['添加转发规则']='Add a forwarding rule'
+        ['添加转发规则（TCP/UDP/LB/隧道/多网卡）']='Add a forwarding rule (TCP/UDP/LB/tunnel/multi-NIC)'
+        ['源IP:']='src IP:'
+        ['监听 IP 格式不合法']='Invalid listen IP format'
+        ['目标地址格式不合法']='Invalid target address format'
+        ['目标地址（域名、公网 IP 或同区免费内网 IP）: ']='Target address (domain, public IP, or same-region free private IP): '
+        ['目标地址（域名或 IP）: ']='Target address (domain or IP): '
+        ['目标端口 (1-65535): ']='Target port (1-65535): '
+        ['目标证书由 CA 签发（可校验）？']='Is the target certificate CA-issued (verifiable)?'
+        ['确认删除规则 [']='Confirm deleting rule ['
+        ['确认卸载 Realm（含服务与二进制）？']='Confirm uninstalling Realm (including the service and binary)?'
+        ['私钥文件路径: ']='Private key file path: '
+        ['端口 ']='Port '
+        ['纯 TCP']='TCP only'
+        ['纯 UDP']='UDP only'
+        ['纯 UDP（自动跳过 WS/TLS 隧道选项）']='UDP only (WS/TLS tunnel options are skipped automatically)'
+        ['纯TCP']='TCP only'
+        ['纯UDP']='UDP only'
+        ['缺少必需工具：']='Missing required tool: '
+        ['网卡名格式不合法，已忽略']='Invalid NIC name, ignored'
+        ['规则 ']='Rule '
+        ['规则备注（可选）: ']='Rule remark (optional): '
+        ['规则备注（可选，如 香港VPC落地）: ']='Rule remark (optional, e.g. HK VPC exit): '
+        ['规则导入完成']='Rules imported'
+        ['规则已导出至: ']='Rules exported to: '
+        ['规则渲染失败，已跳过：']='Failed to render rule, skipped: '
+        ['规则状态已切换为：']='Rule status changed to: '
+        ['证书或私钥文件不存在，回退内置自签']='Certificate or key file not found, falling back to the built-in self-signed certificate'
+        ['证书文件路径（回车使用 Realm 内置自签）: ']='Certificate file path (Enter to use the Realm built-in self-signed certificate): '
+        ['跟随系统重定向（followRedirect，仅配合 iptables 转发规则使用）？']='Follow system redirect (followRedirect, only with iptables redirect rules)?'
+        ['路径含非法字符（\" 或 \），回退内置自签']='The path contains illegal characters (" or \); falling back to the built-in self-signed certificate'
+        ['路径含非法字符（\" 或 \），回退标准透传']='The path contains illegal characters (" or \); falling back to plain forwarding'
+        ['跳过（纯 UDP 无法做 TCP 握手探测）']='Skipped (pure UDP cannot be probed with a TCP handshake)'
+        ['转发协议：']='Forwarding protocol:'
+        ['转发目标连通性测试（TCP 握手延迟）']='Forwarding target connectivity test (TCP handshake latency)'
+        ['转发规则 ']='Forwarding rule '
+        ['转发配置重载失败，恢复上一版本']='Forwarding config reload failed, restoring the previous version'
+        ['输入导出的 .tgz 备份文件路径: ']='Enter the exported .tgz backup file path: '
+        ['输入规则序号（回车取消）: ']='Enter the rule number (Enter to cancel): '
+        ['返回 Xray 菜单']='Back to the Xray menu'
+        ['选择 [1-3，默认 1]: ']='Choose [1-3, default 1]: '
+        ['选择 [1-4，默认 1]: ']='Choose [1-4, default 1]: '
+        ['配置 WS / TLS / WSS 双端加密隧道？']='Configure a WS / TLS / WSS two-ended encrypted tunnel?'
+        ['配置多目标负载均衡（extra_remotes）？']='Configure multi-target load balancing (extra_remotes)?'
+        ['配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？']='Configure advanced options (outbound source IP/NIC, Proxy Protocol, MPTCP)?'
+        ['重启服务 / 查看状态与日志']='Restart the service / view status and logs'
+        ['非合法 IP，已忽略']='Not a valid IP, ignored'
+        ['额外目标全部无效，已跳过负载均衡']='All extra targets are invalid, load balancing skipped'
+        ['首次安装启动失败，已删除新二进制']='First install failed to start; the new binary has been removed'
+        ['（可用: add / list / toggle / delete / test / restart / status）']='(available: add / list / toggle / delete / test / restart / status)'
+        ['（可用: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall）']='(available: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall)'
+        ['）: ']='): '
+        ['），尝试另一构建']='), trying the other build'
+        ['，请先安装']=', please install it first'
+        ['端口转发']='Port forwarding'
+        ['端口转发（dokodemo-door）']='Port forwarding (dokodemo-door)'
+        ['端口转发（TCP / UDP 转发、负载均衡、WS / TLS 隧道）']='Port forwarding (TCP/UDP forwarding, load balancing, WS/TLS tunnels)'
+        ['realm                      打开 Realm 端口转发菜单']='realm                      Open the Realm port forwarding menu'
+        ['当前没有节点与转发规则，Xray 服务已停止']='No nodes or forwarding rules; the Xray service has stopped'
+        ['当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm 均未安装）']='No service ports managed by this script need allowing (Nowhere / Snell / Xray / Realm are not installed)'
+        ['条转发规则']='forwarding rules'
+        ['个节点']='nodes'
+        ['（无 Nowhere/Snell/Xray/Realm 的 TCP 监听）']='(no Nowhere/Snell/Xray/Realm TCP listeners)'
+        ['（无 Nowhere/Snell/Xray/Realm 的 UDP 监听）']='(no Nowhere/Snell/Xray/Realm UDP listeners)'
+        ['恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm 等现有配置，并重启已启用的服务']='Restore will overwrite the existing configs in /etc/nowhere, /etc/snell, /etc/adam-xray and /etc/adam-realm, and restart the enabled services'
+        ['（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall）']='(available: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall)'
+        ['是否同时卸载 Realm 端口转发？']='Also uninstall Realm port forwarding?'
+        ['规则文件内容非法，已跳过：']='Invalid rule file content, skipped: '
+        ['导入的规则文件内容非法，已恢复原配置']='The imported rule file content is invalid; the previous config has been restored'
+        ['解包失败，已恢复原配置']='Extraction failed; the previous config has been restored'
+        ['规则已导入，但服务重载失败，请检查日志']='Rules imported, but the service failed to reload; check the logs'
+        ['服务重载失败，删除未生效，请检查日志']='Service reload failed; the deletion did not take effect, check the logs'
+        ['转发配置已移除，但 Xray 重载失败，请检查日志']='Forwarding config removed, but Xray reload failed; check the logs'
+        ['已记录 root 运行标记，下次安装不再写入专用用户：']='Recorded the run-as-root marker; the dedicated user will not be written on the next install: '
+        ['改写服务文件失败']='Failed to modify the service file'
+        ['创建 Realm 配置目录失败']='Failed to create the Realm config directory'
+        ['备份旧二进制失败']='Failed to back up the old binary'
+        ['安装 Realm 二进制失败']='Failed to install the Realm binary'
+        ['导出失败']='Export failed'
+        ['规则状态切换失败']='Failed to change the rule status'
+        ['转发配置文件写入失败']='Failed to write the forwarding config file'
+        ['Realm 服务恢复后重载失败，请检查日志']='Realm failed to reload after restore; check the logs'
+        ['路径含 ; 或 =，回退标准透传']='The path contains ; or =; falling back to plain forwarding'
+        ['路径含 ; 或 =，回退内置自签']='The path contains ; or =; falling back to the built-in self-signed certificate'
+        ['一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm）']='Allow this script'\''s service ports in one click (SSH / Nowhere / Snell / Xray / Realm)'
+        ['规则文件内容非法，已恢复原配置']='Invalid rule file content; the previous config has been restored'
+        ['版本号：']='Version:'
+        ['域名反代']='Reverse proxy'
+        ['域名反代（Caddy 多域名自动 HTTPS / Cloudflare Tunnel）']='Reverse proxy (Caddy multi-domain HTTPS / Cloudflare Tunnel)'
+        ['反代']='Proxy'
+        ['Caddy 多域名反代 + Cloudflare Tunnel']='Caddy multi-domain reverse proxy + Cloudflare Tunnel'
+        ['一键域名反代管理']='One-click Domain Reverse Proxy'
+        ['安装 / 更新 Caddy（官方仓库）']='Install / update Caddy (official repo)'
+        ['添加域名反代站点（自动 HTTPS）']='Add domain reverse proxy site (auto HTTPS)'
+        ['查看反代站点列表']='List reverse proxy sites'
+        ['启用 / 停用站点']='Enable / disable a site'
+        ['编辑反代站点']='Edit a reverse proxy site'
+        ['删除反代站点']='Delete a reverse proxy site'
+        ['查看当前 Caddyfile 配置']='View effective Caddyfile config'
+        ['Caddy 自动更新 开 / 关']='Caddy auto-update on / off'
+        ['重启 Caddy / 查看状态与日志']='Restart Caddy / view status & logs'
+        ['卸载 Caddy']='Uninstall Caddy'
+        ['Cloudflare Tunnel 管理（Zero Trust / 临时隧道）']='Cloudflare Tunnel management (Zero Trust / quick tunnel)'
+        ['安装 / 更新 cloudflared（官方仓库）']='Install / update cloudflared (official repo)'
+        ['配置持久化隧道（粘贴 Zero Trust Token）']='Configure persistent tunnel (paste Zero Trust Token)'
+        ['启动临时快速隧道（trycloudflare.com，免配置）']='Start temporary quick tunnel (trycloudflare.com)'
+        ['查看隧道状态与日志']='View tunnel status & logs'
+        ['重启持久化隧道']='Restart persistent tunnel'
+        ['停用 / 卸载 cloudflared']='Disable / uninstall cloudflared'
+        ['尚未安装 Caddy，请先安装']='Caddy is not installed yet, please install it first'
+        ['尚未安装 cloudflared，请先安装']='cloudflared is not installed yet, please install it first'
+        ['正在查询 Caddy 官方最新版本...']='Querying latest official Caddy version...'
+        ['正在查询 cloudflared 官方最新版本...']='Querying latest official cloudflared version...'
+        ['无法获取 Caddy 最新版本号，请检查网络']='Cannot fetch latest Caddy version, check network'
+        ['无法获取 cloudflared 最新版本号，请检查网络']='Cannot fetch latest cloudflared version, check network'
+        ['Caddy 安装完成']='Caddy installed'
+        ['Caddy 已卸载']='Caddy uninstalled'
+        ['cloudflared 安装完成']='cloudflared installed'
+        ['cloudflared 已卸载']='cloudflared uninstalled'
+        ['暂无反代站点']='No reverse proxy sites yet'
+        ['反代站点列表']='Reverse proxy sites'
+        ['反代模式：']='Reverse proxy mode:'
+        ['标准反代（本机/内网服务，自动 HTTPS + WebSocket/XHTTP 透传，推荐）']='Standard proxy (local/LAN service, auto HTTPS + WebSocket/XHTTP, recommended)'
+        ['反代远程站点（自动改写 Host 头，支持 HTTPS 上游）']='Proxy remote website (auto Host header rewrite, HTTPS upstream supported)'
+        ['HTTP 明文反代 / 自定义端口（适合套 Cloudflare CDN 灵活模式或非 443 端口）']='Plain HTTP / custom port proxy (for Cloudflare Flexible or non-443 port)'
+        ['上游目标地址（如 127.0.0.1:8080 或 https://example.com）: ']='Upstream target (e.g. 127.0.0.1:8080 or https://example.com): '
+        ['反代站点已生效：']='Reverse proxy site is active: '
+        ['Caddy 配置校验失败，已自动撤回改动']='Caddy config validation failed; changes rolled back automatically'
+        ['输入站点序号（回车取消）: ']='Enter site number (Enter to cancel): '
+        ['站点状态已切换为：']='Site status changed to: '
+        ['确认删除反代站点 ']='Confirm deleting reverse proxy site '
+        ['已删除反代站点 ']='Deleted reverse proxy site '
+        ['输入本地服务端口（如 8080，将映射到 *.trycloudflare.com）: ']='Enter local service port (e.g. 8080, mapped to *.trycloudflare.com): '
+        ['粘贴 Cloudflare Zero Trust Tunnel Token（输入不回显）: ']='Paste Cloudflare Zero Trust Tunnel Token (hidden): '
+        ['Token 不能为空']='Token cannot be empty'
+        ['Cloudflare Tunnel 持久化服务已启动']='Cloudflare Tunnel persistent service started'
+        ['Cloudflare Tunnel 启动失败，请查看日志：journalctl -u adam-cloudflared -n 20 --no-pager']='Cloudflare Tunnel failed to start; see logs: journalctl -u adam-cloudflared -n 20 --no-pager'
+        ['批量添加转发规则（端口段 / 多端口）']='Batch add forwarding rules (port range / multi-port)'
+        ['编辑已有转发规则']='Edit an existing forwarding rule'
+        ['查看完整有效配置（TOML）']='View effective TOML config'
+        ['全局网络 / DNS 参数调优']='Global network / DNS tuning'
+        ['Realm 自动更新 开 / 关']='Realm auto-update on / off'
+        ['Nowhere 自动更新（仅 NW3 同代安全更新）']='Nowhere auto-update (NW3 same-major only)'
+        ['Realm 跟随官方发布自动更新']='Realm auto-update following official releases'
+        ['Caddy 跟随官方发布自动更新']='Caddy auto-update following official releases'
+        ['Nowhere 跟随官方发布自动更新（仅 NW3 同代）']='Nowhere auto-update following official releases (NW3 only)'
+        ['该端口已被本模块其他规则占用，请换一个']='Port is already used by another rule in this module; choose another'
+        ['UDP 端口已被占用，请换一个']='UDP port is already in use; choose another'
+        ['批量添加完成：成功 ']='Batch add complete: succeeded '
+        ['，跳过 ']=', skipped '
+        ['规则已更新并生效：']='Rule updated and active: '
+        ['规则更新失败，已自动恢复原配置']='Rule update failed; original config restored automatically'
+        ['端口段或逗号列表（如 10000-10010 或 8080,8443,9000）: ']='Port range or comma list (e.g. 10000-10010 or 8080,8443,9000): '
+        ['单次批量最多支持 100 个端口，请缩小范围']='Batch limit is 100 ports per operation; please narrow the range'
+        ['目标端口模式：1) 同端口一对一映射（推荐）  2) 全部指向同一个目标端口']='Target port mode: 1) 1:1 same port mapping (recommended)  2) All to one target port'
+        ['个站点']='sites'
+        ['未知的 proxy 子命令:']='Unknown proxy subcommand:'
+        ['隧道已运行']='tunnel active'
+        ['未配置']='unconfigured'
+        ['已配置']='configured'
+        ['（可用: install / add / batch / edit / list / toggle / delete / test / config / tune / auto / restart / status / logs / export / import / uninstall）']='(available: install / add / batch / edit / list / toggle / delete / test / config / tune / auto / restart / status / logs / export / import / uninstall)'
+        ['proxy                      打开域名反代菜单（Caddy / Cloudflare Tunnel）']='proxy                      Open domain reverse proxy menu (Caddy / Cloudflare Tunnel)'
+        ['caddy / tunnel             直接操作 Caddy 反代或 Cloudflare Tunnel']='caddy / tunnel             Manage Caddy reverse proxy or Cloudflare Tunnel directly'
+        ['每日定时重启 Snell / Xray / Nowhere / Realm（随每日维护执行）']='Daily scheduled restart of Snell / Xray / Nowhere / Realm'
+        ['恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm、/etc/adam-caddy、/etc/adam-cloudflared 等现有配置，并重启已启用的服务']='Restore will overwrite existing configs in /etc/nowhere, /etc/snell, /etc/adam-xray, /etc/adam-realm, /etc/adam-caddy and /etc/adam-cloudflared, and restart enabled services'
+        ['一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm / Caddy）']='Allow this script'\''s service ports in one click (SSH / Nowhere / Snell / Xray / Realm / Caddy)'
+        ['当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm / Caddy 均未安装）']='No service ports managed by this script need allowing (Nowhere / Snell / Xray / Realm / Caddy are not installed)'
+        ['（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）']='(no Nowhere/Snell/Xray/Realm/Caddy TCP listeners)'
+        ['（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）']='(no Nowhere/Snell/Xray/Realm/Caddy UDP listeners)'
+        ['（存在端口未监听：']='(port(s) not listening: '
+        ['生成随机密钥/UUID 失败，请检查 openssl 与 Xray 二进制']='Failed to generate random key/UUID; check openssl and Xray binary'
+        ['Nowhere 自动更新:']='Nowhere auto-update:'
+        ['Realm 自动更新:']='Realm auto-update:'
+        ['Caddy 自动更新:']='Caddy auto-update:'
+        ['是否同时卸载域名反代（Caddy / Cloudflare Tunnel）？']='Also uninstall reverse proxy (Caddy / Cloudflare Tunnel)?'
+        ['，不自动跨大版本']=', not auto-upgrading across major versions'
+        ['跳过上游 TLS 证书校验（自签上游选 y）？']='Skip upstream TLS verification (choose y for self-signed upstream)?'
+    )
+    _I18N_INIT=1
+}
+
 L() {
-    if [ "${ADAM_LANG:-zh}" != "en" ]; then printf '%s' "$1"; return 0; fi
-    case "$1" in
-        '信息') printf '%s' 'INFO' ;;
-        '成功') printf '%s' 'OK' ;;
-        '警告') printf '%s' 'WARN' ;;
-        '错误') printf '%s' 'ERROR' ;;
-        '已取消') printf '%s' 'Cancelled' ;;
-        '无效选择') printf '%s' 'Invalid choice' ;;
-        '按回车返回菜单...') printf '%s' 'Press Enter to return to the menu...' ;;
-        '请选择操作') printf '%s' 'Choose an action' ;;
-        '请选择') printf '%s' 'Choose' ;;
-        '协议安装') printf '%s' 'Protocols' ;;
-        '系统管理') printf '%s' 'System' ;;
-        '退出') printf '%s' 'Exit' ;;
-        '返回主菜单') printf '%s' 'Back to main menu' ;;
-        '安装与配置') printf '%s' 'Install & configure' ;;
-        '运行与排查') printf '%s' 'Run & diagnose' ;;
-        '证书') printf '%s' 'Certificates' ;;
-        '版本') printf '%s' 'Versions' ;;
-        '当前状态') printf '%s' 'Status' ;;
-        '脚本更新') printf '%s' 'Script update' ;;
-        '自动维护') printf '%s' 'Auto maintenance' ;;
-        '防火墙') printf '%s' 'Firewall' ;;
-        '系统调优') printf '%s' 'System tuning' ;;
-        '一键诊断') printf '%s' 'One-click diagnostics' ;;
-        '备份配置') printf '%s' 'Back up config' ;;
-        '恢复配置') printf '%s' 'Restore config' ;;
-        '清理日志') printf '%s' 'Clean up logs' ;;
-        '保活巡检定时器') printf '%s' 'Watchdog timer' ;;
-        '每日维护定时器') printf '%s' 'Daily maintenance timer' ;;
-        '运行中') printf '%s' 'running' ;;
-        '未启用') printf '%s' 'disabled' ;;
-        '未安装') printf '%s' 'not installed' ;;
-        '开') printf '%s' 'on' ;;
-        '关') printf '%s' 'off' ;;
-        '当前版本') printf '%s' 'Current version' ;;
-        '每日自动从仓库更新') printf '%s' 'Daily auto-update from repo' ;;
-        '一键管理脚本') printf '%s' 'Manager' ;;
-        '调优') printf '%s' 'Tuning' ;;
-        '安装、配置、连接信息、证书、版本') printf '%s' 'Install, config, links, certs, versions' ;;
-        '安装、跟随测试版更新、健康检查、配置') printf '%s' 'Install, beta updates, health check, config' ;;
-        '更新本管理脚本 / 重装快捷命令') printf '%s' 'Update manager / reinstall shortcuts' ;;
-        'ufw：安装、放行与删除端口、启停') printf '%s' 'ufw: install, allow/remove ports, on/off' ;;
-        '封禁时长、被封 IP、启停') printf '%s' 'Ban time, banned IPs, on/off' ;;
-        'TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6') printf '%s' 'TCP tuning tcpfit / XanMod kernel / DNS / IPv4/IPv6 priority / disable IPv6' ;;
-        '保活巡检 / 脚本与内核自动更新') printf '%s' 'Watchdog / auto-update scripts & kernels' ;;
-        '提示：可直接输入') printf '%s' 'Tip: run' ;;
-        '唤出此菜单，或用') printf '%s' 'for this menu, or use' ;;
-        '快捷执行；') printf '%s' 'for shortcuts;' ;;
-        '查看全部子命令') printf '%s' 'to see all commands' ;;
-        '安装') printf '%s' 'Install' ;;
-        '（向导）') printf '%s' ' (wizard)' ;;
-        '本机安装为 Egress 服务') printf '%s' 'Install this machine as Egress' ;;
-        '（出口机用，QUIC 或 TLS 载体）') printf '%s' ' (exit node, QUIC or TLS)' ;;
-        '重新配置') printf '%s' 'Reconfigure' ;;
-        '（修改参数）') printf '%s' ' (change settings)' ;;
-        '查看连接信息 / 导入链接') printf '%s' 'Show connection info / import links' ;;
-        '生成 v3 共享密钥') printf '%s' 'Generate v3 shared key' ;;
-        '（32 位十六进制）') printf '%s' ' (32 hex chars)' ;;
-        '查看服务状态') printf '%s' 'Show service status' ;;
-        '（含 nowhere status）') printf '%s' ' (incl. nowhere status)' ;;
-        '查看实时日志') printf '%s' 'Show live logs' ;;
-        '重启服务') printf '%s' 'Restart service' ;;
-        '连通性探测 probe') printf '%s' 'Connectivity probe' ;;
-        '（真实 TCP Flow 测试）') printf '%s' ' (real TCP Flow test)' ;;
-        '查看证书指纹') printf '%s' 'Show cert fingerprint' ;;
-        '（tls=1 自签 / tls=2 文件证书）') printf '%s' ' (tls=1 self-signed / tls=2 file cert)' ;;
-        '检查证书状态 / 手动续期') printf '%s' 'Check cert status / manual renewal' ;;
-        '查看当前版本 / 检查更新') printf '%s' 'Show version / check updates' ;;
-        '更新 Nowhere 二进制') printf '%s' 'Update Nowhere binary' ;;
-        '（更新到最新版）') printf '%s' ' (to latest)' ;;
-        '选择指定版本') printf '%s' 'Select version' ;;
-        '（版本切换 / 回退到历史版本）') printf '%s' ' (switch / roll back)' ;;
-        '快速回退到上一个版本') printf '%s' 'Quick rollback to previous version' ;;
-        '卸载') printf '%s' 'Uninstall' ;;
-        'tls=1 升级为真实证书 (tls=2)') printf '%s' 'Upgrade tls=1 to a real cert (tls=2)' ;;
-        '立即更新本管理脚本') printf '%s' 'Update manager now' ;;
-        '（从仓库拉取）') printf '%s' ' (pull from repo)' ;;
-        '重装快捷命令') printf '%s' 'Reinstall shortcuts' ;;
-        '（adam / zt / pz / cxpz / cq）') printf '%s' ' (adam / zt / pz / cxpz / cq)' ;;
-        '语言（中文 / English）') printf '%s' 'Language (中文 / English)' ;;
-        '保活巡检（每 5 分钟；服务未运行或端口未监听时自动重启）') printf '%s' 'Watchdog (every 5 min; restart when down or port not listening)' ;;
-        '管理脚本自动从仓库拉取更新（每日）') printf '%s' 'Daily auto-update of manager from repo' ;;
-        '每日定时重启 Snell / Xray / Nowhere（随每日维护执行）') printf '%s' 'Daily scheduled restart of Snell / Xray / Nowhere' ;;
-        '立即执行一次维护与巡检') printf '%s' 'Run maintenance & watchdog once now' ;;
-        '查看维护记录') printf '%s' 'Show maintenance log' ;;
-        '重装定时器（修复）') printf '%s' 'Reinstall timers (repair)' ;;
-        '备份全部配置') printf '%s' 'Back up all configs' ;;
-        '恢复配置（从备份文件）') printf '%s' 'Restore config (from backup file)' ;;
-        '清理日志（保留 200M）') printf '%s' 'Clean up logs (keep 200M)' ;;
-        '用法') printf '%s' 'Usage' ;;
-        '主菜单') printf '%s' 'Main menu' ;;
-        '回车默认') printf '%s' 'Enter for default' ;;
-        '管理') printf '%s' 'Management' ;;
-        '不带参数 = 打开主菜单') printf '%s' 'Open the main menu when no argument is given' ;;
-        '命令') printf '%s' 'command' ;;
-        '切换界面语言') printf '%s' 'Switch UI language' ;;
-        '升级为真实证书') printf '%s' 'Upgrade to a real certificate' ;;
-        '移除') printf '%s' 'Remove ' ;;
-        '全部定时器') printf '%s' 'all timers' ;;
-        '跟随官方发布自动更新') printf '%s' 'Auto-update following official releases' ;;
-        '通道') printf '%s' 'channel' ;;
-        '保活巡检') printf '%s' 'Watchdog' ;;
-        '端口') printf '%s' 'Port' ;;
-        '通道）') printf '%s' 'channel)' ;;
-        '请选择:') printf '%s' 'Please choose:' ;;
-        '天') printf '%s' 'days' ;;
-        '天，域名匹配），跳过申请') printf '%s' 'days, domain matches), skipping issuance' ;;
-        '当前版本:') printf '%s' 'Current version:' ;;
-        '检测到有效证书（剩余') printf '%s' 'Detected a valid certificate (remaining ' ;;
-        '证书申请成功') printf '%s' 'Certificate issued successfully' ;;
-        '附加端口') printf '%s' 'Additional ports' ;;
-        'TCP 端口') printf '%s' 'TCP port' ;;
-        '当前状态:') printf '%s' 'Current status:' ;;
-        '服务状态') printf '%s' 'Service status' ;;
-        '查看连接信息」重试') printf '%s' 'view connection info" and retry' ;;
-        '次') printf '%s' 'times' ;;
-        '脚本') printf '%s' 'script' ;;
-        'Fail2ban 已重启') printf '%s' 'Fail2ban restarted' ;;
-        'PSK 不符合要求') printf '%s' 'PSK does not meet the requirements' ;;
-        'dial4（IPv4 源地址，回车默认 auto）:') printf '%s' 'dial4 (IPv4 source address, Enter = auto):' ;;
-        'dial6（IPv6 源地址，回车默认 auto）:') printf '%s' 'dial6 (IPv6 source address, Enter = auto):' ;;
-        '仍要继续？') printf '%s' 'Continue anyway?' ;;
-        '保活') printf '%s' 'keepalive' ;;
-        '内失败') printf '%s' ', ' ;;
-        '域名格式不正确') printf '%s' 'Invalid domain format' ;;
-        '安装完成') printf '%s' 'Installation complete' ;;
-        '实时日志') printf '%s' 'Live logs' ;;
-        '实时日志（Ctrl+C 返回）') printf '%s' 'Live logs (Ctrl+C to go back)' ;;
-        '将安装:') printf '%s' 'Will install:' ;;
-        '已保留') printf '%s' 'Kept' ;;
-        '当前最新版为') printf '%s' 'Latest version:' ;;
-        '最新版本:') printf '%s' 'Latest version:' ;;
-        '未找到配置文件，请先执行安装') printf '%s' 'Config file not found; please install first' ;;
-        '未知') printf '%s' 'unknown' ;;
-        '正在获取最新版本号...') printf '%s' 'Fetching the latest version...' ;;
-        '确认继续') printf '%s' 'Confirm to continue' ;;
-        '端口不合法（1-65535）') printf '%s' 'Invalid port (1-65535)' ;;
-        '自动更新:') printf '%s' 'Auto-update:' ;;
-        '证书签发后校验未通过，请看上方告警') printf '%s' 'Certificate verification failed after issuance; see the warnings above' ;;
-        '输入不合法，未做任何修改') printf '%s' 'Invalid input; nothing changed' ;;
-        '随机 PSK 生成失败') printf '%s' 'Failed to generate a random PSK' ;;
-        '（当前') printf '%s' ' (current ' ;;
-        ',端口...') printf '%s' ', ports...' ;;
-        '1-4，默认1') printf '%s' '1-4, default 1' ;;
-        '4=仅IPv4 / 6=仅IPv6 / 回车=不限') printf '%s' '4 = IPv4 only / 6 = IPv6 only / Enter = no limit' ;;
-        'Egress出口机  :') printf '%s' 'Egress machine  :' ;;
-        'IP 地址格式不合法:') printf '%s' 'Invalid IP address format:' ;;
-        'Morph Prelude 策略') printf '%s' 'Morph Prelude policy' ;;
-        'Portal 出口   :') printf '%s' 'Portal egress   :' ;;
-        'Portal 地址 :') printf '%s' 'Portal address :' ;;
-        'Prelude 策略  :') printf '%s' 'Prelude policy  :' ;;
-        'REALITY 密钥生成失败') printf '%s' 'Failed to generate the REALITY key' ;;
-        'dial 不是合法 IP 字面量，已重置为 auto') printf '%s' 'dial is not a valid IP literal; reset to auto' ;;
-        'dial4 不是合法 IPv4 字面量，已重置为 auto') printf '%s' 'dial4 is not a valid IPv4 literal; reset to auto' ;;
-        'tcpfit 子命令') printf '%s' 'tcpfit subcommand' ;;
-        'tls=1 升级为真实证书') printf '%s' 'Upgrade tls=1 to a real certificate' ;;
-        'tls=1 证书只存在内存中，Nowhere 每次重启后指纹都会变化，pin= 需同步重新生成（Nowhere 菜单 4 或 pz 命令）') printf '%s' 'The tls=1 certificate lives only in memory; its fingerprint changes on every Nowhere restart, so pin= must be regenerated in sync (Nowhere menu 4 or the pz command)' ;;
-        'unsafe-raw 为明文传输，确认？') printf '%s' 'unsafe-raw sends traffic in plaintext. Confirm?' ;;
-        'unsafe-raw（明文，仅可信内网）') printf '%s' 'unsafe-raw (plaintext, trusted internal networks only)' ;;
-        '一键导入深链（手机点击，需 Anywhere 已支持 NW3）：') printf '%s' 'One-tap import deep link (tap on your phone; Anywhere must already support NW3):' ;;
-        '下载失败:') printf '%s' 'Download failed:' ;;
-        '严格') printf '%s' 'strict' ;;
-        '传输模式      :') printf '%s' 'Transport mode      :' ;;
-        '依赖安装失败，请检查 apt 源/网络') printf '%s' 'Failed to install dependencies; please check your apt sources / network' ;;
-        '保活巡检定时器未运行') printf '%s' 'Keepalive watchdog timer is not running' ;;
-        '保活巡检定时器运行中（每 5 分钟）') printf '%s' 'Keepalive watchdog timer is running (every 5 minutes)' ;;
-        '停用') printf '%s' 'Disable ' ;;
-        '健康检查通过') printf '%s' 'Health check passed' ;;
-        '健康检查（只检测）') printf '%s' 'Health check (check only)' ;;
-        '共享密钥      :') printf '%s' 'Shared key      :' ;;
-        '出站源IP      :') printf '%s' 'Outbound source IP      :' ;;
-        '删除') printf '%s' 'Delete ' ;;
-        '删除后可能无法再通过 SSH 登录，确认删除？') printf '%s' 'After deletion you may no longer be able to log in via SSH. Confirm deletion?' ;;
-        '升级到') printf '%s' 'Upgrade to' ;;
-        '发现') printf '%s' 'Found' ;;
-        '启用') printf '%s' 'Enable ' ;;
-        '启用失败，请查看: ufw status verbose') printf '%s' 'Failed to enable; see: ufw status verbose' ;;
-        '回源证书剩余') printf '%s' 'Origin certificate remaining' ;;
-        'GitHub API 被限流，取不到预发布标记；stable 通道暂按最新发布继续，请稍后确认是否为正式版') printf '%s' 'GitHub API rate-limited, prerelease flag unavailable; stable channel proceeds with the latest release for now, please confirm it is a stable release later' ;;
-        '未能确定公网地址，无法生成 Snell 分享行') printf '%s' 'Could not determine the public address, cannot generate the Snell share line' ;;
-        '证书剩余') printf '%s' 'Certificate remaining' ;;
-        '证书同步失败') printf '%s' 'Certificate sync failed' ;;
-        '备份文件包含非法路径，已中止') printf '%s' 'Backup contains an illegal path, aborted' ;;
-        'Cloudflare 凭证仍被 Nowhere 使用（域名证书续期），未删除') printf '%s' 'Cloudflare credentials are still used by Nowhere (domain certificate renewal), not deleted' ;;
-        '删除保存的 Cloudflare API 凭证（/etc/cloudflare/credentials.ini）？') printf '%s' 'Delete the saved Cloudflare API credentials (/etc/cloudflare/credentials.ini)?' ;;
-        '已删除 Cloudflare 凭证') printf '%s' 'Cloudflare credentials deleted' ;;
-        '已移除 Xray 的 certbot 续期 cron 任务') printf '%s' 'Xray certbot renewal cron entry removed' ;;
-        '（REALITY Vision / XHTTP REALITY / XHTTP CDN / XHTTP TLS / VLESS Encryption / SS2022）') printf '%s' '(REALITY Vision / XHTTP REALITY / XHTTP CDN / XHTTP TLS / VLESS Encryption / SS2022)' ;;
-        '新内核未通过现有配置校验，保持当前版本不变（上游可能有不兼容改动）') printf '%s' 'The new kernel failed the existing config check, keeping the current version (upstream may have incompatible changes)' ;;
-        '现有节点在该版本下未能启动，正在回滚到旧内核') printf '%s' 'Existing nodes failed to start with this version, rolling back to the previous kernel' ;;
-        '已回滚到旧内核并重启') printf '%s' 'Rolled back to the previous kernel and restarted' ;;
-        '回滚后仍未启动，请查看日志：journalctl -u adam-xray -n 50') printf '%s' 'Still not running after rollback, check the logs: journalctl -u adam-xray -n 50' ;;
-        '本地已是仓库最新版本') printf '%s' 'Local copy is already the latest from the repo' ;;
-        'Xray 配置改动后校验失败，已恢复原文件') printf '%s' 'Xray config failed validation after the change, restored the original files' ;;
-        '端口不合法（1-65535），已用默认 443') printf '%s' 'Invalid port (1-65535), using the default 443' ;;
-        '回车保持') printf '%s' 'Press Enter to keep' ;;
-        '在手机浏览器打开，自动跳转 Anywhere 导入（需 Anywhere 支持 NW3）：') printf '%s' 'Open in your phone browser to auto-jump to Anywhere import (Anywhere must support NW3):' ;;
-        '域名') printf '%s' 'Domain' ;;
-        '官方最新:') printf '%s' 'Official latest:' ;;
-        '官方有新版本') printf '%s' 'A newer official version is available' ;;
-        '已切换到') printf '%s' 'Switched to' ;;
-        '已启用') printf '%s' 'Enabled' ;;
-        '已回滚，服务恢复运行') printf '%s' 'Rolled back; service is running again' ;;
-        '已固定在') printf '%s' 'Pinned to' ;;
-        '已安装') printf '%s' 'Installed' ;;
-        '已是') printf '%s' 'Already' ;;
-        '已是仓库最新（') printf '%s' 'Already the latest in the repo (' ;;
-        '已是最新:') printf '%s' 'Already the latest:' ;;
-        '已更新:') printf '%s' 'Updated:' ;;
-        '已经是最新版本') printf '%s' 'Already the latest version' ;;
-        '已设为开机自启') printf '%s' 'Set to start on boot' ;;
-        '已跳过') printf '%s' 'Skipped' ;;
-        '已重启') printf '%s' 'Restarted' ;;
-        '序号无效') printf '%s' 'Invalid number' ;;
-        '恢复为修改前    0') printf '%s' 'Restore to before changes    0' ;;
-        '放行失败:') printf '%s' 'Failed to allow:' ;;
-        '无法获取版本号（GitHub API 与 releases/latest 跳转均失败），请检查网络') printf '%s' 'Cannot fetch the version (both the GitHub API and the releases/latest redirect failed); please check the network' ;;
-        '是否改用 dial4/dial6 分别绑定 IPv4/IPv6 目标出站源地址？') printf '%s' 'Use dial4/dial6 to bind IPv4/IPv6 outbound source addresses separately?' ;;
-        '更新时间:') printf '%s' 'Updated at:' ;;
-        '服务未运行（状态:') printf '%s' 'Service not running (status: ' ;;
-        '服务运行中（systemd 自动重启次数:') printf '%s' 'Service running (systemd auto-restart count: ' ;;
-        '未加入内核保留端口') printf '%s' 'Not added to kernel reserved ports' ;;
-        '未监听') printf '%s' 'Not listening' ;;
-        '格式不合法:') printf '%s' 'Invalid format:' ;;
-        '正在查询官方发布 ...') printf '%s' 'Querying the official releases ...' ;;
-        '正在监听') printf '%s' 'Listening' ;;
-        '没有在监听') printf '%s' 'Not listening' ;;
-        '版本     :') printf '%s' 'Version     :' ;;
-        '版本通道：') printf '%s' 'Version channel:' ;;
-        '生成失败：未能获取到有效的连接参数，可稍后通过Nowhere 菜单「4') printf '%s' 'Failed to generate: could not get valid connection parameters; retry later via Nowhere menu "4' ;;
-        '生成（载体') printf '%s' 'Generating (carrier' ;;
-        '的配置？（使用该端口的客户端将无法连接）') printf '%s' ' config? (Clients using this port will no longer be able to connect)' ;;
-        '监听     :') printf '%s' 'Listening     :' ;;
-        '监听中') printf '%s' 'Listening' ;;
-        '目标版本') printf '%s' 'Target version' ;;
-        '端口:') printf '%s' 'Port:' ;;
-        '端口超出范围:') printf '%s' 'Port out of range:' ;;
-        '续期失败，请看上方报错') printf '%s' 'Renewal failed; see the error above' ;;
-        '自动更新 :') printf '%s' 'Auto-update :' ;;
-        '自动更新已开启（') printf '%s' 'Auto-update enabled (' ;;
-        '自动更新未开启') printf '%s' 'Auto-update is off' ;;
-        '自定义') printf '%s' 'Custom' ;;
-        '节点') printf '%s' 'Node' ;;
-        '解压失败') printf '%s' 'Extraction failed' ;;
-        '证书已过期') printf '%s' 'Certificate expired' ;;
-        '证书申请失败，请检查：1') printf '%s' 'Certificate issuance failed; please check: 1' ;;
-        '证书签发后校验未通过') printf '%s' 'Certificate verification failed after issuance' ;;
-        '说明：') printf '%s' 'Note:' ;;
-        '输入不合法（须为 0..2147483647 的整数），重置为0') printf '%s' 'Invalid input (must be an integer in 0..2147483647); reset to 0' ;;
-        '输入不合法，重置为 0') printf '%s' 'Invalid input; reset to 0' ;;
-        '连接串：') printf '%s' 'Connection string:' ;;
-        '选择:') printf '%s' 'Select:' ;;
-        '通道:') printf '%s' 'Channel:' ;;
-        '通道最新版本') printf '%s' 'Latest version on this channel' ;;
-        '通道有 v') printf '%s' 'Channel has v' ;;
-        '链接：') printf '%s' 'Link:' ;;
-        '防火墙未放行') printf '%s' 'Firewall has not allowed it' ;;
-        '项问题，可用「一键修复」处理') printf '%s' ' issue(s); use "One-click repair"' ;;
-        '（暂无记录）') printf '%s' '(no records yet)' ;;
-        '（适配 Nowhere') printf '%s' ' (for Nowhere ' ;;
-        '，不自动更新') printf '%s' ', no auto-update' ;;
-        '，实际') printf '%s' ', actual ' ;;
-        '，开始更新') printf '%s' ', updating now' ;;
-        '.bak），重新运行 adam 生效') printf '%s' '.bak), re-run adam to take effect' ;;
-        '.conf、jail.local 之后，同名项以这里为准。') printf '%s' '.conf and jail.local; same-named items here take precedence.' ;;
-        '.dgst，为安全起见中止') printf '%s' '.dgst; aborted for safety' ;;
-        '.local：读取顺序在 jail.conf、jail.d/') printf '%s' '.local: read order is after jail.conf and jail.d/' ;;
-        '/boot 可用空间只有') printf '%s' '/boot has only ' ;;
-        '/etc/resolv.conf 被加了不可修改属性（chattr +i）—— 通常是 cnblock 的 DNS 黑洞在接管解析') printf '%s' '/etc/resolv.conf has the immutable attribute (chattr +i) — usually cnblock'\''s DNS blackhole has taken over resolution' ;;
-        '/tcpfit.sh），请检查到 GitHub 的网络') printf '%s' '/tcpfit.sh); please check the network to GitHub' ;;
-        '1-5，默认1') printf '%s' '1-5, default 1' ;;
-        '1/2/3/4，默认4') printf '%s' '1/2/3/4, default 4' ;;
-        '1/2，回车取消') printf '%s' '1/2, Enter to cancel' ;;
-        '1/2，默认') printf '%s' '1/2, default ' ;;
-        '2022-blake3-aes-128-gcm（默认）  2') printf '%s' '2022-blake3-aes-128-gcm (default)  2' ;;
-        '3 秒后重启 ...') printf '%s' 'Restarting in 3 seconds ...' ;;
-        '300 MB），装新内核可能失败，请先清理旧内核') printf '%s' '300 MB); installing a new kernel may fail, please clean up old kernels first' ;;
-        '80 端口是否对外开放 3') printf '%s' 'Is port 80 open to the outside? 3' ;;
-        ':443（推荐）') printf '%s' ':443 (recommended)' ;;
-        '>，如 adam fw allow 443/tcp,8000-8100') printf '%s' '>, e.g. adam fw allow 443/tcp,8000-8100' ;;
-        'ACME 邮箱（Let') printf '%s' 'ACME email (Let' ;;
-        'ALPN   : nw3（v3 固定，不可改，App 内无需/无法填写 alpn 时忽略此项）') printf '%s' 'ALPN   : nw3 (fixed in v3, cannot be changed; ignore this if the app does not need/cannot fill in alpn)' ;;
-        'ARM 机器的发行版内核自带 BBR + fq，直接用「1') printf '%s' 'ARM machines ship BBR + fq in the distro kernel; just use "1' ;;
-        'Anywhere/第三方客户端无法与本服务端互通，升级需整条链路一起升。') printf '%s' 'Anywhere/third-party clients cannot talk to this server; upgrades must cover the whole chain together.' ;;
-        'CDN 回源方式：') printf '%s' 'CDN origin-pull method:' ;;
-        'CDN 域名:') printf '%s' 'CDN domain:' ;;
-        'CF API Key/Token 是否正确 2') printf '%s' 'Is the CF API Key/Token correct? 2' ;;
-        'CPU 指令集等级: x86-64-v') printf '%s' 'CPU instruction level: x86-64-v' ;;
-        'Cloudflare + Google（1.1.1.1 / 8.8.8.8，含 IPv6）') printf '%s' 'Cloudflare + Google (1.1.1.1 / 8.8.8.8, incl. IPv6)' ;;
-        'Cloudflare API Key（输入不回显）:') printf '%s' 'Cloudflare API Key (input hidden):' ;;
-        'Cloudflare API Token（建议）或 Global API Key（输入不回显）:') printf '%s' 'Cloudflare API Token (recommended) or Global API Key (input hidden):' ;;
-        'Cloudflare DNS-01 - 需要 CF API Key/Token（自动续期，推荐；80 端口可不开）') printf '%s' 'Cloudflare DNS-01 - needs a CF API Key/Token (auto-renewal, recommended; port 80 may stay closed)' ;;
-        'Cloudflare DNS-01 - 需要 CF API Key（自动续期，推荐）') printf '%s' 'Cloudflare DNS-01 - needs a CF API Key (auto-renewal, recommended)' ;;
-        'DNS 偏好 :') printf '%s' 'DNS preference :' ;;
-        'DNS 服务商：') printf '%s' 'DNS provider:' ;;
-        'DNS 设置（查看 / 修改 / 恢复）') printf '%s' 'DNS settings (view / change / restore)' ;;
-        'DNS 预检通过：') printf '%s' 'DNS pre-check passed:' ;;
-        'DNSPod Token（输入不回显）:') printf '%s' 'DNSPod Token (input hidden):' ;;
-        'Egress dial 不是合法 IP 字面量，已重置为 auto') printf '%s' 'Egress dial is not a valid IP literal; reset to auto' ;;
-        'Egress dial4 不是合法 IPv4 字面量，已重置为 auto') printf '%s' 'Egress dial4 is not a valid IPv4 literal; reset to auto' ;;
-        'Egress dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto') printf '%s' 'Egress dial6 is not a valid IPv6 literal (IPv4-mapped addresses are not accepted by v3); reset to auto' ;;
-        'Egress 到目标的出站源 IP dial（回车默认 auto，只影响目标连接，不影响回连 Portal）:') printf '%s' 'Egress outbound source IP dial to the target (Enter = auto; only affects target connections, not the return link to the Portal):' ;;
-        'Egress 回连载体（v3.3.0 起两种都可用；一个连接串只选一种，多台出口机可以混用）') printf '%s' 'Egress return carrier (both work since v3.3.0; one connection string uses one carrier, different exit machines may mix them)' ;;
-        'Egress 服务已启动（注册结果请看日志：ACCEPTED 为成功；BUSY 表示 Portal 的待命注册容量已满（主要出现在 TLS 载体），本机会自动重试）') printf '%s' 'Egress service started (check the log for the registration result: ACCEPTED = success; BUSY = the Portal'\''s standby registration capacity is full (mainly on TLS carriers); this machine will retry automatically)' ;;
-        'Egress 服务未能启动，日志如下：') printf '%s' 'Egress service failed to start; log:' ;;
-        'Egress 端出站源 IP dial（在出口机上绑定目标连接源地址，回车默认 auto）:') printf '%s' 'Egress outbound source IP dial (binds the target-connection source address on the exit machine, Enter = auto):' ;;
-        'Fail2ban 仍未能正常启动，最近日志：') printf '%s' 'Fail2ban still failed to start; recent log:' ;;
-        'Fail2ban 已停用（现有封禁随服务停止而解除，配置保留）') printf '%s' 'Fail2ban disabled (existing bans are lifted when the service stops; config kept)' ;;
-        'Fail2ban 已卸载') printf '%s' 'Fail2ban uninstalled' ;;
-        'Fail2ban 已启动，SSH 防护生效') printf '%s' 'Fail2ban started; SSH protection active' ;;
-        'Fail2ban 已启用（开机自启）') printf '%s' 'Fail2ban enabled (start on boot)' ;;
-        'Fail2ban 并启用 SSH 防护') printf '%s' 'Fail2ban and enable SSH protection' ;;
-        'Fail2ban 服务未运行，请先执行「10') printf '%s' 'Fail2ban is not running; please run "10' ;;
-        'Fail2ban 管理（SSH 防爆破）') printf '%s' 'Fail2ban management (SSH brute-force protection)' ;;
-        'Fail2ban（开机自启）') printf '%s' 'Fail2ban (start on boot)' ;;
-        'Google + Cloudflare（8.8.8.8 / 1.1.1.1，含 IPv6）') printf '%s' 'Google + Cloudflare (8.8.8.8 / 1.1.1.1, incl. IPv6)' ;;
-        'HOST/tcp:PORT）、多台 Egress 可同时注册、NOW_MORPH_UDP_PRELUDE、握手超时默认按共享密钥派生（3–30s）') printf '%s' 'HOST/tcp:PORT); multiple Egress machines can register at once; NOW_MORPH_UDP_PRELUDE; handshake timeout defaults to derivation from the shared key (3–30s)' ;;
-        'IPv4 / IPv6 优先级') printf '%s' 'IPv4 / IPv6 priority' ;;
-        'IPv4 优先') printf '%s' 'IPv4 first' ;;
-        'IPv4 优先    2') printf '%s' 'IPv4 first    2' ;;
-        'IPv6 优先    3') printf '%s' 'IPv6 first    3' ;;
-        'IPv6 优先（系统默认）') printf '%s' 'IPv6 first (system default)' ;;
-        'IPv6 地址已配置，但实际无法连通外网（VPS常见问题：分配了地址却未正确路由）') printf '%s' 'IPv6 address is configured but cannot actually reach the internet (common VPS issue: address assigned but not routed correctly)' ;;
-        'IPv6 已恢复启用（网卡的 IPv6 地址可能需要几秒，或重启网络 / 重启系统后才重新获取）') printf '%s' 'IPv6 re-enabled (the NIC'\''s IPv6 address may take a few seconds, or come back after a network/system restart)' ;;
-        'IPv6 连通性正常，无需调整') printf '%s' 'IPv6 connectivity is fine; no change needed' ;;
-        'MB（建议') printf '%s' 'MB (recommended ' ;;
-        'ML-KEM-768（抗量子，默认）  2') printf '%s' 'ML-KEM-768 (quantum-resistant, default)  2' ;;
-        'Morph 是否开启（须与 Portal 一致）') printf '%s' 'Enable Morph? (must match the Portal)' ;;
-        'Morph 流量乱形') printf '%s' 'Morph traffic shaping' ;;
-        'NOW_HANDSHAKE_TIMEOUT；v3.3.0 起未设置时默认值从 Shared Key 派生（3s–30s，换密钥会变），显式设置可固定行为。持续时间格式，如 10s / 500ms / 1m / 1h，须为正数+单位；非法值会被 v3.3 启动拒绝') printf '%s' 'NOW_HANDSHAKE_TIMEOUT; since v3.3.0 the unset default is derived from the Shared Key (3s–30s, changes when the key changes); setting it explicitly pins the behavior. Duration format, e.g. 10s / 500ms / 1m / 1h, must be a positive number + unit; invalid values are rejected at v3.3 startup' ;;
-        'NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE，后者为 v3.3.0 新增。只对发起端（Vector / Egress）生效，Portal 自身不使用；这里的选择会写进下方生成的 Vector / Egress 启动命令。接收端三种通吃、两端无需一致、不进分享链接') printf '%s' 'NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE, the latter new in v3.3.0. Only effective on the initiating side (Vector / Egress); the Portal itself does not use it; your choice here goes into the Vector / Egress launch commands generated below. The receiver accepts all three, both ends need not match, and it is not included in share links' ;;
-        'Nowhere Egress 连接信息（') printf '%s' 'Nowhere Egress connection info (' ;;
-        'Nowhere Portal 连接信息（') printf '%s' 'Nowhere Portal connection info (' ;;
-        'Nowhere 已卸载') printf '%s' 'Nowhere uninstalled' ;;
-        'Nowhere 本地实例快照（nowhere status，v3 内置遥测）：') printf '%s' 'Nowhere local instance snapshot (nowhere status, built-in v3 telemetry):' ;;
-        'Portal 侧必须已设 out=egress，并放行所选载体的端口（QUIC = UDP 端口，TLS = TCP 端口）') printf '%s' 'The Portal side must already have out=egress set, and the selected carrier'\''s port must be allowed (QUIC = UDP port, TLS = TCP port)' ;;
-        'Portal 公网地址（域名或 IP，Egress 回连用）:') printf '%s' 'Portal public address (domain or IP, used by Egress to connect back):' ;;
-        'Portal 出口 out=（Portal 固定出口，运行期间不可变）：') printf '%s' 'Portal egress out= (fixed Portal egress, cannot change while running):' ;;
-        'Portal 的') printf '%s' 'Portal'\''s ' ;;
-        'Portal 端点   :') printf '%s' 'Portal endpoint   :' ;;
-        'Portal 自签证书指纹 pin（64 位 hex，可从 Portal 机 Nowhere 菜单 10 查看，输入不回显，回车=暂不填）:') printf '%s' 'Portal self-signed certificate fingerprint pin (64 hex chars; view it on the Portal machine under Nowhere menu 10; input hidden; Enter = leave empty for now):' ;;
-        'Portal 证书信任方式：') printf '%s' 'Portal certificate trust method:' ;;
-        'QUIC/UDP 端口（回车默认2001）:') printf '%s' 'QUIC/UDP port (Enter = 2001):' ;;
-        'Quad9 + Cloudflare（9.9.9.9 / 1.1.1.1，含 IPv6）') printf '%s' 'Quad9 + Cloudflare (9.9.9.9 / 1.1.1.1, incl. IPv6)' ;;
-        'REALITY 伪装站点（需是境外、支持 TLS 1.3 + HTTP/2 的站点；握手会转发到它的 443 端口）：') printf '%s' 'REALITY decoy site (must be an overseas site supporting TLS 1.3 + HTTP/2; the handshake is forwarded to its port 443):' ;;
-        'SHA256 与仓库 SHA256SUMS 一致') printf '%s' 'SHA256 matches the repo SHA256SUMS' ;;
-        'SHA256 与仓库 SHA256SUMS 不一致（仓库') printf '%s' 'SHA256 does not match the repo SHA256SUMS (repo ' ;;
-        'SHA256 校验失败（') printf '%s' 'SHA256 verification failed (' ;;
-        'SHA256 校验失败（官方') printf '%s' 'SHA256 verification failed (official ' ;;
-        'SHA256 校验失败：官方 digest=') printf '%s' 'SHA256 verification failed: official digest=' ;;
-        'SHA256 校验通过（') printf '%s' 'SHA256 verification passed (' ;;
-        'SHA256 校验通过（GitHub 官方资产 digest）') printf '%s' 'SHA256 verification passed (GitHub official asset digest)' ;;
-        'SHA256 校验通过（官方 .dgst）') printf '%s' 'SHA256 verification passed (official .dgst)' ;;
-        'SNI 格式不合法，已忽略') printf '%s' 'Invalid SNI format; ignored' ;;
-        'SNI（证书域名与回连地址不一致时填，回车=用回连地址）:') printf '%s' 'SNI (fill in when the certificate domain differs from the return address; Enter = use the return address):' ;;
-        'SOCKS5 上游 - 经一层 SOCKS5 代理出站（链式代理）') printf '%s' 'SOCKS5 upstream - outbound via one SOCKS5 proxy layer (chained proxy)' ;;
-        'SOCKS5 地址，格式 user:pass') printf '%s' 'SOCKS5 address, format user:pass' ;;
-        'SOCKS5 格式不合法，已重置为 none 并改回 direct') printf '%s' 'Invalid SOCKS5 format; reset to none and switched back to direct' ;;
-        'SSH 端口:') printf '%s' 'SSH port:' ;;
-        'Shadowsocks 2022 加密方式：') printf '%s' 'Shadowsocks 2022 cipher:' ;;
-        'Snell Server 管理（Surge 官方，v') printf '%s' 'Snell Server management (Surge official, v' ;;
-        'Snell 一键修复') printf '%s' 'Snell one-click repair' ;;
-        'Snell 二进制已更新到') printf '%s' 'Snell binary updated to' ;;
-        'Snell 健康检查') printf '%s' 'Snell health check' ;;
-        'Snell 官方未提供该架构的二进制:') printf '%s' 'Snell does not officially provide a binary for this architecture:' ;;
-        'Snell 尚未安装，请先执行「1') printf '%s' 'Snell is not installed yet; please run "1' ;;
-        'Snell 已卸载') printf '%s' 'Snell uninstalled' ;;
-        'Snell 已更新:') printf '%s' 'Snell updated:' ;;
-        'Snell 已重启（含全部附加端口）') printf '%s' 'Snell restarted (incl. all additional ports)' ;;
-        'Snell 未安装，跳过') printf '%s' 'Snell not installed; skipped' ;;
-        'Snell 未能正常启动，最近日志：') printf '%s' 'Snell failed to start; recent log:' ;;
-        'Snell 的监听地址已按当前 IPv6 状态调整') printf '%s' 'Snell'\''s listen address adjusted to the current IPv6 state' ;;
-        'Snell 配置') printf '%s' 'Snell config' ;;
-        'Surge 节点配置（粘贴到') printf '%s' 'Surge node config (paste into ' ;;
-        'Surge 节点配置：') printf '%s' 'Surge node config:' ;;
-        'TCP 地址族') printf '%s' 'TCP address family' ;;
-        'TCP 端口      :') printf '%s' 'TCP port      :' ;;
-        'TCP 调优') printf '%s' 'TCP tuning' ;;
-        'TCP 调优」即可') printf '%s' 'TCP tuning" is enough' ;;
-        'TCP 调优」启用 BBR') printf '%s' 'TCP tuning" to enable BBR' ;;
-        'TCP 调优（tcpfit）') printf '%s' 'TCP tuning (tcpfit)' ;;
-        'TLS    : 开启') printf '%s' 'TLS    : on' ;;
-        'TLS 与 QUIC 共用同一端口，如') printf '%s' 'TLS and QUIC share one port, e.g.' ;;
-        'TLS 与 QUIC 分开端口，如') printf '%s' 'TLS and QUIC use separate ports, e.g.' ;;
-        'TLS 回源 + 已有证书文件（「完全') printf '%s' 'TLS origin-pull + existing certificate files ("Full' ;;
-        'TLS 回源 + 自签证书（默认；Cloudflare 的 SSL/TLS 模式选「完全 Full」，不是「完全') printf '%s' 'TLS origin-pull + self-signed certificate (default; in Cloudflare'\''s SSL/TLS mode choose "Full", not "Full' ;;
-        'TLS 证书方式：') printf '%s' 'TLS certificate method:' ;;
-        'TLS 载体下每条 Flow 独占一条连接，本机会自动预建待命连接；BUSY 表示 Portal 的待命容量已满。') printf '%s' 'On the TLS carrier, each Flow uses its own connection; this machine pre-builds standby connections automatically; BUSY means the Portal'\''s standby capacity is full.' ;;
-        'TLS 载体的 Egress 需要 Nowhere') printf '%s' 'TLS-carrier Egress needs Nowhere ' ;;
-        'TLS/TCP 端口（回车默认2000）:') printf '%s' 'TLS/TCP port (Enter = 2000):' ;;
-        'Token 是否有 Zone:DNS:Edit 权限') printf '%s' 'Does the Token have Zone:DNS:Edit permission?' ;;
-        'UDP 地址族') printf '%s' 'UDP address family' ;;
-        'UDP 端口      :') printf '%s' 'UDP port      :' ;;
-        'VLESS + REALITY + Vision（TCP 直连，最常用）') printf '%s' 'VLESS + REALITY + Vision (direct TCP, most common)' ;;
-        'VLESS + XHTTP + REALITY（直连，可叠加 VLESS Encryption）') printf '%s' 'VLESS + XHTTP + REALITY (direct; VLESS Encryption can be stacked)' ;;
-        'VLESS + XHTTP + TLS / 明文回源（套 CDN，需要域名）') printf '%s' 'VLESS + XHTTP + TLS / plaintext origin-pull (behind a CDN; needs a domain)' ;;
-        'VLESS Encryption + XHTTP（ML-KEM-768 抗量子，不依赖 TLS）') printf '%s' 'VLESS Encryption + XHTTP (ML-KEM-768 quantum-resistant, no TLS needed)' ;;
-        'VLESS Encryption + XHTTP：不套 TLS / REALITY，由 VLESS 自身的加密保护（适合直连，或明文回源的 CDN 之后）。') printf '%s' 'VLESS Encryption + XHTTP: no TLS / REALITY; protected by VLESS'\''s own encryption (for direct connections, or behind a CDN with plaintext origin-pull).' ;;
-        'Vector 载体（二选一，v3 一条连接只用一种载体）  1') printf '%s' 'Vector carrier (pick one; in v3 one connection uses one carrier)  1' ;;
-        'Vector客户端  :') printf '%s' 'Vector client  :' ;;
-        'Vector旧名') printf '%s' 'Vector (old name)' ;;
-        'Vector（0=不限速）:') printf '%s' 'Vector (0 = unlimited):' ;;
-        'X25519（密钥更短）') printf '%s' 'X25519 (shorter keys)' ;;
-        'XHTTP 路径:') printf '%s' 'XHTTP path:' ;;
-        'XanMod 仓库密钥下载或导入失败') printf '%s' 'Failed to download or import the XanMod repo key' ;;
-        'XanMod 内核') printf '%s' 'XanMod kernel' ;;
-        'XanMod 内核已卸载，重启后生效') printf '%s' 'XanMod kernel uninstalled; takes effect after reboot' ;;
-        'XanMod 内核已安装:') printf '%s' 'XanMod kernel installed:' ;;
-        'XanMod 官方只提供 x86_64 构建，本机是') printf '%s' 'XanMod officially provides x86_64 builds only; this machine is ' ;;
-        'Xray 一键修复') printf '%s' 'Xray one-click repair' ;;
-        'Xray 健康检查') printf '%s' 'Xray health check' ;;
-        'Xray 尚未安装，请先执行「1') printf '%s' 'Xray is not installed yet; please run "1' ;;
-        'Xray 已卸载') printf '%s' 'Xray uninstalled' ;;
-        'Xray 已重启') printf '%s' 'Xray restarted' ;;
-        'Xray 未能正常启动，最近日志：') printf '%s' 'Xray failed to start; recent log:' ;;
-        'Xray 模块暂不支持该架构:') printf '%s' 'The Xray module does not support this architecture yet:' ;;
-        'Xray 管理（SS / VLESS）') printf '%s' 'Xray management (SS / VLESS)' ;;
-        'Xray 自动更新:') printf '%s' 'Xray auto-update:' ;;
-        'Xray 节点列表') printf '%s' 'Xray node list' ;;
-        'Xray 节点的监听地址已按当前 IPv6 状态调整') printf '%s' 'Xray nodes'\'' listen addresses adjusted to the current IPv6 state' ;;
-        'Xray 节点配置与分享链接') printf '%s' 'Xray node configs and share links' ;;
-        'acme.sh cron 续期任务存在') printf '%s' 'acme.sh cron renewal task exists' ;;
-        'acme.sh 安装后仍找不到可执行文件（') printf '%s' 'acme.sh installed but the executable still cannot be found (' ;;
-        'acme.sh 安装失败，请检查网络后重试') printf '%s' 'acme.sh installation failed; please check the network and retry' ;;
-        'adam-maintain.timer 启用失败') printf '%s' 'Failed to enable adam-maintain.timer' ;;
-        'adam-watchdog.timer 启用失败') printf '%s' 'Failed to enable adam-watchdog.timer' ;;
-        'apt-get remove 失败，请手动处理') printf '%s' 'apt-get remove failed; please handle it manually' ;;
-        'apt-get update 失败，继续尝试安装') printf '%s' 'apt-get update failed; trying to install anyway' ;;
-        'apt-get update 部分失败，继续尝试') printf '%s' 'apt-get update partially failed; trying anyway' ;;
-        'auto                       打开自动维护菜单（保活巡检 / 自动更新开关）') printf '%s' 'auto                       Open the auto-maintenance menu (keepalive watchdog / auto-update switches)' ;;
-        'beta   - 跟随官方最新测试版（b / rc），正式版发布后自动转到正式版（默认）') printf '%s' 'beta   - follow the official latest beta (b / rc); switches to stable automatically once a stable release is out (default)' ;;
-        'certbot 安装失败') printf '%s' 'certbot installation failed' ;;
-        'certbot.timer 启用失败，请手动执行：systemctl enable --now certbot.timer') printf '%s' 'Failed to enable certbot.timer; please run manually: systemctl enable --now certbot.timer' ;;
-        'certbot.timer 未在运行，自动续期可能不工作，请手动检查') printf '%s' 'certbot.timer is not running; auto-renewal may not work, please check manually' ;;
-        'certbot.timer 运行中') printf '%s' 'certbot.timer is running' ;;
-        'cron 兜底续期任务存在') printf '%s' 'cron fallback renewal task exists' ;;
-        'cron 续期任务已写入') printf '%s' 'cron renewal task written' ;;
-        'default    - 流量整形混淆 + AES 加密（推荐）') printf '%s' 'default    - traffic-shaping obfuscation + AES encryption (recommended)' ;;
-        'default（默认）  2') printf '%s' 'default (default)  2' ;;
-        'dial6 不是合法 IPv6 字面量（IPv4-mapped 地址不被 v3 接受），已重置为 auto') printf '%s' 'dial6 is not a valid IPv6 literal (IPv4-mapped addresses are not accepted by v3); reset to auto' ;;
-        'dial6 不是合法 IPv6 字面量，已重置为 auto') printf '%s' 'dial6 is not a valid IPv6 literal; reset to auto' ;;
-        'direct - Portal 直接访问目标（默认）') printf '%s' 'direct - Portal accesses the target directly (default)' ;;
-        'egress - 远程 Egress 出口（目标解析/拨号在另一台主动回连的机器上，该机无需开放入站端口；可同时接多台）') printf '%s' 'egress - remote Egress exit (target resolution/dialing happens on another machine that connects back; that machine needs no inbound port; multiple machines can connect)' ;;
-        'en（当前：') printf '%s' 'en (current: ' ;;
-        'f2b                        打开 Fail2ban 菜单') printf '%s' 'f2b                        Open the Fail2ban menu' ;;
-        'f2b bantime <时长>         例: adam f2b bantime 1h   （纯数字 = 分钟，-1 = 永久）') printf '%s' 'f2b bantime <duration>      e.g. adam f2b bantime 1h   (plain number = minutes, -1 = forever)' ;;
-        'fade（默认）  2') printf '%s' 'fade (default)  2' ;;
-        'fail2ban 与当前 Python 版本不兼容（缺 asynchat/asyncore，常见于 Ubuntu 24.04 的初版软件包），尝试升级 fail2ban ...') printf '%s' 'fail2ban is incompatible with the current Python version (missing asynchat/asyncore, common in early Ubuntu 24.04 packages); trying to upgrade fail2ban ...' ;;
-        'findtime 格式不合法') printf '%s' 'Invalid findtime format' ;;
-        'full8 - 全程全 8 位随机') printf '%s' 'full8 - full 8-bit random throughout' ;;
-        'fw                         打开防火墙菜单') printf '%s' 'fw                         Open the firewall menu' ;;
-        'fw allow <端口>            例: adam fw allow 443/tcp,8000-8100    （不写协议 = TCP+UDP）') printf '%s' 'fw allow <port>            e.g. adam fw allow 443/tcp,8000-8100    (no protocol = TCP+UDP)' ;;
-        'fw deny  <端口>            删除放行规则') printf '%s' 'fw deny  <port>            Remove an allow rule' ;;
-        'host:port（输入不回显）:') printf '%s' 'host:port (input hidden):' ;;
-        'low7  - 全程低 7 位随机') printf '%s' 'low7  - low 7-bit random throughout' ;;
-        'maintain-log               查看维护记录') printf '%s' 'maintain-log               View maintenance records' ;;
-        'maxretry 必须是正整数') printf '%s' 'maxretry must be a positive integer' ;;
-        'mix - TLS/TCP + QUIC/UDP 双栈（HOST:PORT，推荐）') printf '%s' 'mix - TLS/TCP + QUIC/UDP dual-stack (HOST:PORT, recommended)' ;;
-        'mode（服务端与客户端必须一致）：') printf '%s' 'mode (server and client must match):' ;;
-        'nowhere                    打开 Nowhere 菜单') printf '%s' 'nowhere                    Open the Nowhere menu' ;;
-        'nowhere status 未能读取到实例（服务未运行，或二进制版本低于 v2.1.2 无此命令）') printf '%s' 'nowhere status could not read any instance (service not running, or binary older than v2.1.2 without this command)' ;;
-        'off          开/关 跟随官方发布的自动更新（默认 beta 通道：跟随最新测试版）') printf '%s' 'off          On/off for following official releases for auto-update (default beta channel: follow the latest beta)' ;;
-        'out=egress 时 Portal 不能再设置 dial/dial4/dial6（与官方约束一致），目标源地址请在 Egress 端配置') printf '%s' 'When out=egress, the Portal can no longer set dial/dial4/dial6 (per the official constraint); configure the target source address on the Egress side' ;;
-        'pin        - 指定一个版本并固定，不自动更新') printf '%s' 'pin        - pin to a specific version; no auto-update' ;;
-        'pin 必须是 64 位小写十六进制字符') printf '%s' 'pin must be 64 lowercase hex chars' ;;
-        'prerelease - 跟随官方最新版（含预发布，默认）') printf '%s' 'prerelease - follow the official latest (incl. pre-releases, default)' ;;
-        's Encrypt DNS-01 通用 - 支持多种 DNS 服务商（自动续期）') printf '%s' 's Encrypt DNS-01 generic - supports many DNS providers (auto-renewal)' ;;
-        's Encrypt HTTP-01 - 需要域名解析到本机 + 开放 80 端口（自动续期）') printf '%s' 's Encrypt HTTP-01 - needs the domain to resolve to this machine + port 80 open (auto-renewal)' ;;
-        's Encrypt HTTP-01 - 需要开放 80 端口（自动续期）') printf '%s' 's Encrypt HTTP-01 - needs port 80 open (auto-renewal)' ;;
-        's Encrypt 账户用）:') printf '%s' 's Encrypt account):' ;;
-        'script                     打开脚本更新菜单') printf '%s' 'script                     Open the script-update menu' ;;
-        'snell                      打开 Snell 菜单') printf '%s' 'snell                      Open the Snell menu' ;;
-        'stable     - 只跟官方标记为正式版的发布（官方近期没有这样的发布时会提示）') printf '%s' 'stable     - only follow releases officially marked stable (you will be told if there has been no such release recently)' ;;
-        'stable - 只安装和跟随正式版') printf '%s' 'stable - install and follow stable releases only' ;;
-        'systemd 显示服务 active，但未检测到端口实际在监听') printf '%s' 'systemd shows the service as active, but no port is actually listening' ;;
-        'tcp - 仅 TLS/TCP（HOST/tcp:PORT）') printf '%s' 'tcp - TLS/TCP only (HOST/tcp:PORT)' ;;
-        'tcp / TLS        - 每条 Flow 独占一条 TLS 连接，自动维护预建连接池（Hydra）；UDP 被限制的网络选这个') printf '%s' 'tcp / TLS        - each Flow uses its own TLS connection; pre-built connection pool maintained automatically (Hydra); pick this on networks where UDP is restricted' ;;
-        'tcp / TLS  - 每条 Flow 独占一条 TLS 连接，出口机自动维护预建连接池；UDP 被限制的网络选这个（出口机需') printf '%s' 'tcp / TLS  - each Flow uses its own TLS connection; the exit machine maintains a pre-built connection pool automatically; pick this on networks where UDP is restricted (exit machines need ' ;;
-        'tcp:端口') printf '%s' 'tcp:port' ;;
-        'tcpfit 以非 0 状态退出（如果是你主动退出菜单可忽略）') printf '%s' 'tcpfit exited with a non-zero status (ignore this if you exited the menu yourself)' ;;
-        'tcpfit 会按本机实测结果推导缓冲区、BBR/fq、限速器拐点与整形参数，而不是套固定值。') printf '%s' 'tcpfit derives buffer, BBR/fq, limiter inflection points and shaping parameters from measurements on this machine, instead of applying fixed values.' ;;
-        'tcpfit 已更新到') printf '%s' 'tcpfit updated to' ;;
-        'tcpfit 是第三方开源脚本（') printf '%s' 'tcpfit is a third-party open-source script (' ;;
-        'tcpfit 状态 / 回滚 / 更新') printf '%s' 'tcpfit status / rollback / update' ;;
-        'tcpfit 的菜单需要在终端里运行，请直接执行: tcpfit') printf '%s' 'The tcpfit menu must run in a terminal; please run directly: tcpfit' ;;
-        'tls=1 且无指纹记录文件，请用 Nowhere 菜单 10 生成') printf '%s' 'tls=1 with no fingerprint record file; please generate one via Nowhere menu 10' ;;
-        'tls=1 为临时自签证书，每次重启指纹会变化，仅建议测试用') printf '%s' 'tls=1 is a temporary self-signed certificate; its fingerprint changes on every restart; test use only' ;;
-        'tls=1 当前指纹见') printf '%s' 'Current tls=1 fingerprint:' ;;
-        'tls=1 时 pin 随 Portal 重启变化，Portal 重启后需在本机更新 egress.env 里的 pin 并重启服务。') printf '%s' 'With tls=1, pin changes when the Portal restarts; after a Portal restart, update the pin in egress.env on this machine and restart the service.' ;;
-        'tls=1 自签证书：必须用 pin= 锁定 Portal 证书指纹（指纹随 Portal 重启变化）') printf '%s' 'tls=1 self-signed certificate: you must lock the Portal certificate fingerprint with pin= (the fingerprint changes on Portal restart)' ;;
-        'tls=2 真实证书：走系统 CA + 主机名校验（默认）') printf '%s' 'tls=2 real certificate: system CA + hostname verification (default)' ;;
-        'tune                       打开调优菜单') printf '%s' 'tune                       Open the tuning menu' ;;
-        'udp - 仅 QUIC/UDP（HOST/udp:PORT）') printf '%s' 'udp - QUIC/UDP only (HOST/udp:PORT)' ;;
-        'udp / QUIC - 一条连接承载多条 Flow（推荐）') printf '%s' 'udp / QUIC - one connection carries multiple Flows (recommended)' ;;
-        'udp / QUIC（默认）- 一条连接承载多条 Flow') printf '%s' 'udp / QUIC (default) - one connection carries multiple Flows' ;;
-        'ufw 安装失败，请检查 apt 源/网络') printf '%s' 'ufw installation failed; please check apt sources / network' ;;
-        'ufw 安装完成') printf '%s' 'ufw installed' ;;
-        'ufw 已安装') printf '%s' 'ufw is installed' ;;
-        'ufw 当前未启用，已预先保存放行规则:') printf '%s' 'ufw is currently disabled; allow rules have been saved in advance:' ;;
-        'ufw 未启用（如有云厂商安全组，请确认已放行') printf '%s' 'ufw is disabled (if your cloud provider has a security group, please confirm it allows ' ;;
-        'unsafe-raw - 不加密、不混淆，明文转发（只适合可信内网 / 专线）') printf '%s' 'unsafe-raw - no encryption, no obfuscation, plaintext forwarding (only for trusted internal networks / dedicated lines)' ;;
-        'unsafe-raw 下所有流量明文传输，公网使用等于裸奔') printf '%s' 'With unsafe-raw all traffic is plaintext; using it on the public internet is like running naked' ;;
-        'v3 会直接拒绝用该密钥启动。请用Nowhere 菜单「3') printf '%s' 'v3 will refuse to start with this key. Please use Nowhere menu "3' ;;
-        'v3 客户端默认校验系统 CA 与主机名，自签场景必须用 pin= 锁定指纹') printf '%s' 'v3 clients verify the system CA and hostname by default; for self-signed certs you must lock the fingerprint with pin=' ;;
-        'v3 的 alpn/net/log/pool/up/down/socks') printf '%s' 'v3'\''s alpn/net/log/pool/up/down/socks' ;;
-        'v3 默认开启 morph=1；仅做流量形态混淆，不提供额外加密；两端必须一致，没有协商/回退') printf '%s' 'v3 enables morph=1 by default; it only obfuscates traffic shape and adds no extra encryption; both ends must match, with no negotiation/fallback' ;;
-        'v3.1.0（建议与本机同版本）；QUIC 载体与 morph=0 不受这条影响') printf '%s' 'v3.1.0 (same version as this machine recommended); QUIC carriers and morph=0 are not affected by this' ;;
-        'v3.1.0，再升级本机 Portal') printf '%s' 'v3.1.0, then upgrade this machine'\''s Portal' ;;
-        'v3.1.0，更旧的版本会被静默拒绝。') printf '%s' 'v3.1.0; older versions are silently rejected.' ;;
-        'v3.2.0 起 Portal 强制 Authenticated Prelude、不再有回退：仍停留在 v3.0.x 的 Vector/Egress/Anywhere 在 morph=1 的 TLS/TCP 载体上会被静默拒绝') printf '%s' 'Since v3.2.0 the Portal enforces Authenticated Prelude with no fallback: Vector/Egress/Anywhere still on v3.0.x will be silently rejected on morph=1 TLS/TCP carriers' ;;
-        'v3.2.0 起 Portal 强制 Authenticated Prelude：morph=1 且走 TLS/TCP 的对端') printf '%s' 'Since v3.2.0 the Portal enforces Authenticated Prelude: peers with morph=1 on TLS/TCP' ;;
-        'v3.3.0 新增：Egress 可走 TLS/TCP（egress://KEY') printf '%s' 'New in v3.3.0: Egress can use TLS/TCP (egress://KEY' ;;
-        'v3.3.0 起同一 Portal 可同时接受多台 Egress（TLS / QUIC 可混用，Portal 按先进先出轮转，不保证均衡）。') printf '%s' 'Since v3.3.0 one Portal can accept multiple Egress machines at once (TLS / QUIC can be mixed; the Portal rotates FIFO with no balance guarantee).' ;;
-        'v3.3.0 起同一 Portal 可同时接受多台 Egress（TLS / QUIC 可混用，Portal 按先进先出轮转，不保证均衡）；使用 tcp 载体的出口机需') printf '%s' 'Since v3.3.0 one Portal can accept multiple Egress machines at once (TLS / QUIC can be mixed; the Portal rotates FIFO with no balance guarantee); exit machines using the tcp carrier need ' ;;
-        'v3.3.0，本机现有二进制为') printf '%s' 'v3.3.0; the binary currently on this machine is ' ;;
-        'watchdog        立即执行一次每日维护 / 保活巡检（定时器调用的就是这两个）') printf '%s' 'watchdog        Run one daily maintenance / keepalive check now (these are what the timers call)' ;;
-        'xray                       打开 Xray 菜单') printf '%s' 'xray                       Open the Xray menu' ;;
-        'xray vlessenc 生成失败（当前内核版本可能不支持 VLESS Encryption）') printf '%s' 'Failed to generate xray vlessenc (the current kernel may not support VLESS Encryption)' ;;
-        '· CDN 节点：连不通时把客户端的 XHTTP mode 从 auto 改成 packet-up 再试') printf '%s' '· CDN node: if unreachable, change the client'\''s XHTTP mode from auto to packet-up and retry' ;;
-        '· DNS 偏好') printf '%s' '· DNS preference' ;;
-        '· REALITY 节点：较新的 Xray 服务端（社区反馈自 v26.9.8 起）要求客户端握手带 X25519MLKEM768，') printf '%s' '· REALITY node: newer Xray servers (community reports say since v26.9.8) require the client handshake to carry X25519MLKEM768,' ;;
-        '· VLESS Encryption 的 encryption= 参数很长，属正常现象；客户端内核需支持该特性') printf '%s' '· The VLESS Encryption encryption= parameter is very long; that is normal; the client core must support this feature' ;;
-        '· Xray 官方近期的发布基本都标记为 Pre-release，「最新预发布版」通常就是官方最新一版') printf '%s' '· Recent official Xray releases are mostly tagged Pre-release; the "latest pre-release" is usually the official latest' ;;
-        '· mode 必须与服务端一致（官方要求），否则无法连通') printf '%s' '· mode must match the server (official requirement), otherwise it cannot connect' ;;
-        '· v6 已移除 QUIC Proxy Mode，UDP 走 UDP over TCP，防火墙只需放行 TCP') printf '%s' '· v6 removed QUIC Proxy Mode; UDP goes over UDP over TCP, so the firewall only needs to allow TCP' ;;
-        '· v6 的协议特征由 PSK 派生：更换 PSK 等于更换一套流量特征，客户端需同步修改') printf '%s' '· v6 protocol features are derived from the PSK: changing the PSK changes the whole traffic profile, and clients must update in sync' ;;
-        '· 如果你的客户端跟不上，可选「指定版本」固定在一个旧版本（如 v26.3.27）') printf '%s' '· If your client cannot keep up, use "Specify version" to pin an old version (e.g. v26.3.27)' ;;
-        '· 角色') printf '%s' '· Role' ;;
-        '· 较新版本的 REALITY 服务端要求客户端握手带 X25519MLKEM768（社区反馈自 v26.9.8 起）：') printf '%s' '· Newer REALITY servers require the client handshake to carry X25519MLKEM768 (community reports say since v26.9.8):' ;;
-        '· 需要支持 Snell v6 的 Surge 版本；官方未说明 v6 服务端兼容 v4/v5 客户端，第三方客户端是否支持请以其文档为准') printf '%s' '· Requires a Surge version supporting Snell v6; the official docs do not say whether the v6 server is compatible with v4/v5 clients — check third-party client docs for support' ;;
-        '· 预发布版偶有不兼容改动：自动更新会先用新内核校验现有配置，校验不过就不换；启动失败会自动回滚') printf '%s' '· Pre-releases occasionally contain breaking changes: auto-update first validates the current config with the new core and will not switch if validation fails; startup failure triggers an automatic rollback' ;;
-        '— 快速重启服务') printf '%s' '— Restart the service quickly' ;;
-        '— 打开管理菜单') printf '%s' '— Open the management menu' ;;
-        '— 查看服务状态') printf '%s' '— View service status' ;;
-        '— 查看节点/连接信息') printf '%s' '— View node / connection info' ;;
-        '— 重新修改配置') printf '%s' '— Reconfigure' ;;
-        '。要换版本或恢复跟随最新，请用「1') printf '%s' '. To switch versions or resume following the latest, use "1' ;;
-        '「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3') printf '%s' '"Other/Manual" requires interactive DNS TXT verification; this script does not take that over yet, please pick 1-3 instead' ;;
-        '」可用；证书续期后每日维护会自动同步）') printf '%s' '" is usable; after certificate renewal, daily maintenance syncs it automatically)' ;;
-        '【Anywhere 分享链接 —— QUIC/UDP（net=udp）】') printf '%s' '[Anywhere share link — QUIC/UDP (net=udp)]' ;;
-        '【Anywhere 分享链接 —— TLS/TCP（net=tcp，默认）】') printf '%s' '[Anywhere share link — TLS/TCP (net=tcp, default)]' ;;
-        '【Anywhere 手动填写】') printf '%s' '[Anywhere manual entry]' ;;
-        '【TLS 提示】') printf '%s' '[TLS note]' ;;
-        '【出口机启动参数（Egress URL，用于 systemd ExecStart）】') printf '%s' '[Exit-machine launch parameters (Egress URL, for systemd ExecStart)]' ;;
-        '【客户端连接参数】') printf '%s' '[Client connection parameters]' ;;
-        '【服务端启动参数（Portal URL，用于 systemd ExecStart）】') printf '%s' '[Server launch parameters (Portal URL, for systemd ExecStart)]' ;;
-        '【本地 Vector 客户端 —— 在电脑/路由器上跑本地 SOCKS5 入口】') printf '%s' '[Local Vector client — run a local SOCKS5 entry on your computer/router]' ;;
-        '【本地 Vector 客户端】') printf '%s' '[Local Vector client]' ;;
-        '【版本兼容提醒】') printf '%s' '[Version compatibility reminder]' ;;
-        '【说明】') printf '%s' '[Notes]' ;;
-        '【远程 Egress 出口机 —— 在出口机上运行，主动回连本 Portal，无需出口机开放入站端口】') printf '%s' '[Remote Egress exit machine — runs on the exit machine and connects back to this Portal; the exit machine needs no inbound port]' ;;
-        '【远程 Egress 出口机】') printf '%s' '[Remote Egress exit machine]' ;;
-        '【防火墙提醒】') printf '%s' '[Firewall reminder]' ;;
-        '一键修复') printf '%s' 'One-click repair' ;;
-        '一键修复（单元 / 保留端口 / 防火墙 / 保活定时器）') printf '%s' 'One-click repair (unit / reserved ports / firewall / keepalive timer)' ;;
-        '一键诊断（只读，不改任何配置）') printf '%s' 'One-click diagnostics (read-only; changes nothing)' ;;
-        '上/下行限速   :') printf '%s' 'Up/down rate limit   :' ;;
-        '上一个版本 tag    :') printf '%s' 'Previous version tag    :' ;;
-        '上行限速 Mbps（0=不限速）:') printf '%s' 'Upload limit Mbps (0 = unlimited):' ;;
-        '上行限速 Mbps，Vector') printf '%s' 'Upload limit Mbps, Vector' ;;
-        '下行限速 Mbps（0=不限速）:') printf '%s' 'Download limit Mbps (0 = unlimited):' ;;
-        '下行限速 Mbps，目标') printf '%s' 'Download limit Mbps, target' ;;
-        '下载') printf '%s' 'Download' ;;
-        '下载 ...') printf '%s' 'Downloading ...' ;;
-        '下载 tcpfit 失败（') printf '%s' 'Failed to download tcpfit (' ;;
-        '下载到的 tcpfit 不完整或不是脚本（传输被截断或被网关拦截），已放弃') printf '%s' 'The downloaded tcpfit is incomplete or not a script (transfer truncated or blocked by a gateway); giving up' ;;
-        '下载到的 xray 无法在本机运行（架构不符？）') printf '%s' 'The downloaded xray cannot run on this machine (wrong architecture?)' ;;
-        '下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动') printf '%s' 'The downloaded binary cannot run on this machine (architecture or libc mismatch); aborted; the existing installation was not changed' ;;
-        '下载到的压缩包不完整或已损坏') printf '%s' 'The downloaded archive is incomplete or damaged' ;;
-        '下载失败（该版本可能没有') printf '%s' 'Download failed (this version may not have ' ;;
-        '下载并校验') printf '%s' 'Download and verify' ;;
-        '下载或校验失败，已中止') printf '%s' 'Download or verification failed; aborted' ;;
-        '不一致（可能新版尚未推送到') printf '%s' 'Mismatch (the new version may not have been pushed to ' ;;
-        '不变（上游可能有不兼容改动）') printf '%s' 'Unchanged (upstream may have breaking changes)' ;;
-        '不可达或页面结构变化）') printf '%s' 'unreachable, or the page structure changed)' ;;
-        '不可达，或该架构') printf '%s' 'unreachable, or this architecture ' ;;
-        '不存在，已跳过') printf '%s' 'does not exist; skipped' ;;
-        '不支持的架构:') printf '%s' 'Unsupported architecture:' ;;
-        '不是合法 IP:') printf '%s' 'Not a valid IP:' ;;
-        '不是本机的 Snell 端口配置（现有:') printf '%s' 'Not one of this machine'\''s Snell port configs (current: ' ;;
-        '且不同协议代的密钥格式、URL 参数可能不兼容，仅换二进制不重配大概率启动失败或连不上') printf '%s' 'Also, key formats and URL parameters may differ across protocol generations; just swapping the binary without reconfiguring will most likely fail to start or connect' ;;
-        '个端口 ·') printf '%s' 'ports ·' ;;
-        '个，累计') printf '%s' ', total ' ;;
-        '中文') printf '%s' 'Chinese' ;;
-        '临时禁用 IPv6（重启后自动恢复）？') printf '%s' 'Temporarily disable IPv6 (auto-restored after reboot)?' ;;
-        '临时禁用（重启恢复）    2') printf '%s' 'Temporarily disable (restored on reboot)    2' ;;
-        '主机/udp') printf '%s' 'host/udp' ;;
-        '主端口') printf '%s' 'Main port' ;;
-        '二进制下载失败，安装中止') printf '%s' 'Binary download failed; installation aborted' ;;
-        '二进制可运行（') printf '%s' 'Binary can run (' ;;
-        '二进制已更新到') printf '%s' 'Binary updated to' ;;
-        '二进制无法运行:') printf '%s' 'Binary cannot run:' ;;
-        '仅支持 Debian / Ubuntu（当前:') printf '%s' 'Only Debian / Ubuntu are supported (current: ' ;;
-        '仍要使用？') printf '%s' 'Still use it?' ;;
-        '仍要安装吗？') printf '%s' 'Still install it?' ;;
-        '仍要安装该旧版本吗？') printf '%s' 'Still install this old version?' ;;
-        '仍要继续安装吗？') printf '%s' 'Continue installing anyway?' ;;
-        '仍要继续安装该版本吗？') printf '%s' 'Continue installing this version anyway?' ;;
-        '仍要继续（稍后需手动改 egress.env 补 pin）？') printf '%s' 'Continue anyway (you will need to manually add the pin to egress.env later)?' ;;
-        '从官方仓库拉取最新版并安装到') printf '%s' 'Fetch the latest version from the official repo and install it to ' ;;
-        '从本机未能确认') printf '%s' 'Could not be confirmed from this machine' ;;
-        '仓库版本') printf '%s' 'Repo version' ;;
-        '仓库版本为') printf '%s' 'Repo version:' ;;
-        '以下端口正在对外监听，但还没有在防火墙里放行（启用后外部将无法访问）：') printf '%s' 'The following ports are listening externally but are not yet allowed in the firewall (they will be unreachable from outside once enabled):' ;;
-        '优先（新启动的程序生效；已在运行的服务重启后生效）') printf '%s' 'Priority (applies to newly started programs; running services take effect after restart)' ;;
-        '传输模式（决定端点路径，TCP 与 UDP 都能承载 TCP/UDP 业务流）：') printf '%s' 'Transport mode (decides the endpoint path; both TCP and UDP can carry TCP/UDP traffic):' ;;
-        '伪装站点:') printf '%s' 'Decoy site:' ;;
-        '低7位') printf '%s' 'Low 7-bit' ;;
-        '低于本地') printf '%s' 'Lower than local' ;;
-        '你当前是通过 IPv6（') printf '%s' 'You are currently connected via IPv6 (' ;;
-        '例：80,443,2053    400-500    443/tcp,51820/udp   （不写协议 = TCP 和 UDP 都放行）') printf '%s' 'e.g. 80,443,2053    400-500    443/tcp,51820/udp   (no protocol = allow both TCP and UDP)' ;;
-        '依赖安装失败') printf '%s' 'Failed to install dependencies' ;;
-        '依赖安装完成') printf '%s' 'Dependencies installed' ;;
-        '保存 Egress 配置并创建 systemd 服务') printf '%s' 'Save the Egress config and create the systemd service' ;;
-        '保活巡检 :') printf '%s' 'Keepalive watchdog :' ;;
-        '保留现有端口和 PSK？（选 n 重新配置）') printf '%s' 'Keep the current port and PSK? (choose n to reconfigure)' ;;
-        '保留的其他内核:') printf '%s' 'Other kernels kept:' ;;
-        '保留端口   :') printf '%s' 'Reserved ports   :' ;;
-        '修复后服务仍未正常监听，最近日志：') printf '%s' 'The service is still not listening normally after the repair; recent log:' ;;
-        '修复完成') printf '%s' 'Repair complete' ;;
-        '修复完成，服务运行正常') printf '%s' 'Repair complete; service running normally' ;;
-        '修改 DNS 地址族偏好') printf '%s' 'Change DNS address-family preference' ;;
-        '修改 mode') printf '%s' 'Change mode' ;;
-        '修改主端口配置（端口 / PSK / mode / DNS 偏好 / 节点名）') printf '%s' 'Change the main port config (port / PSK / mode / DNS preference / node name)' ;;
-        '修改分享链接用的公网地址') printf '%s' 'Change the public address used in share links' ;;
-        '修改封禁时长') printf '%s' 'Change the ban duration' ;;
-        '修改端口') printf '%s' 'Change port' ;;
-        '修改节点名称 / 公网地址（只影响生成的 Surge 配置行）') printf '%s' 'Change node name / public address (only affects the generated Surge config line)' ;;
-        '修改触发条件（失败次数 / 统计窗口）') printf '%s' 'Change trigger conditions (failure count / time window)' ;;
-        '停用后所有端口不再受 ufw 过滤（已添加的规则会保留，可随时重新启用）') printf '%s' 'After disabling, no ports are filtered by ufw anymore (added rules are kept and can be re-enabled anytime)' ;;
-        '先安装向导所需的基础工具:') printf '%s' 'First install the basic tools the wizard needs:' ;;
-        '全8位渐变（默认，推荐）') printf '%s' 'Full 8-bit fade (default, recommended)' ;;
-        '公网 IP/域名（用于 Anywhere/Vector/Egress 连接，回车使用探测值') printf '%s' 'Public IP/domain (for Anywhere/Vector/Egress connections; Enter = detected value' ;;
-        '公网地址      :') printf '%s' 'Public address      :' ;;
-        '公网地址（回车保持') printf '%s' 'Public address (Enter = keep ' ;;
-        '公钥') printf '%s' 'Public key' ;;
-        '共享密钥    :') printf '%s' 'Shared key    :' ;;
-        '共享密钥 Shared Key（输入不回显，回车自动生成 32 位十六进制）:') printf '%s' 'Shared Key (input hidden; Enter = auto-generate 32 hex chars):' ;;
-        '共享密钥（必须与 Portal 完全一致，32 位小写十六进制，输入不回显）:') printf '%s' 'Shared key (must exactly match the Portal; 32 lowercase hex chars; input hidden):' ;;
-        '关闭自动更新') printf '%s' 'Disable auto-update' ;;
-        '其他/手动') printf '%s' 'Other/Manual' ;;
-        '其他:') printf '%s' 'Other:' ;;
-        '内核       :') printf '%s' 'Kernel       :' ;;
-        '内核:') printf '%s' 'Kernel:' ;;
-        '内核包安装失败') printf '%s' 'Kernel package installation failed' ;;
-        '内核版本') printf '%s' 'Kernel version' ;;
-        '内核版本 :') printf '%s' 'Kernel version :' ;;
-        '写入 /etc/gai.conf，让系统优先选用 IPv4（不关闭IPv6，只调整地址选择优先级）') printf '%s' 'Write /etc/gai.conf so the system prefers IPv4 (IPv6 stays on; only address-selection priority changes)' ;;
-        '出口机启动命令（或在出口机上运行本脚本 Nowhere 菜单 2，直接粘贴上面的连接串装成 systemd 服务）：') printf '%s' 'Exit-machine launch command (or run this script'\''s Nowhere menu 2 on the exit machine and paste the connection string above to install it as a systemd service):' ;;
-        '出站 DNS 地址族偏好 dns-ip-preference：') printf '%s' 'Outbound DNS address-family preference dns-ip-preference:' ;;
-        '出站源 IP dial（回车默认 auto；填 IP 会限定地址族，绑定失败不回退）:') printf '%s' 'Outbound source IP dial (Enter = auto; filling in an IP pins the address family, and a failed bind does not fall back):' ;;
-        '分享链接:') printf '%s' 'Share link:' ;;
-        '分享链接与 anywhere:// 深链格式已按 v3 文档更新，但能否导入成功') printf '%s' 'Share links and anywhere:// deep-link formats were updated to the v3 docs, but whether import succeeds' ;;
-        '分享链接用的公网地址（当前') printf '%s' 'Public address used in share links (current ' ;;
-        '切换失败，服务可能未正常启动，请检查日志') printf '%s' 'Switch failed; the service may not have started properly, please check the log' ;;
-        '切换通道（当前') printf '%s' 'Switch channel (current ' ;;
-        '创建 adam-xray 系统用户失败') printf '%s' 'Failed to create the adam-xray system user' ;;
-        '创建 snell 系统用户失败') printf '%s' 'Failed to create the snell system user' ;;
-        '删除 Snell 端口配置') printf '%s' 'Delete a Snell port config' ;;
-        '删除方式：') printf '%s' 'Deletion method:' ;;
-        '删除节点') printf '%s' 'Delete node' ;;
-        '删除规则') printf '%s' 'Delete rule' ;;
-        '剩余端口配置：') printf '%s' 'Remaining port configs:' ;;
-        '加密:') printf '%s' 'Encryption:' ;;
-        '升级完成:') printf '%s' 'Upgrade complete:' ;;
-        '协议代，与本脚本生成的 v3') printf '%s' 'protocol generation; this script generates v3' ;;
-        '卸载 Fail2ban（保留 /etc/fail2ban 下你自己的其他配置）') printf '%s' 'Uninstall Fail2ban (keep your own other configs under /etc/fail2ban)' ;;
-        '卸载 Nowhere') printf '%s' 'Uninstall Nowhere' ;;
-        '卸载 XanMod 内核') printf '%s' 'Uninstall the XanMod kernel' ;;
-        '卸载失败') printf '%s' 'Uninstall failed' ;;
-        '压缩包损坏') printf '%s' 'Archive is damaged' ;;
-        '压缩包里没有 snell-server') printf '%s' 'No snell-server in the archive' ;;
-        '压缩包里没有 xray 二进制') printf '%s' 'No xray binary in the archive' ;;
-        '参数），改为逐项填写') printf '%s' 'parameters); fill in each item instead' ;;
-        '发行版:') printf '%s' 'Distro:' ;;
-        '取不到仓库里的 SHA256SUMS，无法核对校验值（SHA256:') printf '%s' 'Cannot fetch SHA256SUMS from the repo; cannot verify the checksum (SHA256: ' ;;
-        '取决于你手机上的 Anywhere 版本是否已支持 NW3，请以实测为准。') printf '%s' 'Depends on whether the Anywhere version on your phone already supports NW3; go by what actually works.' ;;
-        '取得完整脚本，本次跳过') printf '%s' 'Got the full script; skipped this time' ;;
-        '取消') printf '%s' 'Cancel' ;;
-        '叠加 VLESS Encryption（抗量子密钥交换的应用层加密；客户端需较新的 Xray 内核）？') printf '%s' 'Stack VLESS Encryption (application-layer encryption with quantum-resistant key exchange; clients need a newer Xray core)?' ;;
-        '另一个维护任务仍在运行，本次跳过') printf '%s' 'Another maintenance task is still running; skipped this time' ;;
-        '只移除本脚本的 SSH 防护配置（保留 Fail2ban 及其他 jail）') printf '%s' 'Only remove this script'\''s SSH protection config (keep Fail2ban and other jails)' ;;
-        '可以直接粘贴 Portal 端（Nowhere 菜单 4 / pz）生成的 egress:// 连接串，跳过逐项填写') printf '%s' 'You can paste the egress:// connection string generated on the Portal side (Nowhere menu 4 / pz) to skip filling in each item' ;;
-        '可手动补加：') printf '%s' 'You can add manually:' ;;
-        '可手动输入版本号继续（如 v6.0.0，回车取消）:') printf '%s' 'You can type a version number to continue (e.g. v6.0.0, Enter to cancel):' ;;
-        '可用:') printf '%s' 'Available:' ;;
-        '可能不在 XanMod 支持列表里）') printf '%s' 'may not be in the XanMod support list)' ;;
-        '可能是作者刚更新、两个文件的缓存不同步，也可能是下载被篡改') printf '%s' 'The author may have just updated it and the two files'\'' caches are out of sync, or the download may have been tampered with' ;;
-        '同时删除全部节点配置') printf '%s' 'Also delete all node configs' ;;
-        '同时删除配置目录') printf '%s' 'Also delete the config directory' ;;
-        '同时删除防火墙里 Nowhere 端口的放行规则（') printf '%s' 'Also delete the firewall allow rules for the Nowhere ports (' ;;
-        '同时删除防火墙里 Snell 端口（') printf '%s' 'Also delete the firewall allow rules for the Snell ports (' ;;
-        '同时删除防火墙里这些节点端口的放行规则（') printf '%s' 'Also delete the firewall allow rules for these node ports (' ;;
-        '名称只能包含字母、数字和 . _ -，已使用默认值') printf '%s' 'Name may only contain letters, digits and . _ -; the default was used' ;;
-        '名称格式不合法，未修改') printf '%s' 'Invalid name format; not changed' ;;
-        '启动命令：') printf '%s' 'Launch command:' ;;
-        '启动失败: journalctl -u fail2ban -n 30 --no-pager') printf '%s' 'Startup failed: journalctl -u fail2ban -n 30 --no-pager' ;;
-        '启动失败，回滚到') printf '%s' 'Startup failed; rolling back to ' ;;
-        '启用 DNS over TLS（opportunistic：上游支持就加密，不支持自动回退）？') printf '%s' 'Enable DNS over TLS (opportunistic: encrypt when the upstream supports it, fall back automatically otherwise)?' ;;
-        '启用」或「9') printf '%s' 'Enable" or "9' ;;
-        '启用前先放行 SSH 端口（') printf '%s' 'Before enabling, first allow the SSH port (' ;;
-        '回滚 tcpfit 的全部改动    3') printf '%s' 'Roll back all tcpfit changes    3' ;;
-        '回滚后仍未启动: journalctl -u adam-xray -n 50') printf '%s' 'Still not started after rollback: journalctl -u adam-xray -n 50' ;;
-        '回滚后服务仍未启动，请查看: journalctl -u snell -n 50 --no-pager') printf '%s' 'Service still not started after rollback; see: journalctl -u snell -n 50 --no-pager' ;;
-        '回滚后服务仍未启动，请立即查看日志: journalctl -u nowhere -n 50 --no-pager') printf '%s' 'Service still not started after rollback; check the log now: journalctl -u nowhere -n 50 --no-pager' ;;
-        '回连载体:') printf '%s' 'Return carrier:' ;;
-        '回连载体（须与 Portal 已开放的监听对应；v3.3.0 起两种都可用）：') printf '%s' 'Return carrier (must match the Portal'\''s open listeners; both work since v3.3.0):' ;;
-        '回退后服务启动失败，日志如下：') printf '%s' 'Service failed to start after rollback; log:' ;;
-        '回退目标 :') printf '%s' 'Rollback target :' ;;
-        '地址优先级 :') printf '%s' 'Address priority :' ;;
-        '地址族（回车=不限；4=仅 IPv4；6=仅 IPv6）:') printf '%s' 'Address family (Enter = no limit; 4 = IPv4 only; 6 = IPv6 only):' ;;
-        '地址格式不合法，未修改') printf '%s' 'Invalid address format; not changed' ;;
-        '域名       :') printf '%s' 'Domain       :' ;;
-        '域名/主机     :') printf '%s' 'Domain/host     :' ;;
-        '域名/公网地址 :') printf '%s' 'Domain/public address :' ;;
-        '域名不合法，已中止') printf '%s' 'Invalid domain; aborted' ;;
-        '域名不能为空') printf '%s' 'Domain cannot be empty' ;;
-        '域名只能包含字母、数字、点和连字符') printf '%s' 'Domain may only contain letters, digits, dots and hyphens' ;;
-        '域名是否在该 CF 账号下 3') printf '%s' 'Is the domain under this CF account? 3' ;;
-        '域名是否已指向本 VPS（见上方 DNS 预检结果）') printf '%s' 'Has the domain already pointed to this VPS (see the DNS pre-check above)?' ;;
-        '域名是否正确 2') printf '%s' 'Is the domain correct? 2' ;;
-        '域名（须已解析到本机）:') printf '%s' 'Domain (must already resolve to this machine):' ;;
-        '基础工具安装失败，后续的输入校验可能不准确') printf '%s' 'Basic tools failed to install; later input validation may be inaccurate' ;;
-        '备份仅在执行过「更新」或「选择版本」之后才会生成') printf '%s' 'Backups are only created after an "Update" or "Select version" run' ;;
-        '备份含共享密钥与证书私钥，只能放本机，勿外发、勿传网盘') printf '%s' 'The backup contains shared keys and certificate private keys; keep it on this machine only, do not send it out or upload it to any cloud drive' ;;
-        '备份已保存：') printf '%s' 'Backup saved:' ;;
-        '备份文件损坏或不是有效的 tgz') printf '%s' 'Backup file is damaged or not a valid tgz' ;;
-        '备份文件路径（/root/adam-backup-') printf '%s' 'Backup file path (/root/adam-backup-' ;;
-        '复用现有二进制:') printf '%s' 'Reuse the existing binary:' ;;
-        '多端口：列出 / 新增 / 删除某个端口配置') printf '%s' 'Multiple ports: list / add / delete a port config' ;;
-        '天！请立即手动续期') printf '%s' 'days! Please renew manually now' ;;
-        '天（30 天内到期），建议立即手动续期') printf '%s' 'days (expiring within 30 days); manual renewal recommended now' ;;
-        '失败') printf '%s' 'Failed' ;;
-        '失败，当前仍为') printf '%s' 'Failed; still ' ;;
-        '如果本机用 DHCP，续租或重启网络时该文件可能被改回（那种情况需在 DHCP / 网络配置里固定 DNS）') printf '%s' 'If this machine uses DHCP, the file may be reverted on lease renewal or network restart (in that case, pin the DNS in the DHCP / network config)' ;;
-        '它的改动只写在自己的文件里（/etc/sysctl.d/99-tcpfit.conf 等），可用 tcpfit rollback 整体回滚') printf '%s' 'Its changes only go into its own files (/etc/sysctl.d/99-tcpfit.conf etc.); use tcpfit rollback to revert them all' ;;
-        '安装 / 更新 XanMod 内核（BBR v3，仅 x86_64）') printf '%s' 'Install / update the XanMod kernel (BBR v3, x86_64 only)' ;;
-        '安装 / 更新 XanMod 内核（内置 BBR v3）') printf '%s' 'Install / update the XanMod kernel (built-in BBR v3)' ;;
-        '安装 / 重装」重新选择通道') printf '%s' 'Install / reinstall" to choose a channel again' ;;
-        '安装 Fail2ban 并启用 SSH 防护') printf '%s' 'Install Fail2ban and enable SSH protection' ;;
-        '安装 Fail2ban」生成') printf '%s' 'Install Fail2ban" to generate' ;;
-        '安装 Fail2ban」（或 adam f2b install）') printf '%s' 'Install Fail2ban" (or adam f2b install)' ;;
-        '安装 Snell Server（Surge 官方，v') printf '%s' 'Install Snell Server (Surge official, v' ;;
-        '安装 Snell」（或 adam snell install）') printf '%s' 'Install Snell" (or adam snell install)' ;;
-        '安装 Xray」（或 adam xray install）') printf '%s' 'Install Xray" (or adam xray install)' ;;
-        '安装 Xray（SS / VLESS）') printf '%s' 'Install Xray (SS / VLESS)' ;;
-        '安装 acme.sh...') printf '%s' 'Installing acme.sh...' ;;
-        '安装中止') printf '%s' 'Installation aborted' ;;
-        '安装中止：请按日志排查（常见：密钥 / pin / 端口 / Portal 未设 out=egress / 载体与 Portal 监听不对应）') printf '%s' 'Installation aborted: please troubleshoot using the log (common causes: key / pin / port / Portal not set to out=egress / carrier does not match the Portal'\''s listeners)' ;;
-        '安装包 SHA256 校验失败，已中止') printf '%s' 'Package SHA256 verification failed; aborted' ;;
-        '安装失败，请检查 apt 源/网络') printf '%s' 'Installation failed; please check apt sources / network' ;;
-        '安装快捷命令') printf '%s' 'Install the shortcut commands' ;;
-        '安装测试版') printf '%s' 'Install the beta' ;;
-        '安装系统依赖') printf '%s' 'Install system dependencies' ;;
-        '安装防火墙」（或 adam fw install）') printf '%s' 'Install the firewall" (or adam fw install)' ;;
-        '安装防火墙（ufw）') printf '%s' 'Install the firewall (ufw)' ;;
-        '官方已发布更高大版本') printf '%s' 'A newer major version has been released' ;;
-        '官方已有更高大版本') printf '%s' 'A newer major version is already available' ;;
-        '官方目前只有 v') printf '%s' 'Officially there is currently only v' ;;
-        '实时日志（Ctrl+C 退出）') printf '%s' 'Live logs (Ctrl+C to exit)' ;;
-        '客户端连接 CDN 的端口（回车默认 443）:') printf '%s' 'Port clients use to connect to the CDN (Enter = 443):' ;;
-        '客户端连接用的公网地址（回车使用') printf '%s' 'Public address clients connect to (Enter = use ' ;;
-        '客户端需要同步修改，新的配置行如下') printf '%s' 'Clients need to update in sync; the new config line:' ;;
-        '密码:') printf '%s' 'Password:' ;;
-        '密钥   :') printf '%s' 'Key   :' ;;
-        '密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符，不能回车自动生成（必须与 Portal 一致）') printf '%s' 'Key does not meet the v3 spec: it must be exactly 32 lowercase hex chars; it cannot be auto-generated with Enter (must match the Portal)' ;;
-        '对端已就绪，继续升级') printf '%s' 'Peers are ready; continue the upgrade' ;;
-        '封禁动作:') printf '%s' 'Ban action:' ;;
-        '封禁失败（jail') printf '%s' 'Ban failed (jail ' ;;
-        '封禁日志 / 查看被封 IP') printf '%s' 'Ban log / view banned IPs' ;;
-        '封禁时长 :') printf '%s' 'Ban duration :' ;;
-        '封禁时长:') printf '%s' 'Ban duration:' ;;
-        '封禁时长已改为') printf '%s' 'Ban duration changed to' ;;
-        '将卸载:') printf '%s' 'Will uninstall:' ;;
-        '将重新走一遍安装向导并覆盖当前配置') printf '%s' 'Will run the install wizard again and overwrite the current config' ;;
-        '尚未安装 Fail2ban，请先执行「1') printf '%s' 'Fail2ban is not installed yet; please run "1' ;;
-        '尚未安装 ufw，请先在防火墙菜单执行「1') printf '%s' 'ufw is not installed yet; please run "1 in the firewall menu' ;;
-        '属于 NW') printf '%s' 'belongs to NW' ;;
-        '属于新的协议代（NW') printf '%s' 'belongs to a new protocol generation (NW' ;;
-        '已从仓库更新:') printf '%s' 'Updated from the repo:' ;;
-        '已从备份恢复 /etc/resolv.conf') printf '%s' 'Restored /etc/resolv.conf from backup' ;;
-        '已从当前服务启动日志读取到自签证书 SHA-256 指纹：') printf '%s' 'Read the self-signed certificate SHA-256 fingerprint from the current service startup log:' ;;
-        '已保留，如需清除请手动删除）') printf '%s' 'Kept; delete manually if you want to remove it)' ;;
-        '已修正为 IPv4 优先，现在可以正常连接 Let') printf '%s' 'Fixed to prefer IPv4; can now connect to Let' ;;
-        '已停止') printf '%s' 'Stopped' ;;
-        '已关闭 Snell 自动更新（保活巡检不受影响）') printf '%s' 'Snell auto-update disabled (keepalive watchdog unaffected)' ;;
-        '已写入 /etc/resolv.conf:') printf '%s' 'Written to /etc/resolv.conf:' ;;
-        '已切换，当前:') printf '%s' 'Switched; current:' ;;
-        '已删除') printf '%s' 'Deleted' ;;
-        '已删除放行规则:') printf '%s' 'Deleted allow rules:' ;;
-        '已删除规则') printf '%s' 'Deleted rules' ;;
-        '已加入内核保留端口') printf '%s' 'Added to kernel reserved ports' ;;
-        '已取消安装') printf '%s' 'Installation cancelled' ;;
-        '已取消，防火墙保持未启用') printf '%s' 'Cancelled; firewall stays disabled' ;;
-        '已启动并监听 TCP') printf '%s' 'Started and listening on TCP' ;;
-        '已回退到:') printf '%s' 'Rolled back to:' ;;
-        '已在白名单中') printf '%s' 'Already in the allowlist' ;;
-        '已安装的 XanMod 包:') printf '%s' 'Installed XanMod packages:' ;;
-        '已安装续期 hook：证书更新后自动 restart nowhere') printf '%s' 'Renewal hook installed: nowhere restarts automatically after a certificate update' ;;
-        '已封禁') printf '%s' 'Banned' ;;
-        '已开启 Snell 自动更新：每日维护任务（凌晨 4–6 点）检查官方发布，') printf '%s' 'Snell auto-update enabled: the daily maintenance task (04:00–06:00) checks official releases,' ;;
-        '已恢复') printf '%s' 'Restored' ;;
-        '已恢复原来的 /etc/gai.conf') printf '%s' 'Restored the original /etc/gai.conf' ;;
-        '已恢复附加端口') printf '%s' 'Additional ports restored' ;;
-        '已恢复（原系统没有 /etc/gai.conf，已删除）') printf '%s' 'Restored (the system had no /etc/gai.conf; deleted it)' ;;
-        '已接入 CDN 的域名（如 cdn.example.com）:') printf '%s' 'Domain behind a CDN (e.g. cdn.example.com):' ;;
-        '已放行') printf '%s' 'Allowed' ;;
-        '已放行本脚本服务端口:') printf '%s' 'Allowed this script'\''s service ports:' ;;
-        '已放行的端口') printf '%s' 'Allowed ports' ;;
-        '已是最新版本') printf '%s' 'Already the latest version' ;;
-        '已更新') printf '%s' 'Updated' ;;
-        '已检测到 nowhere 二进制（') printf '%s' 'Detected a nowhere binary (' ;;
-        '已添加并生效') printf '%s' 'Added and in effect' ;;
-        '已添加并监听') printf '%s' 'Added and listening' ;;
-        '已生成 PSK:') printf '%s' 'Generated PSK:' ;;
-        '已生成密钥:') printf '%s' 'Generated key:' ;;
-        '已确认 SSH 端口放行:') printf '%s' 'Confirmed the SSH port is allowed:' ;;
-        '已禁用（临时，重启恢复）') printf '%s' 'Disabled (temporary; restored on reboot)' ;;
-        '已禁用（永久）') printf '%s' 'Disabled (permanent)' ;;
-        '已移除 certbot 续期的 cron 兜底任务') printf '%s' 'Removed the certbot renewal cron fallback task' ;;
-        '已移除本脚本的 SSH 防护配置') printf '%s' 'Removed this script'\''s SSH protection config' ;;
-        '已移除本脚本的 systemd-resolved 配置，DNS 恢复为系统原设置') printf '%s' 'Removed this script'\''s systemd-resolved config; DNS restored to system defaults' ;;
-        '已经是最新版本，无需更新') printf '%s' 'Already the latest version; no update needed' ;;
-        '已经是本机的一份 Snell 附加端口配置') printf '%s' 'Already one of this machine'\''s Snell additional-port configs' ;;
-        '已经是该版本，无需切换') printf '%s' 'Already on this version; no switch needed' ;;
-        '已自动回滚，服务恢复运行:') printf '%s' 'Auto-rolled back; service running again:' ;;
-        '已自动更新:') printf '%s' 'Auto-updated:' ;;
-        '已被其他进程占用') printf '%s' 'Already in use by another process' ;;
-        '已被占用，请换一个') printf '%s' 'Already in use; please choose another' ;;
-        '已解封') printf '%s' 'Unbanned' ;;
-        '已解封所有 IP') printf '%s' 'Unbanned all IPs' ;;
-        '已设置为') printf '%s' 'Set to' ;;
-        '已跳过启用防火墙，请确认云厂商安全组 / 其他防火墙已放行:') printf '%s' 'Skipped enabling the firewall; please confirm your cloud security group / other firewall allows:' ;;
-        '已跳过演练：建议 90 天内用Nowhere 菜单「11') printf '%s' 'Skipped the dry run: it is recommended to use Nowhere menu "11 within 90 days' ;;
-        '已通过 systemd-resolved 设置 DNS:') printf '%s' 'DNS set via systemd-resolved:' ;;
-        '常用命令：') printf '%s' 'Common commands:' ;;
-        '常用命令：systemctl status nowhere / journalctl -u nowhere -f /') printf '%s' 'Common commands: systemctl status nowhere / journalctl -u nowhere -f /' ;;
-        '常见原因：证书路径错误、端口被抢占、密钥格式不合 v3 规范（必须 32 位小写十六进制）') printf '%s' 'Common causes: wrong certificate path, port taken by another process, key format not meeting the v3 spec (must be 32 lowercase hex chars)' ;;
-        '并重新导入本链接（链接已带 support-x25519mlkem768=true，不认识该参数的客户端会忽略它）') printf '%s' 'And re-import this link (it already carries support-x25519mlkem768=true; clients that do not recognize this parameter will ignore it)' ;;
-        '开启自动更新？') printf '%s' 'Enable auto-update?' ;;
-        '开启自动更新？（每天检查一次官方发布，') printf '%s' 'Enable auto-update? (checks official releases once a day, ' ;;
-        '开启自动更新？（每日检查官方发布；先用新内核校验配置，失败不换，启动失败自动回滚）') printf '%s' 'Enable auto-update? (checks official releases daily; validates the config with the new core first, does not switch on failure, auto-rolls back on startup failure)' ;;
-        '当前 DNS：') printf '%s' 'Current DNS:' ;;
-        '当前 Portal 仅 QUIC/UDP，Vector 载体自动选 udp') printf '%s' 'Current Portal is QUIC/UDP only; the Vector carrier is auto-selected as udp' ;;
-        '当前 Portal 仅 TLS/TCP，Egress 载体自动选 tcp（出口机需') printf '%s' 'Current Portal is TLS/TCP only; the Egress carrier is auto-selected as tcp (exit machines need ' ;;
-        '当前 Portal 仅 TLS/TCP，Vector 载体自动选 tcp') printf '%s' 'Current Portal is TLS/TCP only; the Vector carrier is auto-selected as tcp' ;;
-        '当前 tcpfit 版本:') printf '%s' 'Current tcpfit version:' ;;
-        '当前 tls=2 证书 SHA-256 指纹（续期后会变化）：') printf '%s' 'Current tls=2 certificate SHA-256 fingerprint (changes after renewal):' ;;
-        '当前:') printf '%s' 'Current:' ;;
-        '当前: IPv6') printf '%s' 'Current: IPv6' ;;
-        '当前为纯 QUIC/UDP Portal，没有 TLS 监听，且启动日志中未找到指纹') printf '%s' 'Current setup is a pure QUIC/UDP Portal with no TLS listener, and no fingerprint was found in the startup log' ;;
-        '当前为自签模式（tls=1），证书只存在内存中、无需续期') printf '%s' 'Currently in self-signed mode (tls=1); the certificate lives only in memory and needs no renewal' ;;
-        '当前保存的共享密钥不符合 v3 规范（必须是恰好 32 位小写十六进制字符）') printf '%s' 'The saved shared key does not meet the v3 spec (must be exactly 32 lowercase hex chars)' ;;
-        '当前内核:') printf '%s' 'Current kernel:' ;;
-        '当前安装的是') printf '%s' 'Currently installed: ' ;;
-        '当前安装的是测试版') printf '%s' 'The currently installed version is a beta' ;;
-        '当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置') printf '%s' 'The current key does not meet the v3 spec and cannot be probed; please reconfigure via Nowhere menu 3 first' ;;
-        '当前封禁') printf '%s' 'Currently banned:' ;;
-        '当前封禁列表：') printf '%s' 'Current ban list:' ;;
-        '当前封禁时长:') printf '%s' 'Current ban duration:' ;;
-        '当前已是 tls=2 真实证书模式，无需迁移（证书状态见 Nowhere 菜单 11）') printf '%s' 'Already in tls=2 real-certificate mode; no migration needed (see Nowhere menu 11 for certificate status)' ;;
-        '当前是容器类虚拟化（') printf '%s' 'Currently running in container-style virtualization (' ;;
-        '当前版本 :') printf '%s' 'Current version :' ;;
-        '当前白名单（这些来源永远不会被封）:') printf '%s' 'Current allowlist (these sources are never banned):' ;;
-        '当前系统与网络状态') printf '%s' 'Current system and network status' ;;
-        '当前规则：') printf '%s' 'Current rules:' ;;
-        '当前解析不到任何 A 记录（DNS 未生效或拼写错误），HTTP-01 很可能失败') printf '%s' 'No A record resolves right now (DNS not in effect or a typo); HTTP-01 will most likely fail' ;;
-        '当前触发条件:') printf '%s' 'Current trigger conditions:' ;;
-        '当前该域名的证书状态：') printf '%s' 'Current certificate status for this domain:' ;;
-        '当前语言：') printf '%s' 'Current language:' ;;
-        '当前运行的二进制  :') printf '%s' 'Currently running binary  :' ;;
-        '当前：端口') printf '%s' 'Current: port ' ;;
-        '快捷命令已删除（管理脚本副本') printf '%s' 'Shortcut commands deleted (management script copy ' ;;
-        '快捷命令已安装完成') printf '%s' 'Shortcut commands installed' ;;
-        '快捷命令无法安装') printf '%s' 'Shortcut commands cannot be installed' ;;
-        '恢复启用    0') printf '%s' 'Restore and enable    0' ;;
-        '恢复失败：可能有其他 sysctl 配置文件也禁用了 IPv6（grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf）') printf '%s' 'Restore failed: other sysctl config files may also disable IPv6 (grep -r disable_ipv6 /etc/sysctl.d /etc/sysctl.conf)' ;;
-        '恢复完成（已重启启用的服务）') printf '%s' 'Restore complete (enabled services restarted)' ;;
-        '恢复？') printf '%s' 'Restore?' ;;
-        '您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云') printf '%s' 'You previously chose the "Other/Manual" DNS provider: you must first complete DNS TXT verification manually to get the certificate; this script cannot take that over in one click. Please re-run and choose Cloudflare (recommended) / DNSPod / Alibaba Cloud instead' ;;
-        '手动封禁一个 IP') printf '%s' 'Manually ban an IP' ;;
-        '手动解封一个 IP') printf '%s' 'Manually unban an IP' ;;
-        '打包失败') printf '%s' 'Packaging failed' ;;
-        '执行完毕') printf '%s' 'Done' ;;
-        '扫码导入 Anywhere（QUIC/UDP）：') printf '%s' 'Scan to import into Anywhere (QUIC/UDP):' ;;
-        '扫码导入 Anywhere（TLS/TCP）：') printf '%s' 'Scan to import into Anywhere (TLS/TCP):' ;;
-        '找不到备份文件：') printf '%s' 'Backup file not found:' ;;
-        '找不到节点') printf '%s' 'Node not found' ;;
-        '把你当前的登录 IP（') printf '%s' 'Add your current login IP (' ;;
-        '拥塞控制   :') printf '%s' 'Congestion control   :' ;;
-        '拥塞控制:') printf '%s' 'Congestion control:' ;;
-        '按日志文件方式启动失败（常见原因：系统没有 /var/log/auth.log），改用 systemd journal 后端重试 ...') printf '%s' 'Failed to start in log-file mode (common cause: the system has no /var/log/auth.log); retrying with the systemd journal backend ...' ;;
-        '按端口') printf '%s' 'By port' ;;
-        '按规则编号（上表方括号里的数字）') printf '%s' 'By rule number (the numbers in square brackets in the table above)' ;;
-        '探测 :') printf '%s' 'Probe :' ;;
-        '探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达') printf '%s' 'Probe did not succeed (Result is not OK). Common causes: Portal egress unreachable, no available Egress (waits until the Flow setup timeout), peer Morph/pin/key mismatch, or the target itself unreachable' ;;
-        '接替为主配置（') printf '%s' 'Taking over as the main config (' ;;
-        '接替后主服务未能启动，已恢复原样。日志：') printf '%s' 'The main service failed to start after the takeover; restored as before. Log:' ;;
-        '提示：Cloudflare 回源 HTTPS 只支持 443/2053/2083/2087/2096/8443 这几个端口') printf '%s' 'Note: Cloudflare origin-pull HTTPS only supports ports 443/2053/2083/2087/2096/8443' ;;
-        '提示：Docker 用 -p 发布的端口走 FORWARD 链，不受 ufw 入站规则限制') printf '%s' 'Note: ports published by Docker with -p go through the FORWARD chain and are not limited by ufw inbound rules' ;;
-        '提示：官方已发布更高大版本') printf '%s' 'Note: a newer major version has been released' ;;
-        '提示：官方已有更高大版本') printf '%s' 'Note: a newer major version is already available' ;;
-        '提醒（v3 官方说明）：Vector/Egress 默认校验系统 CA + 主机名，自签证书必须改用 pin= 指纹锁定') printf '%s' 'Reminder (official v3 docs): Vector/Egress verify the system CA + hostname by default; self-signed certificates must use pin= fingerprint locking instead' ;;
-        '握手超时      :') printf '%s' 'Handshake timeout      :' ;;
-        '握手超时    :') printf '%s' 'Handshake timeout    :' ;;
-        '握手超时 NOW_HANDSHAKE_TIMEOUT（v3.3.0 起未设置时从 Shared Key 派生 3s–30s；持续时间格式如 10s/500ms/1m/1h，回车默认 10s）:') printf '%s' 'Handshake timeout NOW_HANDSHAKE_TIMEOUT (since v3.3.0, when unset it is derived from the Shared Key, 3s–30s; duration format e.g. 10s/500ms/1m/1h; Enter = 10s):' ;;
-        '操作完成！') printf '%s' 'Done!' ;;
-        '支持 TLS 1.3 + HTTP/2（也可能只是本机到它的网络不通），如连不上请换一个站点') printf '%s' 'Supports TLS 1.3 + HTTP/2 (or it may just be that the network from this machine to it is down); if you cannot connect, pick another site' ;;
-        '支持 TLS 1.3 + HTTP/2，可用') printf '%s' 'Supports TLS 1.3 + HTTP/2; usable' ;;
-        '改为跟随最新预发布版') printf '%s' 'Switch to following the latest pre-release' ;;
-        '放行') printf '%s' 'Allow' ;;
-        '放行端口」添加后再启用') printf '%s' 'Allow ports" first, then enable' ;;
-        '文件') printf '%s' 'File' ;;
-        '新二进制无法在本机运行（缺少依赖库或架构不符）:') printf '%s' 'The new binary cannot run on this machine (missing libraries or wrong architecture):' ;;
-        '新增') printf '%s' 'Add ' ;;
-        '新增 Snell 端口配置') printf '%s' 'Add a Snell port config' ;;
-        '新版 Xray 内核客户端可连；mihomo 内核需较新版本并重新导入链接；部分客户端（如当时的 sing-box）连不上') printf '%s' 'Clients with the new Xray core can connect; mihomo cores need a newer version and the link re-imported; some clients (e.g. sing-box at the time) cannot connect' ;;
-        '新版本即自动升级，启动失败自动回滚') printf '%s' 'New versions auto-upgrade; auto-rollback on startup failure' ;;
-        '新版本启动失败，日志如下：') printf '%s' 'New version failed to start; log:' ;;
-        '新版本就自动升级，失败自动回滚）') printf '%s' 'New versions auto-upgrade; auto-rollback on failure)' ;;
-        '新的 PSK（12-255 位，仅限字母、数字、- 和 _）:') printf '%s' 'New PSK (12-255 chars; letters, digits, - and _ only):' ;;
-        '新的封禁时长（纯数字=分钟；也可写 10m / 1h / 1d / 1w；-1=永久）') printf '%s' 'New ban duration (plain number = minutes; also accepts 10m / 1h / 1d / 1w; -1 = forever)' ;;
-        '新的监听端口:') printf '%s' 'New listen port:' ;;
-        '新端口使用独立的 PSK 与 mode，和现有端口互不影响（可以给不同设备 / 不同用途各用一份）') printf '%s' 'A new port uses its own PSK and mode and does not affect existing ports (you can give each device / use case its own)' ;;
-        '新端口未能启动，已撤回。日志：') printf '%s' 'The new port failed to start and was withdrawn. Log:' ;;
-        '新节点未能生效，已撤回本次改动') printf '%s' 'The new node did not take effect; this change was withdrawn' ;;
-        '新配置启动失败，已恢复原配置。日志：') printf '%s' 'The new config failed to start; the original config was restored. Log:' ;;
-        '无法取得官方校验值（API digest 与校验文件均不可用），跳过校验（本次经 HTTPS 直连 GitHub 下载）') printf '%s' 'Cannot get the official checksum (neither the API digest nor the checksum file is available); skipping verification (this download goes directly to GitHub over HTTPS)' ;;
-        '无法查询最新版本，请检查网络') printf '%s' 'Cannot query the latest version; please check the network' ;;
-        '无法获取版本号，请检查网络') printf '%s' 'Cannot get the version number; please check the network' ;;
-        '无法识别发行版代号，不能添加 XanMod 软件源') printf '%s' 'Cannot identify the distro codename; cannot add the XanMod repo' ;;
-        '无法识别的端口写法:') printf '%s' 'Unrecognized port format:' ;;
-        '无法读取证书有效期（文件缺失或损坏），建议重新签发') printf '%s' 'Cannot read the certificate validity (file missing or damaged); reissuing is recommended' ;;
-        '无法通过现有配置的校验，保持') printf '%s' 'Cannot pass validation with the current config; keeping ' ;;
-        '无节点') printf '%s' 'No nodes' ;;
-        '日志 :') printf '%s' 'Log :' ;;
-        '日志后端 :') printf '%s' 'Log backend :' ;;
-        '日志清理完成') printf '%s' 'Journal log cleanup complete' ;;
-        '旧客户端会表现为超时 / reality verification failed；请使用新版 Xray 内核客户端，mihomo 内核需较新版本') printf '%s' 'Old clients will show timeouts / reality verification failed; please use a newer Xray core client; mihomo cores need a newer version' ;;
-        '旧版任意字符串/Base64 密钥在 v3 会被拒绝启动，请重新输入或直接回车自动生成') printf '%s' 'Old-style arbitrary string/Base64 keys are rejected at v3 startup; please re-enter or just press Enter to auto-generate' ;;
-        '旧的 pin= 连接串随即失效，需用新生成的连接串同步所有对端。') printf '%s' 'The old pin= connection strings stop working immediately; sync all peers with the newly generated ones.' ;;
-        '明文 HTTP 回源（Cloudflare 选「灵活 Flexible」；回源端口须是 80/8080/8880/2052/2082/2086/2095 之一）') printf '%s' 'Plaintext HTTP origin-pull (choose "Flexible" in Cloudflare; the origin port must be one of 80/8080/8880/2052/2082/2086/2095)' ;;
-        '是 SSH 端口的放行规则:') printf '%s' 'is an allow rule for the SSH port:' ;;
-        '是主端口配置：删除后由附加端口') printf '%s' 'is the main port config: after deletion, an additional port ' ;;
-        '是否同时删除快捷命令 adam/zt/pz/cxpz/cq？') printf '%s' 'Also delete the shortcut commands adam/zt/pz/cxpz/cq?' ;;
-        '是否已启用？）') printf '%s' 'already enabled?)' ;;
-        '是否开启') printf '%s' 'Enable?' ;;
-        '是否改用 dial4/dial6 分别绑定 IPv4/IPv6 源地址？') printf '%s' 'Use dial4/dial6 to bind IPv4/IPv6 source addresses separately?' ;;
-        '是否现在启用防火墙？（默认拒绝入站，仅放行已添加的端口）') printf '%s' 'Enable the firewall now? (deny inbound by default; only allow added ports)' ;;
-        '是否生成 Egress 连接信息？') printf '%s' 'Generate Egress connection info?' ;;
-        '是否生成 Vector 连接信息？') printf '%s' 'Generate Vector connection info?' ;;
-        '是否立即做一次续期演练（certbot renew --dry-run，不消耗 LE 配额）？') printf '%s' 'Run a renewal dry run now (certbot renew --dry-run; does not consume LE quota)?' ;;
-        '是否立即手动触发一次续期检查？（仅当证书满足续期条件时才会真的续签）') printf '%s' 'Trigger a manual renewal check now? (it only actually renews when the certificate meets the renewal conditions)' ;;
-        '是否限制监听地址族？（默认不限；IPv6 未真正开通的 VPS 可选仅 IPv4）') printf '%s' 'Limit the listen address family? (no limit by default; VPSes without real IPv6 can pick IPv4 only)' ;;
-        '是唯一的一份配置，删除它等于卸载 Snell') printf '%s' 'is the only config; deleting it is the same as uninstalling Snell' ;;
-        '是当前的 SSH 端口') printf '%s' 'is the current SSH port' ;;
-        '暂时取不到官方发布信息，无法判断是否有新版本') printf '%s' 'Cannot fetch official release info right now; cannot tell whether a new version exists' ;;
-        '暂时连不上官方下载站，无法判断是否有新版本') printf '%s' 'Cannot reach the official download site right now; cannot tell whether a new version exists' ;;
-        '暂未获取到指纹，可稍后运行: journalctl -u nowhere -n 100') printf '%s' 'Fingerprint not fetched yet; you can run later: journalctl -u nowhere -n 100' ;;
-        '更换内核有风险：请确认服务商面板有 VNC / 救援模式，万一新内核起不来可以回到旧内核') printf '%s' 'Changing the kernel is risky: please confirm your provider panel has VNC / rescue mode so you can go back to the old kernel if the new one fails to boot' ;;
-        '更新 Nowhere 二进制」升级') printf '%s' 'Update Nowhere binary" to upgrade' ;;
-        '更新 Nowhere 二进制（更新到最新版）') printf '%s' 'Update Nowhere binary (update to the latest)' ;;
-        '更新失败') printf '%s' 'Update failed' ;;
-        '更新管理脚本') printf '%s' 'Update the management script' ;;
-        '更新，按') printf '%s' 'update, by ' ;;
-        '最大失败次数 maxretry') printf '%s' 'Max failures maxretry' ;;
-        '最快导入方式（QUIC/UDP）：') printf '%s' 'Fastest import method (QUIC/UDP):' ;;
-        '最快导入方式（TLS/TCP）：') printf '%s' 'Fastest import method (TLS/TCP):' ;;
-        '最近一次每日任务输出：') printf '%s' 'Last daily task output:' ;;
-        '最近日志（20行）：') printf '%s' 'Recent log (20 lines):' ;;
-        '最近的封禁 / 解封记录：') printf '%s' 'Recent ban / unban records:' ;;
-        '最近的维护事件（') printf '%s' 'Recent maintenance events (' ;;
-        '最近的维护记录：') printf '%s' 'Recent maintenance records:' ;;
-        '最近错误日志（nowhere，5 行）：') printf '%s' 'Recent error log (nowhere, 5 lines):' ;;
-        '有新版本可用:') printf '%s' 'New version available:' ;;
-        '服务单元已启用崩溃自动拉起') printf '%s' 'Service unit has crash auto-restart enabled' ;;
-        '服务单元未启用 Restart=always（旧版单元）') printf '%s' 'Service unit does not have Restart=always enabled (old unit)' ;;
-        '服务启动成功，且已确认端口正在监听') printf '%s' 'Service started; ports confirmed listening' ;;
-        '服务器 :') printf '%s' 'Server :' ;;
-        '服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout') printf '%s' 'Service is in an uncertain state; please troubleshoot before connecting clients, otherwise it will keep timing out' ;;
-        '服务未能启动，查看日志排查：') printf '%s' 'Service failed to start; check the log:' ;;
-        '未修改（为空或格式不合法）') printf '%s' 'Not changed (empty or invalid format)' ;;
-        '未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）') printf '%s' 'Not added to kernel reserved ports (outbound connections may take them and cause bind failures after reboot)' ;;
-        '未发现 acme.sh 自动续期任务！') printf '%s' 'No acme.sh auto-renewal task found!' ;;
-        '未发现有效的自动续期任务！') printf '%s' 'No valid auto-renewal task found!' ;;
-        '未在 root 的 crontab 中找到 acme.sh 定时任务，自动续期可能不工作') printf '%s' 'No acme.sh scheduled task found in root'\''s crontab; auto-renewal may not work' ;;
-        '未填 pin：自签证书走系统 CA 校验必然失败，服务会反复重连') printf '%s' 'No pin filled in: self-signed certificates will always fail system CA verification, and the service will keep reconnecting' ;;
-        '未安装 ufw，已跳过防火墙配置（可用主菜单「5') printf '%s' 'ufw not installed; firewall config skipped (use main menu "5' ;;
-        '未找到 Nowhere 二进制，请先安装') printf '%s' 'Nowhere binary not found; please install first' ;;
-        '未找到 apt-get（本脚本仅支持 Debian/Ubuntu），请手动安装:') printf '%s' 'apt-get not found (this script only supports Debian/Ubuntu); please install manually:' ;;
-        '未找到 certbot.timer，改用 cron 兜底（每天 3:00 / 15:00 检查续期）') printf '%s' 'certbot.timer not found; using a cron fallback instead (checks renewal daily at 3:00 / 15:00)' ;;
-        '未找到本脚本的 SSH 防护配置，请先执行「1') printf '%s' 'This script'\''s SSH protection config not found; please run "1' ;;
-        '未找到配置，请先安装') printf '%s' 'Config not found; please install first' ;;
-        '未更新（服务刚重启时可稍等再用 Nowhere 菜单 10 查看）') printf '%s' 'Not updated yet (if the service just restarted, wait a bit and check with Nowhere menu 10)' ;;
-        '未检测到 Snell 安装') printf '%s' 'No Snell installation detected' ;;
-        '未检测到已安装的 Nowhere 二进制') printf '%s' 'No installed Nowhere binary detected' ;;
-        '未检测到本模块安装的 Xray') printf '%s' 'No Xray installed by this module detected' ;;
-        '未知参数会被静默忽略，千万不要再往启动串里手动拼旧参数。') printf '%s' 'Unknown parameters are silently ignored; never manually append old parameters to the launch string again.' ;;
-        '未知操作:') printf '%s' 'Unknown action:' ;;
-        '未知的 f2b 子命令:') printf '%s' 'Unknown f2b subcommand:' ;;
-        '未知的 fw 子命令:') printf '%s' 'Unknown fw subcommand:' ;;
-        '未知的 snell 子命令:') printf '%s' 'Unknown snell subcommand:' ;;
-        '未知的 tune 子命令:') printf '%s' 'Unknown tune subcommand:' ;;
-        '未知的 xray 子命令:') printf '%s' 'Unknown xray subcommand:' ;;
-        '未能下载官方校验文件') printf '%s' 'Failed to download the official checksum file' ;;
-        '未能从') printf '%s' 'Could not get it from ' ;;
-        '未能从官方发布页取得 v') printf '%s' 'Could not get v from the official release page' ;;
-        '未能确定公网地址，无法生成 Egress 连接串，可稍后通过Nowhere 菜单「4') printf '%s' 'Could not determine the public address; cannot generate the Egress connection string; retry later via Nowhere menu "4' ;;
-        '未能确定公网地址，无法生成 Vector 连接串，可稍后通过Nowhere 菜单「4') printf '%s' 'Could not determine the public address; cannot generate the Vector connection string; retry later via Nowhere menu "4' ;;
-        '未能获取') printf '%s' 'Could not fetch ' ;;
-        '未能获取 Xray 官方发布信息（GitHub 不可达或被限流），请稍后重试，或选「指定版本」') printf '%s' 'Could not fetch official Xray release info (GitHub unreachable or rate-limited); please retry later, or choose "Specify version"' ;;
-        '未能获取官方版本信息（') printf '%s' 'Could not fetch official version info (' ;;
-        '未能获取版本列表，请检查网络') printf '%s' 'Could not fetch the version list; please check the network' ;;
-        '未能获取自签证书指纹，Egress 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）') printf '%s' 'Could not fetch the self-signed certificate fingerprint; the Egress connection string is missing pin= for now (regenerate via Nowhere menu 4 after the service starts)' ;;
-        '未能获取自签证书指纹，Vector 连接串暂缺 pin=（服务启动后可用 Nowhere 菜单 4 重新生成）') printf '%s' 'Could not fetch the self-signed certificate fingerprint; the Vector connection string is missing pin= for now (regenerate via Nowhere menu 4 after the service starts)' ;;
-        '未能读取当前自签指纹，') printf '%s' 'Could not read the current self-signed fingerprint, ' ;;
-        '未设为开机自启') printf '%s' 'Not set to start on boot' ;;
-        '未运行') printf '%s' 'Not running' ;;
-        '未运行或没有在监听') printf '%s' 'Not running or not listening' ;;
-        '本 Portal 已固定 out=egress：没有可用的 Egress 时，新连接会在 Flow 建立超时（NOW_FLOW_SETUP_TIMEOUT，默认 20s）内等待注册，超时即失败，不会回退直连') printf '%s' 'This Portal has out=egress pinned: with no Egress available, new connections wait for registration within the Flow setup timeout (NOW_FLOW_SETUP_TIMEOUT, default 20s); on timeout they fail and do not fall back to direct' ;;
-        '本地 SOCKS5 监听 in=（回车默认') printf '%s' 'Local SOCKS5 listener in= (Enter = default ' ;;
-        '本地 Vector 客户端连接信息') printf '%s' 'Local Vector client connection info' ;;
-        '本地监听 in=') printf '%s' 'Local listener in=' ;;
-        '本机') printf '%s' 'This machine' ;;
-        '本机不再是 Portal：删除防火墙里原 Portal 端口的放行规则（') printf '%s' 'This machine is no longer a Portal: delete the firewall allow rules for the original Portal ports (' ;;
-        '本机不是 Portal 角色（当前：') printf '%s' 'This machine is not in the Portal role (current: ' ;;
-        '本机为 Egress 角色，但未找到') printf '%s' 'This machine is in the Egress role, but could not find ' ;;
-        '本机将作为出口机（Egress），主动回连 Portal；这会覆盖本机现有的 nowhere.service') printf '%s' 'This machine will act as an exit machine (Egress) and connect back to the Portal; this will overwrite this machine'\''s existing nowhere.service' ;;
-        '本机已安装的') printf '%s' 'Already installed on this machine: ' ;;
-        '本机当前是 Egress 角色：继续安装会把 nowhere.service 换成 Portal') printf '%s' 'This machine is currently in the Egress role: continuing the install will replace nowhere.service with a Portal' ;;
-        '本机是 Egress 角色，不持有监听证书，无需续期') printf '%s' 'This machine is in the Egress role and holds no listening certificate; no renewal needed' ;;
-        '本机是 Egress 角色，没有监听证书；Portal 的证书指纹请在 Portal 机上查看') printf '%s' 'This machine is in the Egress role with no listening certificate; check the Portal'\''s certificate fingerprint on the Portal machine' ;;
-        '本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行') printf '%s' 'This machine is in the Egress role: probe needs to connect to the Portal as a Vector; please run it on the Portal machine or a client machine' ;;
-        '本机角色          :') printf '%s' 'This machine'\''s role          :' ;;
-        '本机角色    : Egress（主动回连 Portal，无需本机开放入站端口）') printf '%s' 'This machine'\''s role    : Egress (connects back to the Portal; this machine needs no inbound port)' ;;
-        '本次升级会跨过 v3.2.0：此后 Portal 只接受带认证的 Morph TCP Prelude，仍在 v3.0.x 的 Vector/Egress/Anywhere（morph=1 + TLS/TCP）会连不上') printf '%s' 'This upgrade crosses v3.2.0: after that, the Portal only accepts authenticated Morph TCP Prelude; Vector/Egress/Anywhere still on v3.0.x (morph=1 + TLS/TCP) will no longer connect' ;;
-        '本节点用于套 CDN（如 Cloudflare）：客户端连 CDN 的域名，CDN 再回源到本机。') printf '%s' 'This node is for use behind a CDN (e.g. Cloudflare): clients connect to the CDN'\''s domain, and the CDN pulls from this machine.' ;;
-        '本配置为 NW3 协议：v1/v2 的 Portal/Vector 以及未支持 NW3 的') printf '%s' 'This config uses the NW3 protocol: v1/v2 Portal/Vector and peers not supporting NW3' ;;
-        '某个端口配置（可选任意一个端口）') printf '%s' 'A port config (any port can be chosen)' ;;
-        '查看 tcpfit 状态    2') printf '%s' 'View tcpfit status    2' ;;
-        '查看当前 DNS    2') printf '%s' 'View current DNS    2' ;;
-        '查看当前状态') printf '%s' 'View current status' ;;
-        '查看当前状态」确认，再用「1') printf '%s' 'View current status" to confirm, then use "1' ;;
-        '查看节点配置 / 分享链接') printf '%s' 'View node configs / share links' ;;
-        '查看记录: adam maintain-log    或 journalctl -u adam-maintain --no-pager -n 30') printf '%s' 'View records: adam maintain-log    or journalctl -u adam-maintain --no-pager -n 30' ;;
-        '查看配置 / Surge 节点配置行（全部端口）') printf '%s' 'View config / Surge node config lines (all ports)' ;;
-        '校验时找不到已下载的安装包') printf '%s' 'The downloaded package could not be found during verification' ;;
-        '格式不合法（须为正数+单位，如 10s / 500ms / 1m / 1h），已重置为 10s') printf '%s' 'Invalid format (must be a positive number + unit, e.g. 10s / 500ms / 1m / 1h); reset to 10s' ;;
-        '格式不合法（须为正数+单位，如 10s），已重置为 10s') printf '%s' 'Invalid format (must be a positive number + unit, e.g. 10s); reset to 10s' ;;
-        '格式：32 位小写十六进制（16 随机字节）。Portal、Vector、Egress、Anywhere 四端必须填完全相同的这串字符') printf '%s' 'Format: 32 lowercase hex chars (16 random bytes). Portal, Vector, Egress and Anywhere must all fill in exactly the same string' ;;
-        '检查 Snell 更新') printf '%s' 'Check for Snell updates' ;;
-        '检查 Xray 更新') printf '%s' 'Check for Xray updates' ;;
-        '检查并更新 tcpfit    0') printf '%s' 'Check and update tcpfit    0' ;;
-        '检查并更新内核') printf '%s' 'Check and update the kernel' ;;
-        '检查并更新到官方最新版') printf '%s' 'Check and update to the official latest' ;;
-        '检查证书状态 / 手动续期」验证一次') printf '%s' 'Check certificate status / manual renewal" to verify once' ;;
-        '检测到 cnblock 的端口防火墙链 FWIN 已挂在 INPUT 上：两套入站防火墙会叠加（两边都放行才通），建议只保留一套（cnblock fw off，或不启用 ufw）') printf '%s' 'Detected that cnblock'\''s port firewall chain FWIN is already attached to INPUT: two inbound firewalls stack (traffic passes only if both allow it); it is recommended to keep only one (cnblock fw off, or do not enable ufw)' ;;
-        '检测到 firewalld 正在运行，与 ufw 同时启用会互相覆盖规则，请只保留一个') printf '%s' 'Detected firewalld is running; enabling it together with ufw will overwrite each other'\''s rules, please keep only one' ;;
-        '检测到已有 Snell 配置（端口') printf '%s' 'Detected an existing Snell config (port ' ;;
-        '检测到已有配置，已备份到') printf '%s' 'Detected an existing config; backed up to ' ;;
-        '检测到旧版配置：SOCKS5 已由 socks= 迁移为 Portal 的 out=，已自动沿用该地址') printf '%s' 'Detected an old config: SOCKS5 has migrated from socks= to the Portal'\''s out=; the address was carried over automatically' ;;
-        '检测到旧版（NW1）配置文件。v3 还要求：密钥改为 32 位十六进制、删除 alpn/net/log/pool 参数，建议用Nowhere 菜单「3') printf '%s' 'Detected an old (NW1) config file. v3 also requires: change the key to 32 hex chars and remove the alpn/net/log/pool parameters; it is recommended to use Nowhere menu "3' ;;
-        '检测到本机当前是 Portal 角色：继续会把本机切换为 Egress（Portal 配置文件保留，但服务被替换）') printf '%s' 'Detected that this machine is currently in the Portal role: continuing will switch it to Egress (the Portal config file is kept, but the service is replaced)' ;;
-        '检测到本机还有其他 Xray（官方脚本安装的 xray.service 或 3x-ui）：本模块完全独立，互不影响，只需注意端口不要重复') printf '%s' 'Detected other Xray installs on this machine (xray.service from the official script, or 3x-ui): this module is fully independent and does not interfere; just make sure ports do not overlap' ;;
-        '检测到本机配置了 IPv6 地址，测试实际是否能连通外网...') printf '%s' 'Detected that this machine has an IPv6 address configured; testing whether it can actually reach the internet...' ;;
-        '检测到目标端口已被其他进程占用：') printf '%s' 'Detected that the target port is already in use by another process:' ;;
-        '检测到证书已续期，已同步并重启') printf '%s' 'Detected that the certificate was renewed; synced and restarted' ;;
-        '正在回滚到旧版本') printf '%s' 'Rolling back to the old version' ;;
-        '正在安装 ufw ...') printf '%s' 'Installing ufw ...' ;;
-        '正在安装:') printf '%s' 'Installing:' ;;
-        '正在更新软件包列表 ...') printf '%s' 'Updating the package list ...' ;;
-        '正在查询 GitHub 最新版本...') printf '%s' 'Querying GitHub for the latest version...' ;;
-        '正在查询 Surge 官方发布页 ...') printf '%s' 'Querying the official Surge release page ...' ;;
-        '正在查询官方最新版本（发布页 + 下载站探测，约几秒）...') printf '%s' 'Querying the official latest version (release page + download-site probe, a few seconds)...' ;;
-        '正在自动回滚到备份二进制') printf '%s' 'Auto-rolling back to the backup binary' ;;
-        '正在获取版本列表...') printf '%s' 'Fetching the version list...' ;;
-        '正在获取自签证书 SHA-256 指纹...') printf '%s' 'Fetching the self-signed certificate SHA-256 fingerprint...' ;;
-        '正式版通道暂无 v') printf '%s' 'No v on the stable channel yet' ;;
-        '此时改系统 DNS 会让它失效或互相打架，已中止。请先执行 cnblock close，或改它的上游 DNS') printf '%s' 'Changing the system DNS now would break it or cause conflicts; aborted. Please run cnblock close first, or change its upstream DNS' ;;
-        '段）：') printf '%s' 'segment):' ;;
-        '每日维护 :') printf '%s' 'Daily maintenance :' ;;
-        '每日重启') printf '%s' 'Daily restart' ;;
-        '比发布页列出的') printf '%s' 'newer than what the release page lists' ;;
-        '永久禁用    3') printf '%s' 'Permanently disable    3' ;;
-        '永久禁用 IPv6（写入') printf '%s' 'Permanently disable IPv6 (write to ' ;;
-        '没有 v') printf '%s' 'No v' ;;
-        '没有可回滚的备份二进制') printf '%s' 'No backup binary to roll back to' ;;
-        '没有可用于回退的本地备份版本') printf '%s' 'No local backup version to roll back to' ;;
-        '没有找到') printf '%s' 'Not found' ;;
-        '没有找到任何端口配置') printf '%s' 'No port configs found' ;;
-        '没有找到可备份的配置目录') printf '%s' 'No config directories found to back up' ;;
-        '没有找到标记为正式版的发布（最新为') printf '%s' 'No release marked as stable found (latest is ' ;;
-        '没有本脚本做过的 DNS 改动可恢复') printf '%s' 'No DNS changes made by this script to restore' ;;
-        '没有本脚本做过的优先级改动可恢复') printf '%s' 'No priority changes made by this script to restore' ;;
-        '没有检测到已安装的 XanMod 内核包') printf '%s' 'No installed XanMod kernel packages detected' ;;
-        '没有输入任何服务器') printf '%s' 'No servers entered' ;;
-        '注意：v3 密钥与 URL 语法已变更，重新配置后务必把新的 Vector/Egress/Anywhere 连接信息同步到所有对端，旧链接无法继续使用') printf '%s' 'Note: v3 keys and URL syntax have changed; after reconfiguring, sync the new Vector/Egress/Anywhere connection info to all peers; old links will no longer work' ;;
-        '注意：下载到的脚本版本为') printf '%s' 'Note: the downloaded script version is ' ;;
-        '注意：防火墙当前未启用，规则已保存，启用后才生效') printf '%s' 'Note: the firewall is currently disabled; rules are saved and take effect once enabled' ;;
-        '添加 IP / 网段    2') printf '%s' 'Add IP / subnet    2' ;;
-        '添加 Xray 节点') printf '%s' 'Add an Xray node' ;;
-        '添加节点') printf '%s' 'Add node' ;;
-        '添加节点」创建）') printf '%s' 'Add node" to create)' ;;
-        '清理 journal 日志，只保留最近 200M？') printf '%s' 'Clean journal logs, keeping only the latest 200M?' ;;
-        '清理失败') printf '%s' 'Cleanup failed' ;;
-        '演练中（约需 30-90 秒）...') printf '%s' 'Dry run in progress (about 30-90 seconds)...' ;;
-        '版本信息') printf '%s' 'Version info' ;;
-        '版本号格式不合法') printf '%s' 'Invalid version format' ;;
-        '版本号格式不正确') printf '%s' 'Invalid version number format' ;;
-        '版本号相同，仍要用远端内容覆盖本地脚本？') printf '%s' 'Version numbers are the same; still overwrite the local script with the remote content?' ;;
-        '版本回退') printf '%s' 'Version rollback' ;;
-        '版本已固定在') printf '%s' 'Version pinned to' ;;
-        '版本通道 :') printf '%s' 'Version channel :' ;;
-        '版本）') printf '%s' 'version)' ;;
-        '版本；测试版最新为') printf '%s' 'version; latest beta is ' ;;
-        '状态 :') printf '%s' 'Status :' ;;
-        '状态异常（未运行或端口未监听），正在重启') printf '%s' 'Status abnormal (not running or port not listening); restarting' ;;
-        '现在添加第一个节点？') printf '%s' 'Add the first node now?' ;;
-        '现在重启？') printf '%s' 'Restart now?' ;;
-        '现有 URL / 密钥 / 证书无需迁移；要用 TLS 载体的 Egress，出口机也需') printf '%s' 'Existing URLs / keys / certificates need no migration; to use a TLS-carrier Egress, the exit machine also needs ' ;;
-        '现有端口配置：') printf '%s' 'Current port configs:' ;;
-        '现有节点在该版本下未能启动，请查看日志或换一个版本') printf '%s' 'Existing nodes failed to start under this version; please check the log or pick another version' ;;
-        '现有节点已随新内核重启') printf '%s' 'Existing nodes restarted with the new core' ;;
-        '生成分享链接用的公网地址（回车使用') printf '%s' 'Public address used to generate share links (Enter = use ' ;;
-        '生成失败：openssl 与 nowhere 二进制均不可用') printf '%s' 'Failed to generate: neither openssl nor the nowhere binary is available' ;;
-        '生成（carrier=') printf '%s' 'Generating (carrier=' ;;
-        '用法: adam f2b ban <IP>') printf '%s' 'Usage: adam f2b ban <IP>' ;;
-        '用法: adam f2b unban <IP>') printf '%s' 'Usage: adam f2b unban <IP>' ;;
-        '用法: adam fw allow <端口') printf '%s' 'Usage: adam fw allow <port' ;;
-        '用法: adam fw deny <端口') printf '%s' 'Usage: adam fw deny <port' ;;
-        '用法：adam lang zh') printf '%s' 'Usage: adam lang zh' ;;
-        '用的是 pin=证书指纹 锁定方式，Portal 每次重启该指纹都会变，重启后需要重新生成本连接串（Nowhere 菜单 4 或 pz 命令）') printf '%s' 'Uses pin= certificate-fingerprint locking; the fingerprint changes on every Portal restart, so this connection string must be regenerated afterwards (Nowhere menu 4 or the pz command)' ;;
-        '由 Adam 管理脚本生成（adam -> Fail2ban 管理）。请通过菜单修改，手动改动会在下次调整时被覆盖。') printf '%s' 'Generated by Adam'\''s management script (adam -> Fail2ban management). Please change it via the menu; manual edits will be overwritten on the next change.' ;;
-        '由 Adam 管理脚本生成（系统与网络调优 -> DNS）。删除本文件并重启 systemd-resolved 即恢复。') printf '%s' 'Generated by Adam'\''s management script (system & network tuning -> DNS). Delete this file and restart systemd-resolved to restore.' ;;
-        '由 Adam 管理脚本生成（系统与网络调优 -> 禁用 IPv6）。删除本文件并执行 sysctl --system 即恢复。') printf '%s' 'Generated by Adam'\''s management script (system & network tuning -> disable IPv6). Delete this file and run sysctl --system to restore.' ;;
-        '由 Adam 管理脚本生成；原文件备份在') printf '%s' 'Generated by Adam'\''s management script; original file backup at ' ;;
-        '由 Adam 管理脚本维护：Snell / Xray / Nowhere 的监听端口，避免被本机出站连接当作临时端口占用') printf '%s' 'Maintained by Adam'\''s management script: listen ports of Snell / Xray / Nowhere, to keep them from being taken as ephemeral ports by this machine'\''s outbound connections' ;;
-        '申请方式   :') printf '%s' 'Issuance method   :' ;;
-        '申请证书中（Cloudflare DNS-01，约需 30-60 秒）...') printf '%s' 'Requesting the certificate (Cloudflare DNS-01, about 30-60 seconds)...' ;;
-        '申请证书中（DNS-01:') printf '%s' 'Requesting the certificate (DNS-01: ' ;;
-        '申请证书中（HTTP-01，需 80 端口）...') printf '%s' 'Requesting the certificate (HTTP-01, needs port 80)...' ;;
-        '白名单   :') printf '%s' 'Allowlist   :' ;;
-        '白名单已更新:') printf '%s' 'Allowlist updated:' ;;
-        '白名单管理') printf '%s' 'Allowlist management' ;;
-        '白名单里没有') printf '%s' 'Not in the allowlist: ' ;;
-        '的 XanMod 内核包（发行版') printf '%s' 'XanMod kernel packages (distro ' ;;
-        '的发布文件）:') printf '%s' 'release files):' ;;
-        '的回源端口指到') printf '%s' 'point the origin port to ' ;;
-        '的放行规则') printf '%s' 'allow rules' ;;
-        '的测试版（') printf '%s' 'beta releases (' ;;
-        '的版本信息（') printf '%s' 'version info (' ;;
-        '的端口与 PSK 不变）') printf '%s' 'port and PSK stay the same)' ;;
-        '的证书装到本 Portal 并重启服务？') printf '%s' 'certificate onto this Portal and restart the service?' ;;
-        '的配置已删除') printf '%s' 'config deleted' ;;
-        '的配置格式管理，不自动跨大版本') printf '%s' 'config format; no automatic cross-major-version upgrade' ;;
-        '监听地址      :') printf '%s' 'Listen address      :' ;;
-        '监听地址格式不合法，已改为') printf '%s' 'Invalid listen address format; changed to ' ;;
-        '监听地址（回车=') printf '%s' 'Listen address (Enter = ' ;;
-        '监听端口（ss）：') printf '%s' 'Listening ports (ss):' ;;
-        '监听端口（回车使用') printf '%s' 'Listening port (Enter = use ' ;;
-        '监听端口（回车默认443）:') printf '%s' 'Listening port (Enter = 443):' ;;
-        '目标地址 host:port（回车默认 example.com:443）:') printf '%s' 'Target address host:port (Enter = example.com:443):' ;;
-        '目标端口空闲，可以使用') printf '%s' 'Target port is free and usable' ;;
-        '目标（0=不限速）:') printf '%s' 'Target (0 = unlimited):' ;;
-        '直接运行（Snell 自动更新不受影响）') printf '%s' 'Run directly (Snell auto-update unaffected)' ;;
-        '确认从') printf '%s' 'Confirm restoring from ' ;;
-        '确认使用 unsafe-raw？') printf '%s' 'Confirm using unsafe-raw?' ;;
-        '确认停用防火墙？') printf '%s' 'Confirm disabling the firewall?' ;;
-        '确认切换到') printf '%s' 'Confirm switching to ' ;;
-        '确认删除主端口') printf '%s' 'Confirm deleting the main port' ;;
-        '确认删除节点') printf '%s' 'Confirm deleting the node' ;;
-        '确认删除附加端口') printf '%s' 'Confirm deleting the additional port' ;;
-        '确认卸载') printf '%s' 'Confirm uninstall' ;;
-        '确认卸载 Fail2ban？') printf '%s' 'Confirm uninstalling Fail2ban?' ;;
-        '确认卸载 Snell（全部端口配置:') printf '%s' 'Confirm uninstalling Snell (all port configs: ' ;;
-        '确认卸载 Xray（本模块安装的 adam-xray）？') printf '%s' 'Confirm uninstalling Xray (adam-xray installed by this module)?' ;;
-        '确认卸载？（卸载后重启会回到发行版内核）') printf '%s' 'Confirm uninstall? (after uninstalling, a reboot returns to the distro kernel)' ;;
-        '确认启用防火墙？（默认拒绝所有入站，仅放行已添加的端口）') printf '%s' 'Confirm enabling the firewall? (deny all inbound by default; only allow added ports)' ;;
-        '确认回退') printf '%s' 'Confirm rollback' ;;
-        '确认安装') printf '%s' 'Confirm installation' ;;
-        '确认安装为 Egress 服务') printf '%s' 'Confirm installing as an Egress service' ;;
-        '确认把') printf '%s' 'Confirm putting ' ;;
-        '确认本机有可用的 IPv4 登录方式并继续？') printf '%s' 'Confirm this machine has a usable IPv4 login method and continue?' ;;
-        '确认解封当前所有被封禁的 IP？') printf '%s' 'Confirm unbanning all currently banned IPs?' ;;
-        '确认跨代升级') printf '%s' 'Confirm cross-generation upgrade' ;;
-        '磁盘：') printf '%s' 'Disk:' ;;
-        '禁用 / 恢复 IPv6') printf '%s' 'Disable / restore IPv6' ;;
-        '禁用失败（内核可能未编译 IPv6 或 sysctl 被限制）') printf '%s' 'Failed to disable (the kernel may not have IPv6 compiled in, or sysctl is restricted)' ;;
-        '私钥文件路径（privkey.pem）:') printf '%s' 'Private key file path (privkey.pem):' ;;
-        '私钥路径:') printf '%s' 'Private key path:' ;;
-        '移除 IP / 网段    0') printf '%s' 'Remove IP / subnet    0' ;;
-        '稳妥做法：先把对端升级到') printf '%s' 'Safer approach: upgrade the peers to ' ;;
-        '立即执行一次保活巡检...') printf '%s' 'Running one keepalive check now...' ;;
-        '立即执行一次每日维护（脚本自更新 / Snell / Xray 更新检查）...') printf '%s' 'Running one daily maintenance now (script self-update / Snell / Xray update checks)...' ;;
-        '端口   :') printf '%s' 'Port   :' ;;
-        '端口不合法') printf '%s' 'Invalid port' ;;
-        '端口不合法，重置为 443') printf '%s' 'Invalid port; reset to 443' ;;
-        '端口不合法，重置为2000') printf '%s' 'Invalid port; reset to 2000' ;;
-        '端口不合法，重置为2001') printf '%s' 'Invalid port; reset to 2001' ;;
-        '端口不合法，重置为443') printf '%s' 'Invalid port; reset to 443' ;;
-        '端口列表（带编号）') printf '%s' 'Port list (numbered)' ;;
-        '端口已变更，清理旧的放行规则:') printf '%s' 'Port changed; cleaning up old allow rules:' ;;
-        '端口模式      :') printf '%s' 'Port mode      :' ;;
-        '端口模式（v3 端点路径语法）：') printf '%s' 'Port mode (v3 endpoint path syntax):' ;;
-        '端口范围的起点必须小于终点:') printf '%s' 'Port range start must be smaller than the end:' ;;
-        '端口配置（多端口：每个端口独立 PSK）') printf '%s' 'Port config (multiple ports: each port has its own PSK)' ;;
-        '端口（TCP / UDP）') printf '%s' ' Ports (TCP / UDP)' ;;
-        '端口（回车默认 443）:') printf '%s' 'Port (Enter = 443):' ;;
-        '第 1 步：选择证书获取方式') printf '%s' 'Step 1: Choose how to get the certificate' ;;
-        '第 10 步：配置防火墙（先于服务启动，避免中间态连不通）') printf '%s' 'Step 10: Configure the firewall (before the service starts, to avoid a half-configured unreachable state)' ;;
-        '第 11 步：创建并启动系统服务') printf '%s' 'Step 11: Create and start the system service' ;;
-        '第 12 步：生成连接信息') printf '%s' 'Step 12: Generate connection info' ;;
-        '第 13 步：安装快捷命令') printf '%s' 'Step 13: Install the shortcut commands' ;;
-        '第 2 步：基础网络信息') printf '%s' 'Step 2: Basic network info' ;;
-        '第 3 步：监听参数') printf '%s' 'Step 3: Listen parameters' ;;
-        '第 4 步：协议与安全参数') printf '%s' 'Step 4: Protocol and security parameters' ;;
-        '第 5 步：安装系统依赖') printf '%s' 'Step 5: Install system dependencies' ;;
-        '第 6 步：申请 TLS 证书') printf '%s' 'Step 6: Request the TLS certificate' ;;
-        '第 7 步：下载 Nowhere 二进制') printf '%s' 'Step 7: Download the Nowhere binary' ;;
-        '第 8 步：保存配置') printf '%s' 'Step 8: Save the config' ;;
-        '第 9 步：安装前端口占用检测') printf '%s' 'Step 9: Pre-install port occupancy check' ;;
-        '等旧参数均已移除或改名，') printf '%s' 'and other old parameters have been removed or renamed,' ;;
-        '管理脚本 :') printf '%s' 'Management script :' ;;
-        '管理脚本已更新到') printf '%s' 'Management script updated to' ;;
-        '管理脚本未能安装到') printf '%s' 'Management script could not be installed to ' ;;
-        '管理脚本版本      :') printf '%s' 'Management script version      :' ;;
-        '粘贴 egress:// 连接串（输入不回显，回车 = 逐项填写）:') printf '%s' 'Paste the egress:// connection string (input hidden; Enter = fill in each item):' ;;
-        '系列，自动更新不跨大版本，跳过') printf '%s' 'series; auto-update does not cross major versions; skipped' ;;
-        '系统与网络调优') printf '%s' 'System & network tuning' ;;
-        '系统与网络调优:') printf '%s' 'System & network tuning:' ;;
-        '系统里没有其他已安装的内核镜像，卸载 XanMod 后将无法启动，已拒绝') printf '%s' 'No other installed kernel images on the system; uninstalling XanMod would leave it unbootable; refused' ;;
-        '统计窗口 findtime（如 10m / 1h，纯数字=分钟）') printf '%s' 'Time window findtime (e.g. 10m / 1h; plain number = minutes)' ;;
-        '继续安装 / 更新 XanMod 内核？') printf '%s' 'Continue installing / updating the XanMod kernel?' ;;
-        '续期 deploy hook 存在（续期后自动重启 nowhere）') printf '%s' 'Renewal deploy hook exists (nowhere restarts automatically after renewal)' ;;
-        '续期 deploy hook 缺失（续期后不会自动重启 nowhere）') printf '%s' 'Renewal deploy hook missing (nowhere will not restart automatically after renewal)' ;;
-        '续期检查完成') printf '%s' 'Renewal check complete' ;;
-        '续期检查完成（acme.sh 的 --reloadcmd 会自动重启 nowhere）') printf '%s' 'Renewal check complete (acme.sh --reloadcmd restarts nowhere automatically)' ;;
-        '续期演练未通过：请根据上方报错排查（如 80 端口被占、DNS 凭证失效），否则证书到期后服务会中断') printf '%s' 'Renewal dry run failed: please troubleshoot using the error above (e.g. port 80 taken, DNS credentials invalid); otherwise the service will break when the certificate expires' ;;
-        '续期演练通过，自动续期链路可信') printf '%s' 'Renewal dry run passed; the auto-renewal chain is trustworthy' ;;
-        '编号') printf '%s' 'Number' ;;
-        '自动更新 开 / 关') printf '%s' 'Auto-update on / off' ;;
-        '自动更新 开 / 关 / 切换通道（beta') printf '%s' 'Auto-update on / off / switch channel (beta' ;;
-        '自动更新到') printf '%s' 'Auto-updated to ' ;;
-        '自动更新已开启，但每日维护定时器未运行') printf '%s' 'Auto-update is on, but the daily maintenance timer is not running' ;;
-        '自动更新当前为：关闭') printf '%s' 'Auto-update is currently: off' ;;
-        '自动更新当前为：开启（') printf '%s' 'Auto-update is currently: on (' ;;
-        '自动续期已就绪：acme.sh 的 cron 定时任务存在（每天检查，到期自动续签并执行 --reloadcmd 重启 nowhere）') printf '%s' 'Auto-renewal ready: the acme.sh cron task exists (checks daily; auto-renews when due and runs --reloadcmd to restart nowhere)' ;;
-        '自动续期已就绪：certbot.timer 运行中（每天两次检查续期）') printf '%s' 'Auto-renewal ready: certbot.timer is running (checks renewal twice daily)' ;;
-        '自动续期链路检查：') printf '%s' 'Auto-renewal chain check:' ;;
-        '自动维护:') printf '%s' 'Auto-maintenance:' ;;
-        '自定义 PSK') printf '%s' 'Custom PSK' ;;
-        '自签指纹已更新到') printf '%s' 'Self-signed fingerprint updated to ' ;;
-        '自签模式下 Vector/Egress 的 pin 请从 Portal 启动日志含 fingerprint 的一行获取') printf '%s' 'In self-signed mode, get the Vector/Egress pin from the Portal startup log line containing "fingerprint"' ;;
-        '自签模式无需域名，将自动探测公网 IP 作为客户端连接地址') printf '%s' 'Self-signed mode needs no domain; the public IP is auto-detected as the client connection address' ;;
-        '自签证书 tls=1  - 无需域名，快速测试（Vector/Egress 必须用 pin= 锁定指纹，指纹随重启变化）') printf '%s' 'Self-signed certificate tls=1 - no domain needed, quick testing (Vector/Egress must lock the fingerprint with pin=; the fingerprint changes on restart)' ;;
-        '自签证书仅建议测试用，生产环境请用真实域名 + CA 签发证书（选 2/3/4）') printf '%s' 'Self-signed certificates are for testing only; for production use a real domain + CA-issued certificate (choose 2/3/4)' ;;
-        '自签证书指纹已随本次重启变化，请用 pz / Nowhere 菜单 4 重新生成带新 pin= 的 Vector/Egress 连接串并同步到对端') printf '%s' 'The self-signed certificate fingerprint changed with this restart; please regenerate the Vector/Egress connection strings with the new pin= via pz / Nowhere menu 4 and sync them to all peers' ;;
-        '自签证书生成失败') printf '%s' 'Failed to generate the self-signed certificate' ;;
-        '节点列表') printf '%s' 'Node list' ;;
-        '节点名称（回车使用') printf '%s' 'Node name (Enter = use ' ;;
-        '节点名称（回车保持') printf '%s' 'Node name (Enter = keep ' ;;
-        '节点数量 :') printf '%s' 'Node count :' ;;
-        '若刚修改 DNS，请确认已传播：dig +short') printf '%s' 'If you just changed DNS, please confirm it has propagated: dig +short' ;;
-        '规则') printf '%s' 'Rule' ;;
-        '解包失败，现有配置可能已不完整，请检查') printf '%s' 'Unpack failed; the existing config may now be incomplete, please check' ;;
-        '解压出的 snell-server 不是 Linux 可执行文件') printf '%s' 'The extracted snell-server is not a Linux executable' ;;
-        '解压后未找到 nowhere 二进制') printf '%s' 'No nowhere binary found after extraction' ;;
-        '解封失败（该 IP 可能本来就没有被封）') printf '%s' 'Unban failed (this IP may never have been banned)' ;;
-        '解封失败，请查看: fail2ban-client status') printf '%s' 'Unban failed; see: fail2ban-client status ' ;;
-        '解封所有 IP') printf '%s' 'Unban all IPs' ;;
-        '解析到') printf '%s' 'Resolves to ' ;;
-        '解析测试失败，请检查，或用「恢复 DNS」撤销') printf '%s' 'Resolution test failed; please check, or use "Restore DNS" to revert' ;;
-        '解析测试通过') printf '%s' 'Resolution test passed' ;;
-        '触发条件 :') printf '%s' 'Trigger conditions :' ;;
-        '触发条件已改为:') printf '%s' 'Trigger conditions changed to:' ;;
-        '认证方式：1') printf '%s' 'Auth method: 1' ;;
-        '让本管理脚本每天自动从仓库拉取更新？（地址:') printf '%s' 'Let this management script pull updates from the repo daily? (URL: ' ;;
-        '记录的版本 tag    :') printf '%s' 'Recorded version tag    :' ;;
-        '记得在 CDN 侧：把') printf '%s' 'Remember to set on the CDN side: ' ;;
-        '设置 DNS') printf '%s' 'Set DNS' ;;
-        '设置 DNS    3') printf '%s' 'Set DNS    3' ;;
-        '证书 SAN 中不包含域名') printf '%s' 'The certificate SAN does not include the domain' ;;
-        '证书与私钥不匹配') printf '%s' 'Certificate and private key do not match' ;;
-        '证书剩余约') printf '%s' 'Certificate remaining: about ' ;;
-        '证书复制失败') printf '%s' 'Failed to copy the certificate' ;;
-        '证书安装（install-cert）失败') printf '%s' 'Certificate install (install-cert) failed' ;;
-        '证书已过期或无法解析') printf '%s' 'Certificate expired or unparseable' ;;
-        '证书或私钥文件不存在') printf '%s' 'Certificate or private key file does not exist' ;;
-        '证书文件无法读取：') printf '%s' 'Certificate file cannot be read:' ;;
-        '证书文件未生成：') printf '%s' 'Certificate file not generated:' ;;
-        '证书文件路径（fullchain.pem）:') printf '%s' 'Certificate file path (fullchain.pem):' ;;
-        '证书方式      :') printf '%s' 'Certificate method      :' ;;
-        '证书有效，剩余约') printf '%s' 'Certificate valid, about ' ;;
-        '证书校验通过：') printf '%s' 'Certificate verified:' ;;
-        '证书状态与续期') printf '%s' 'Certificate status & renewal' ;;
-        '证书申请失败：检查 CF 凭证与域名归属') printf '%s' 'Certificate issuance failed: check CF credentials and domain ownership' ;;
-        '证书申请失败：检查域名解析与 80 端口') printf '%s' 'Certificate issuance failed: check domain resolution and port 80' ;;
-        '证书签发失败：请检查 DNS API 凭证是否正确、域名 DNS 是否由所选服务商托管') printf '%s' 'Certificate issuance failed: please check whether the DNS API credentials are correct and whether the domain'\''s DNS is hosted by the selected provider' ;;
-        '证书路径   :') printf '%s' 'Certificate path   :' ;;
-        '证书路径:') printf '%s' 'Certificate path:' ;;
-        '该密钥不符合 v3 规范：必须是恰好 32 位小写十六进制字符（0-9a-f）') printf '%s' 'This key does not meet the v3 spec: it must be exactly 32 lowercase hex chars (0-9a-f)' ;;
-        '该证书的域名列表里没有') printf '%s' 'This certificate'\''s domain list does not include ' ;;
-        '语言已切换为') printf '%s' 'Language switched to' ;;
-        '请以 root 用户运行此脚本') printf '%s' 'Please run this script as root' ;;
-        '请先停止占用该端口的服务（旧的 Nowhere 实例已自动排除在外），否则新服务会反复崩溃重启，客户端表现为一直 timeout') printf '%s' 'Please stop the service occupying this port first (old Nowhere instances are already excluded); otherwise the new service will crash and restart repeatedly, and clients will see constant timeouts' ;;
-        '请先安装发行版内核：Debian 用 apt install linux-image-amd64，Ubuntu 用 apt install linux-image-generic') printf '%s' 'Please install the distro kernel first: Debian: apt install linux-image-amd64, Ubuntu: apt install linux-image-generic' ;;
-        '请把上面新的连接串同步到全部 Vector / Egress / Anywhere 对端，旧 pin= 连接串已失效') printf '%s' 'Please sync the new connection strings above to all Vector / Egress / Anywhere peers; the old pin= connection strings no longer work' ;;
-        '请把所有对端升级到') printf '%s' 'Please upgrade all peers to ' ;;
-        '请改用文件方式运行：curl -fsSL') printf '%s' 'Please run it via a file instead: curl -fsSL' ;;
-        '请输入域名（如: nhk.example.com）:') printf '%s' 'Please enter the domain (e.g. nhk.example.com):' ;;
-        '请输入邮箱（用于证书申请/找回）:') printf '%s' 'Please enter your email (for certificate issuance/recovery):' ;;
-        '调整后仍无法连接，请检查 VPS 出网本身是否正常: ping -c 3 8.8.8.8') printf '%s' 'Still cannot connect after the change; please check whether the VPS itself can reach the internet: ping -c 3 8.8.8.8' ;;
-        '跟随最新版本前请了解：') printf '%s' 'Before following the latest version, please know:' ;;
-        '跨代升级后请接着用Nowhere 菜单「3') printf '%s' 'After a cross-generation upgrade, continue with Nowhere menu "3' ;;
-        '软件源已保留（/etc/apt/sources.list.d/xanmod-release.list），之后 apt upgrade 或再次执行本项即可更新内核') printf '%s' 'The repo source is kept (/etc/apt/sources.list.d/xanmod-release.list); a later apt upgrade or re-running this item will update the kernel' ;;
-        '软件源里没有适合 x86-64-v') printf '%s' 'No suitable x86-64-v in the repo sources' ;;
-        '载体:') printf '%s' 'Carrier:' ;;
-        '输入 DNS 服务器 IP（空格分隔，可混合 IPv4 / IPv6）:') printf '%s' 'Enter DNS server IPs (space-separated; IPv4 / IPv6 can be mixed):' ;;
-        '输入域名（不带 https:// 和端口）:') printf '%s' 'Enter a domain (without https:// and without a port):' ;;
-        '输入序号（回车取消）:') printf '%s' 'Enter a number (Enter to cancel):' ;;
-        '输入版本号（如 v26.3.27）:') printf '%s' 'Enter a version number (e.g. v26.3.27):' ;;
-        '输入要删除的序号（回车取消）:') printf '%s' 'Enter the number to delete (Enter to cancel):' ;;
-        '输入要删除的端口（写法同放行，如 80,443 或 400-500）:') printf '%s' 'Enter the port to delete (same format as allowing, e.g. 80,443 or 400-500):' ;;
-        '输入要删除的规则编号（逗号分隔，如 3,5）:') printf '%s' 'Enter the rule numbers to delete (comma-separated, e.g. 3,5):' ;;
-        '输入要加入白名单的 IP 或 CIDR 网段:') printf '%s' 'Enter the IP or CIDR subnet to add to the allowlist:' ;;
-        '输入要封禁的 IP 地址:') printf '%s' 'Enter the IP address to ban:' ;;
-        '输入要放行的端口：逗号分隔，支持范围与协议后缀') printf '%s' 'Enter the ports to allow: comma-separated, ranges and protocol suffixes supported' ;;
-        '输入要移除的 IP 或网段:') printf '%s' 'Enter the IP or subnet to remove:' ;;
-        '输入要解封的 IP 地址:') printf '%s' 'Enter the IP address to unban:' ;;
-        '迁移后 Portal 改用域名 + CA 证书（tls=2），Vector/Egress 不再需要 pin=；') printf '%s' 'After migration the Portal uses a domain + CA certificate (tls=2), and Vector/Egress no longer need pin=;' ;;
-        '迁移完成：已是 tls=2，服务运行中') printf '%s' 'Migration complete: already tls=2, service running' ;;
-        '运行 tcpfit（不带子命令 = 它的菜单），如 adam tune tcp status') printf '%s' 'Run tcpfit (no subcommand = its menu), e.g. adam tune tcp status' ;;
-        '运行并监听中') printf '%s' 'Running and listening' ;;
-        '还没有节点') printf '%s' 'No nodes yet' ;;
-        '还没有节点，服务不会启动') printf '%s' 'No nodes yet; the service will not start' ;;
-        '这会导致 curl/certbot 优先尝试 IPv6 而报错') printf '%s' 'This makes curl/certbot try IPv6 first and fail' ;;
-        '这是你当前登录所用的 IP，封禁后会立刻断开且无法重连，已拒绝') printf '%s' 'This is the IP you are currently logged in from; banning it would disconnect you immediately with no way back; refused' ;;
-        '这是跨协议代升级（NW') printf '%s' 'This is a cross-protocol-generation upgrade (NW' ;;
-        '进入后选「1 一键调优」即可；所有改动可用其菜单 7 或 tcpfit rollback 回滚。') printf '%s' 'Once inside, pick "1 One-click tuning"; all changes can be rolled back via its menu 7 or tcpfit rollback.' ;;
-        '远程 Egress 出口机连接信息') printf '%s' 'Remote Egress exit-machine connection info' ;;
-        '远端版本:') printf '%s' 'Remote version:' ;;
-        '连接串格式不合法（应为 egress://32位hex密钥') printf '%s' 'Invalid connection string format (should be egress://32-hex-key' ;;
-        '连接串解析通过：') printf '%s' 'Connection string parsed OK:' ;;
-        '连接信息') printf '%s' 'Connection info' ;;
-        '连通性探测 probe（真实 TCP Flow，不发送业务数据）') printf '%s' 'Connectivity probe (real TCP Flow; sends no application data)' ;;
-        '选择要切换到的版本序号:') printf '%s' 'Enter the number of the version to switch to:' ;;
-        '选择要安装的版本（支持回退到历史版本）') printf '%s' 'Choose the version to install (supports rolling back to older versions)' ;;
-        '通过管道/进程替换运行，无法直接复制自身，正在从脚本地址重新下载一份...') printf '%s' 'Running via a pipe/process substitution, so it cannot copy itself directly; re-downloading a copy from the script URL...' ;;
-        '通道的版本信息（GitHub 不可达 / 被限流，或该通道暂无发布）') printf '%s' 'version info for this channel (GitHub unreachable / rate-limited, or no releases on this channel)' ;;
-        '通配') printf '%s' 'Wildcard' ;;
-        '通配，全监听；也可填具体 IP）:') printf '%s' 'Wildcard, listen on all; a specific IP can also be entered):' ;;
-        '邮箱          :') printf '%s' 'Email          :' ;;
-        '邮箱不能为空，已中止') printf '%s' 'Email cannot be empty; aborted' ;;
-        '邮箱格式不正确') printf '%s' 'Invalid email format' ;;
-        '部分依赖安装失败，继续尝试') printf '%s' 'Some dependencies failed to install; trying anyway' ;;
-        '配置 :') printf '%s' 'Config :' ;;
-        '配置/对端不互通') printf '%s' 'Config / peers cannot talk to each other' ;;
-        '配置已保存至') printf '%s' 'Config saved to ' ;;
-        '配置已更新并重启') printf '%s' 'Config updated and restarted' ;;
-        '配置文件 :') printf '%s' 'Config file :' ;;
-        '配置文件里读不到监听端口') printf '%s' 'Cannot read the listen port from the config file' ;;
-        '配置校验失败:') printf '%s' 'Config validation failed:' ;;
-        '配置校验未通过：') printf '%s' 'Config validation failed:' ;;
-        '配置校验通过') printf '%s' 'Config validation passed' ;;
-        '配置确认：') printf '%s' 'Config summary:' ;;
-        '重启 :') printf '%s' 'Restart :' ;;
-        '重启」') printf '%s' 'Restart"' ;;
-        '重启后仍异常，请查看: journalctl -u') printf '%s' 'Still abnormal after restart; see: journalctl -u' ;;
-        '重启后未检测到服务正常监听：') printf '%s' 'Service not detected listening normally after restart:' ;;
-        '重启失败: journalctl -u fail2ban -n 30') printf '%s' 'Restart failed: journalctl -u fail2ban -n 30' ;;
-        '重启失败，请按上方日志排查') printf '%s' 'Restart failed; please troubleshoot using the log above' ;;
-        '重启失败，请看 journalctl -u') printf '%s' 'Restart failed; see journalctl -u' ;;
-        '重新下载脚本失败，管理脚本副本无法安装') printf '%s' 'Failed to re-download the script; the management script copy cannot be installed' ;;
-        '重新生成 PSK（同时更换一套流量特征）') printf '%s' 'Regenerate the PSK (also changes the traffic profile)' ;;
-        '重新配置」按 v3 向导重装一次') printf '%s' 'Reconfigure" to reinstall once via the v3 wizard' ;;
-        '重新配置」按新版向导重建配置（新密钥 + 新 URL），再同步更新所有对端') printf '%s' 'Reconfigure" to rebuild the config with the new wizard (new key + new URL), then sync all peers' ;;
-        '重新配置」生成新密钥，并同步更新所有 Vector/Egress/Anywhere 对端') printf '%s' 'Reconfigure" to generate a new key and sync all Vector/Egress/Anywhere peers' ;;
-        '重装') printf '%s' 'Reinstall' ;;
-        '防护端口 :') printf '%s' 'Protected port :' ;;
-        '防火墙」安装）；请确认云厂商安全组已放行:') printf '%s' 'Firewall" to install); please confirm your cloud security group allows:' ;;
-        '防火墙已停用') printf '%s' 'Firewall disabled' ;;
-        '防火墙已启用') printf '%s' 'Firewall enabled' ;;
-        '防火墙已启用（开机自动生效）') printf '%s' 'Firewall enabled (takes effect automatically on boot)' ;;
-        '防火墙已处于启用状态，补齐 SSH 与本脚本服务端口的放行规则') printf '%s' 'Firewall is already enabled; adding allow rules for SSH and this script'\''s service ports' ;;
-        '防火墙已放行') printf '%s' 'Firewall allowed it' ;;
-        '防火墙已放行:') printf '%s' 'Firewall allowed:' ;;
-        '防火墙已是启用状态') printf '%s' 'Firewall is already enabled' ;;
-        '防火墙当前未启用') printf '%s' 'Firewall is currently disabled' ;;
-        '防火墙未启用时 ufw 不显示规则编号，请改用「按端口」删除') printf '%s' 'When the firewall is disabled, ufw does not show rule numbers; please delete "By port" instead' ;;
-        '防火墙未启用，以下是已保存、启用后才生效的规则：') printf '%s' 'Firewall is disabled; the rules below are saved and take effect once enabled:' ;;
-        '防火墙未放行附加端口') printf '%s' 'Firewall has not allowed the additional ports' ;;
-        '防火墙状态（详细）') printf '%s' 'Firewall status (detailed)' ;;
-        '防火墙管理（ufw）') printf '%s' 'Firewall management (ufw)' ;;
-        '防火墙（自动放行 SSH 与本脚本服务端口）') printf '%s' ' Firewall (auto-allows SSH and this script'\''s service ports)' ;;
-        '阿里云  4') printf '%s' 'Alibaba Cloud  4' ;;
-        '阿里云 AccessKey ID:') printf '%s' 'Alibaba Cloud AccessKey ID:' ;;
-        '阿里云 AccessKey Secret（输入不回显）:') printf '%s' 'Alibaba Cloud AccessKey Secret (input hidden):' ;;
-        '限速设置（Portal/Vector/Egress 通用语义，0=不限速）：') printf '%s' 'Rate-limit settings (same semantics for Portal/Vector/Egress, 0 = unlimited):' ;;
-        '需要对外提供服务的端口，请用「3') printf '%s' 'Ports that need to serve externally; please use "3' ;;
-        '需要重启才会切换到新内核。重启后可用本菜单「8') printf '%s' 'A reboot is needed to switch to the new kernel. After reboot, use this menu'\''s "8' ;;
-        '默认 30') printf '%s' 'default 30' ;;
-        '默认队列   :') printf '%s' 'Default queue   :' ;;
-        '（-1 表示永久）') printf '%s' ' (-1 = forever)' ;;
-        '（32 位小写十六进制，两端必须完全一致）') printf '%s' ' (32 lowercase hex chars; both ends must match exactly)' ;;
-        '（Cloudflare 可用 Origin Rules），并开启 gRPC / HTTP/2 回源以获得更好的 XHTTP 表现') printf '%s' ' (Cloudflare can use Origin Rules), and enable gRPC / HTTP/2 origin-pull for better XHTTP performance' ;;
-        '（Egress 是发起端，这个设置在本机生效；Portal 三种都收，两端无需一致）：') printf '%s' ' (Egress is the initiating side; this setting takes effect on this machine; the Portal accepts all three, both ends need not match):' ;;
-        '（NOW_HANDSHAKE_TIMEOUT，v3.3.0 起未设置时从 Shared Key 派生 3s–30s）') printf '%s' ' (NOW_HANDSHAKE_TIMEOUT; since v3.3.0, when unset it is derived from the Shared Key, 3s–30s)' ;;
-        '（NOW_HANDSHAKE_TIMEOUT；v3.3.0 起未设置时从 Shared Key 派生 3s–30s，显式设置可固定）') printf '%s' ' (NOW_HANDSHAKE_TIMEOUT; since v3.3.0, when unset it is derived from the Shared Key, 3s–30s; setting it explicitly pins it)' ;;
-        '（NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE，只在发起端 Vector / Egress 上设置，Portal 不使用；接收端通吃、两端无需一致）') printf '%s' ' (NOW_MORPH_TCP_PRELUDE / NOW_MORPH_UDP_PRELUDE; only set on the initiating Vector / Egress side, the Portal does not use them; the receiver accepts all, both ends need not match)' ;;
-        '（Vector / Egress / Anywhere）必须') printf '%s' '(Vector / Egress / Anywhere) must ' ;;
-        '（Vector/Egress 的 pin= 请同步改为新值）') printf '%s' ' (please sync the Vector/Egress pin= to the new value)' ;;
-        '（tcpfit：按本机实测推导参数，可回滚）') printf '%s' ' (tcpfit: derives parameters from measurements on this machine; can be rolled back)' ;;
-        '（zh=中文 / en=English）') printf '%s' ' (zh=Chinese / en=English)' ;;
-        '（zh=中文 / en=English），下次打开菜单生效') printf '%s' ' (zh=Chinese / en=English); takes effect next time you open the menu' ;;
-        '（zh=中文 / en=English，切换：adam lang zh') printf '%s' ' (zh=Chinese / en=English; switch with: adam lang zh' ;;
-        '（不自动跨大版本）') printf '%s' ' (does not cross major versions automatically)' ;;
-        '（保活 / 自动更新）') printf '%s' ' (keepalive / auto-update)' ;;
-        '（写入生成的 Vector / Egress 启动命令，Portal 自身不使用）') printf '%s' ' (written into the generated Vector / Egress launch commands; the Portal itself does not use it)' ;;
-        '（务必和服务端保持一致）') printf '%s' ' (must match the server)' ;;
-        '（只留最近 5 份）') printf '%s' ' (keep only the latest 5)' ;;
-        '（可在「自动更新」里切到 beta 通道）') printf '%s' ' (you can switch to the beta channel under "Auto-update")' ;;
-        '（可用: install / list / status / on / off / allow <端口> / deny <端口> / sync）') printf '%s' ' (available: install / list / status / on / off / allow <port> / deny <port> / sync)' ;;
-        '（可用: install / status / banned / log / bantime <时长> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall）') printf '%s' ' (available: install / status / banned / log / bantime <duration> / ban <IP> / unban <IP> / unban-all / on / off / restart / uninstall)' ;;
-        '（可用: install / update / config / reconfig / ports / add-port / del-port') printf '%s' ' (available: install / update / config / reconfig / ports / add-port / del-port' ;;
-        '（可用: tcp') printf '%s' ' (available: tcp' ;;
-        '（可用「版本回退」快速切回）') printf '%s' ' (use "Version rollback" to switch back quickly)' ;;
-        '（可能签发了错误的域名）') printf '%s' ' (may have issued the wrong domain)' ;;
-        '（可选，在电脑/路由器上跑本地 SOCKS5 入口用 in=）：') printf '%s' ' (optional; in= for running a local SOCKS5 entry on your computer/router):' ;;
-        '（含 PSK）？') printf '%s' ' (incl. PSK)?' ;;
-        '（含密钥配置与证书文件），如需彻底清除请手动: rm -rf') printf '%s' ' (incl. key configs and certificate files); to remove everything, run manually: rm -rf' ;;
-        '（含密钥）？') printf '%s' ' (incl. keys)?' ;;
-        '（在出口机上运行 egress:// 主动回连本 Portal）：') printf '%s' ' (run egress:// on the exit machine to connect back to this Portal):' ;;
-        '（官方未公布校验值，仅供留档比对）') printf '%s' ' (no official checksum published; for your records only)' ;;
-        '（客户端端口') printf '%s' ' (client port' ;;
-        '（对之后的新封禁生效）') printf '%s' ' (applies to new bans after this)' ;;
-        '（或等待 10-30 分钟后重试）') printf '%s' ' (or wait 10-30 minutes and retry)' ;;
-        '（无）') printf '%s' '(none)' ;;
-        '（旧版备份') printf '%s' ' (old backup ' ;;
-        '（旧版备份在') printf '%s' ' (old backup at ' ;;
-        '（时长') printf '%s' ' (duration ' ;;
-        '（暂无）') printf '%s' '(none yet)' ;;
-        '（未检测到 nowhere.service，未启动服务）') printf '%s' ' (nowhere.service not detected; service not started)' ;;
-        '（未检测到 snell.service，未启动服务）') printf '%s' ' (snell.service not detected; service not started)' ;;
-        '（本次安装中途失败时可手动恢复）') printf '%s' ' (can be restored manually if this install fails halfway)' ;;
-        '（没有启用的 jail）') printf '%s' '(no enabled jails)' ;;
-        '（真实 TCP Flow 连通性测试）') printf '%s' ' (real TCP Flow connectivity test)' ;;
-        '（示例：30 / 10m / 1h / 1d / -1）') printf '%s' ' (examples: 30 / 10m / 1h / 1d / -1)' ;;
-        '（端口模式') printf '%s' ' (port mode' ;;
-        '（还没有节点）') printf '%s' '(no nodes yet)' ;;
-        '（还没有节点，用「2') printf '%s' '(no nodes yet; use "2' ;;
-        '（这里修改的是主端口配置；附加端口请用「删除端口配置」+「新增端口配置」）') printf '%s' '(this changes the main port config; for additional ports use "Delete port config" + "Add port config")' ;;
-        '（通用 DNS-01 / acme.sh 请用 Nowhere 菜单 3 重新配置）') printf '%s' '(for generic DNS-01 / acme.sh, please reconfigure via Nowhere menu 3)' ;;
-        '（须与 Portal 一致）') printf '%s' ' (must match the Portal)' ;;
-        '）   回源:') printf '%s' ')   Origin:' ;;
-        '） 语言：') printf '%s' ') Language:' ;;
-        '）加入白名单，避免输错密码把自己封掉？') printf '%s' ') to the allowlist, to avoid locking yourself out by mistyping the password?' ;;
-        '）登录的：禁用 IPv6 会立刻断开，且之后只能用 IPv4 登录') printf '%s' ') you logged in with: disabling IPv6 will disconnect you immediately, and you can only log in via IPv4 afterwards' ;;
-        '）的放行规则？') printf '%s' ') allow rules?' ;;
-        '），与宿主机共用内核，无法更换内核') printf '%s' '), sharing the host kernel, so the kernel cannot be replaced' ;;
-        '），可用 Nowhere 菜单「13') printf '%s' '), use Nowhere menu "13' ;;
-        '），可用「检查并更新」升级') printf '%s' '), use "Check and update" to upgrade' ;;
-        '），将以 root 运行并修改 sysctl / qdisc 等网络参数') printf '%s' '), it will run as root and modify sysctl / qdisc and other network settings' ;;
-        '），已中止') printf '%s' '), aborted' ;;
-        '），无需迁移证书') printf '%s' '), no certificate migration needed' ;;
-        '），是否跳过下载直接使用？') printf '%s' '), skip the download and use it directly?' ;;
-        '），本脚本只适配 NW3：URL 语法、密钥格式、对端兼容性都可能已变化') printf '%s' '), this script only supports NW3: URL syntax, key format and peer compatibility may all have changed' ;;
-        '），管理命令将指向下载到的版本') printf '%s' '), management commands will point to the downloaded version' ;;
-        '），还没有正式版') printf '%s' '), no stable release yet' ;;
-        '），避免把自己锁在外面') printf '%s' '), so you don'\''t lock yourself out' ;;
-        '）：新旧对端不互通，Vector/Egress/Anywhere 必须一起升级') printf '%s' '): old and new peers cannot talk to each other; Vector/Egress/Anywhere must be upgraded together' ;;
-        '）：期望') printf '%s' '): expected ' ;;
-        '）；本脚本的向导按 NW3 生成配置，可能无法直接使用') printf '%s' '); this script'\''s wizard generates NW3 configs, which may not work directly' ;;
-        '，不是 v') printf '%s' ', not v' ;;
-        '，不降级') printf '%s' ', no downgrade' ;;
-        '，与当前运行的') printf '%s' ', vs. the currently running ' ;;
-        '，但本机公网 IP 疑似') printf '%s' ', but this machine'\''s public IP appears to be ' ;;
-        '，低于 v3.0.0，与 NW3 配置不兼容，已中止') printf '%s' ', below v3.0.0, incompatible with NW3 configs, aborted' ;;
-        '，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）') printf '%s' ', below v3.0.0, incompatible with this script'\''s NW3 configs, aborted (please check the repo status)' ;;
-        '，剩余有效期约') printf '%s' ', about ' ;;
-        '，可带 user:pass') printf '%s' ', may include user:pass' ;;
-        '，安装包可能被篡改或下载损坏') printf '%s' ', the package may be tampered with or corrupted during download' ;;
-        '，实算') printf '%s' ', computed ' ;;
-        '，将下载最新版') printf '%s' ', the latest version will be downloaded' ;;
-        '，将按所选通道重装 / 切换版本（节点配置保留）') printf '%s' ', will reinstall / switch versions via the selected channel (node configs kept)' ;;
-        '，已进入新的协议代（NW') printf '%s' ', entered a new protocol generation (NW' ;;
-        '，无法启用定时任务') printf '%s' ', cannot enable scheduled tasks' ;;
-        '，更新？') printf '%s' ', update?' ;;
-        '，本地实算=') printf '%s' ', locally computed = ' ;;
-        '，本脚本按 v') printf '%s' ', this script manages v' ;;
-        '，正在从') printf '%s' ', downloading from ' ;;
-        '，请用 Nowhere 菜单 2 重新安装') printf '%s' ', please reinstall via Nowhere menu 2' ;;
-        '，重启后仍然生效）？') printf '%s' ', still effective after reboot)?' ;;
-        '，重装后节点可直接恢复') printf '%s' ', nodes can be restored directly after reinstall' ;;
-        '，重装时可直接沿用端口和 PSK（附加端口也会一并恢复）') printf '%s' ', ports and PSK can be reused directly on reinstall (additional ports restored too)' ;;
-        '，需要客户端同步升级，不会自动跨大版本') printf '%s' ', clients must upgrade in sync; no automatic cross-major-version upgrade' ;;
-        '：两者不一致时 HTTP-01 会失败') printf '%s' ': HTTP-01 will fail if they differ' ;;
-        '：官方标记为预发布，或当前取不到标记信息）') printf '%s' ': officially marked pre-release, or the tag could not be fetched)' ;;
-        '：客户端需使用支持该版本的 Surge 测试渠道，协议在正式版前仍可能变动，两端要同步') printf '%s' ': clients need a Surge beta channel supporting this version; the protocol may still change before stable, both ends must stay in sync' ;;
-        '：跨大版本需要客户端同步升级、配置格式也可能变化，本脚本不自动处理') printf '%s' ': cross-major upgrades require clients to upgrade in sync and config formats may change; this script does not handle that automatically' ;;
-        '；beta=跟随最新测试版 b/rc 及正式版，stable=只跟正式版）') printf '%s' '; beta = follow latest beta b/rc and stable releases, stable = stable releases only)' ;;
-        '；下载后校验完整性，版本不低于本地才替换）') printf '%s' '; integrity is verified after download, and it only replaces the local copy if the version is not lower)' ;;
-        '；不加 --force，避免重复签发触发 LE 频率限制）...') printf '%s' '; no --force, to avoid repeated issuance hitting LE rate limits)...' ;;
-        '；官方建议客户端屏蔽 QUIC 让应用回落到 HTTP/2') printf '%s' '; the official advice is for clients to block QUIC so apps fall back to HTTP/2' ;;
-        '？（之后的自动更新也会跟随测试通道）') printf '%s' '? (later auto-updates will also follow the beta channel)' ;;
-        '？（服务会重启，约 2 秒中断；启动失败自动回滚）') printf '%s' '? (the service will restart, ~2s interruption; auto-rollback on startup failure)' ;;
-        '未知版本') printf '%s' 'unknown version' ;;
-        '未知版本（本地备份二进制）') printf '%s' 'unknown version (local backup binary)' ;;
-        '未探测到，请手动输入') printf '%s' 'not detected, please enter manually' ;;
-        '未设置') printf '%s' 'not set' ;;
-        '无') printf '%s' 'none' ;;
-        '旧版本') printf '%s' 'old version' ;;
-        '版本未知') printf '%s' 'unknown version' ;;
-        '新版本') printf '%s' 'new version' ;;
-        '（自签模式不需要）') printf '%s' '(not needed in self-signed mode)' ;;
-        '选择') printf '%s' 'Choose' ;;
-        '返回') printf '%s' 'Back' ;;
-        '1/2/3，默认1') printf '%s' '1/2/3, default 1' ;;
-        '1/2，默认1') printf '%s' '1/2, default 1' ;;
-        '地址不能为空，且只能包含字母、数字和 . : - _') printf '%s' 'Address cannot be empty; only letters, digits and . : - _ are allowed' ;;
-        'Morph 乱形    :') printf '%s' 'Morph shaping    :' ;;
-        'PSK（回车自动生成 32 位随机串；自定义需 12-255 位，仅限字母、数字、- 和 _）:') printf '%s' 'PSK (Enter = auto-generate a 32-char random string; custom must be 12-255 chars, letters, digits, - and _ only):' ;;
-        '发现新版本:') printf '%s' 'New version found:' ;;
-        '/ 重装 Snell（自动获取官方最新版，默认跟随测试版）') printf '%s' '/ Reinstall Snell (auto-fetch the official latest; follows the beta channel by default)' ;;
-        '/ 重装 Xray 内核（选择通道：最新预发布 / 正式版 / 指定版本）') printf '%s' '/ Reinstall the Xray core (choose a channel: latest pre-release / stable / specific version)' ;;
-        'unshaped   - 仅 AES 加密、不做混淆，吞吐约高 10%（官方说明：相当于 Snell v3）') printf '%s' 'unshaped   - AES encryption only, no obfuscation; throughput ~10% higher (official note: equivalent to Snell v3)' ;;
-        '用 jail.d/') printf '%s' 'use jail.d/' ;;
-        '默认') printf '%s' 'default' ;;
-        '第 0 步：选择语言') printf '%s' 'Step 0: Choose a language' ;;
-        '.bak）') printf '%s' '.bak)' ;;
-        '.tgz）:') printf '%s' '.tgz):' ;;
-        '/ NW3）') printf '%s' '/ NW3)' ;;
-        '/ status）') printf '%s' '/ status)' ;;
-        '/ uninstall）') printf '%s' '/ uninstall)' ;;
-        '/acme.sh）') printf '%s' '/acme.sh)' ;;
-        '/tcp）') printf '%s' '/tcp)' ;;
-        'Fail2ban（') printf '%s' 'Fail2ban(' ;;
-        'Nowhere（Portal / Egress：') printf '%s' 'Nowhere(Portal / Egress: ' ;;
-        'Shadowsocks 2022（TCP + UDP）') printf '%s' 'Shadowsocks 2022(TCP + UDP)' ;;
-        'Xray（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）') printf '%s' 'Xray(SS2022 / VLESS: REALITY Vision, XHTTP REALITY, XHTTP CDN, VLESS Encryption)' ;;
-        'en）') printf '%s' 'en)' ;;
-        'mode：1') printf '%s' 'mode: 1' ;;
-        'stable）') printf '%s' 'stable)' ;;
-        'v3.3.0）') printf '%s' 'v3.3.0)' ;;
-        '」）') printf '%s' '")' ;;
-        '（') printf '%s' ' (' ;;
-        '（TCP') printf '%s' ' (TCP' ;;
-        '（linux-') printf '%s' ' (linux-' ;;
-        '）') printf '%s' ')' ;;
-        '）  mode') printf '%s' ')  mode' ;;
-        '）:') printf '%s' '):' ;;
-        '）：') printf '%s' '): ' ;;
-        '）？') printf '%s' ')?' ;;
-        '，dial4=') printf '%s' ', dial4=' ;;
-        '，dial=') printf '%s' ', dial=' ;;
-        '，morph=') printf '%s' ', morph=' ;;
-        '？') printf '%s' '?' ;;
-        '时间') printf '%s' 'Time' ;;
-        '大陆流量拦截（geoip:cn / geosite:cn → 拦截）开 / 关') printf '%s' 'Block mainland traffic (geoip:cn / geosite:cn) on / off' ;;
-        '大陆流量拦截（geoip:cn / geosite:cn → 拦截）：') printf '%s' 'Mainland traffic block (geoip:cn / geosite:cn): ' ;;
-        '大陆拦截:') printf '%s' 'Mainland block:' ;;
-        '快捷命令已就绪：输入 adam 打开菜单') printf '%s' 'Shortcuts ready: type adam to open the menu' ;;
-        '快捷命令未能安装（服务本身不受影响）') printf '%s' 'Shortcuts could not be installed (services are unaffected)' ;;
-        '修复：重新运行安装脚本文件，或执行：') printf '%s' 'Fix: re-run the installer file, or run:' ;;
-        '快捷命令 adam：正常（指向') printf '%s' 'Shortcut adam: OK (points to' ;;
-        '快捷命令 adam 不可用：请执行') printf '%s' 'Shortcut adam is unavailable: please run' ;;
-        '或重新运行安装脚本') printf '%s' 'or re-run the installer' ;;
-        '该地址不是公网 IP（内网/保留地址），客户端连不上：') printf '%s' 'That address is not a public IP (private/reserved); clients cannot connect: ' ;;
-        '该域名解析不到任何 IP，请检查域名/DNS：') printf '%s' 'That domain resolves to no IP; check the domain/DNS: ' ;;
-        '该域名解析到的 IP 与本机公网 IP 不一致（可能是 CDN/多线，也可能是填错）：') printf '%s' 'That domain resolves to IPs different from this machine'\''s public IP (may be CDN/multi-line, or a typo): ' ;;
-        '本机公网 IP：') printf '%s' 'This machine'\''s public IP: ' ;;
-        '仍要使用这个地址？') printf '%s' 'Use this address anyway?' ;;
-        '未能确定公网地址，分享链接暂不可用，请用 Xray 菜单 13 设置公网地址') printf '%s' 'Could not determine the public address; share links are unavailable for now. Set it in Xray menu 13.' ;;
-        'geo 数据缺失，大陆拦截未开启') printf '%s' 'Geo data missing; mainland block not enabled' ;;
-        'geo 数据缺失：本次安装先不开启大陆拦截，稍后用 Xray 菜单 15 再开') printf '%s' 'Geo data missing: mainland block will not be enabled for this install; enable it later from Xray menu 15' ;;
-        '下载 geo 数据失败：') printf '%s' 'Failed to download geo data: ' ;;
-        '，大陆拦截暂不可用') printf '%s' '; mainland block unavailable' ;;
-        '用法：xray cnblock on|off') printf '%s' 'Usage: xray cnblock on|off' ;;
-        '配置重载失败，拦截状态未生效，请查看日志') printf '%s' 'Config reload failed; the block state did not take effect. Check the logs.' ;;
-        '公网地址为空') printf '%s' 'Public address is empty' ;;
-        '未修改') printf '%s' 'Not changed' ;;
-        '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：') printf '%s' 'Shortcut install failed: check that /usr/local/bin is writable and the manager copy exists: ' ;;
-        'VLESS + XHTTP + TLS（直连域名证书，证书自动申请，IP 照常用）') printf '%s' 'VLESS + XHTTP + TLS (direct domain cert, auto-issued; IP still works)' ;;
-        '直连域名证书节点：客户端连域名或本机 IP 均可（SNI 始终为域名，证书只验证域名）') printf '%s' 'Direct domain-cert node: clients may connect by domain or by this machine'\''s IP (SNI is always the domain; the cert only validates the domain)' ;;
-        '域名（须已解析到本机，证书将签发给它）:') printf '%s' 'Domain (must already resolve to this machine; the cert is issued for it): ' ;;
-        'ACME 邮箱（证书账户用）:') printf '%s' 'ACME email (for the certificate account): ' ;;
-        '邮箱不能为空') printf '%s' 'Email cannot be empty' ;;
-        '证书申请方式：') printf '%s' 'Certificate method: ' ;;
-        'HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）') printf '%s' 'HTTP-01 (domain resolves to this machine + port 80 open, auto-renewal)' ;;
-        'Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）') printf '%s' 'Cloudflare DNS-01 (needs a CF API key/token, auto-renewal, port 80 can stay closed)' ;;
-        '已有证书文件（fullchain.pem + privkey.pem）') printf '%s' 'Existing certificate files (fullchain.pem + privkey.pem)' ;;
-        '检测到该域名已有有效证书，直接复用') printf '%s' 'Found a valid certificate for this domain; reusing it' ;;
-        '证书申请中（HTTP-01，需 80 端口）...') printf '%s' 'Requesting the certificate (HTTP-01, needs port 80)...' ;;
-        '证书申请中（Cloudflare DNS-01，约需 30-60 秒）...') printf '%s' 'Requesting the certificate (Cloudflare DNS-01, about 30-60s)...' ;;
-        '域名解析未通过，HTTP-01 很可能失败，仍要继续申请？') printf '%s' 'DNS check failed; HTTP-01 will probably fail. Continue anyway?' ;;
-        'Cloudflare 凭证文件已存在，直接复用') printf '%s' 'Cloudflare credentials file already exists; reusing it' ;;
-        '同一节点两种连法：域名或本机 IP（SNI 始终为域名），用 Xray 菜单 13 切换分享链接地址') printf '%s' 'Same node, two addresses: domain or this machine'\''s IP (SNI is always the domain); switch the share-link address in Xray menu 13' ;;
-        '备用链接（另一地址，SNI 仍为域名）:') printf '%s' 'Alternate link (other address, SNI is still the domain): ' ;;
-        'certbot Cloudflare 插件安装失败') printf '%s' 'Failed to install the certbot Cloudflare plugin' ;;
-        '域名:') printf '%s' 'Domain: ' ;;
-        '已同步 REALITY serverNames（域名地址可用）') printf '%s' 'REALITY serverNames synced (domain address now works)' ;;
-        '未找到 python3，无法同步 REALITY 域名') printf '%s' 'python3 not found; cannot sync REALITY domain' ;;
-        '同步 REALITY 域名失败：') printf '%s' 'Failed to sync REALITY domain: ' ;;
-        '未能确定公网地址，无法生成 Anywhere 分享链接') printf '%s' 'Could not determine the public address; cannot generate the Anywhere share link' ;;
-        '未能确定公网地址，无法生成 Vector 探针链接') printf '%s' 'Could not determine the public address; cannot generate the Vector probe link' ;;
-        '检测到 firewalld 或 cnblock 防火墙链已在运行，跳过 ufw 安装（避免两套防火墙混用）；端口放行请用现有防火墙管理') printf '%s' 'firewalld or a cnblock firewall chain is already active; skipping ufw install to avoid mixing two firewalls. Manage port rules with the existing firewall' ;;
-        '删除后 Snell / Xray / 防火墙 / Fail2ban 的管理入口需改用') printf '%s' 'After deletion, use the Snell / Xray / firewall / Fail2ban management entries via ' ;;
-        'Cloudflare 凭证仍被 Xray 域名证书节点使用（xhttp-tls，续期也依赖它），未删除；如 Xray 已卸载或不再用该凭证，请手动删除') printf '%s' 'The Cloudflare credential is still used by an Xray domain-certificate node (xhttp-tls, renewal depends on it too) and was not deleted. If Xray no longer uses it, delete it manually' ;;
-        'Global API Key（需邮箱）') printf '%s' 'Global API Key (needs the account email)' ;;
-        'API Token（建议，只需 Token，需 Zone:DNS:Edit 权限）') printf '%s' 'API Token (recommended; only the token is needed, needs Zone:DNS:Edit permission)' ;;
-        'Cloudflare 邮箱不能为空') printf '%s' 'Cloudflare email must not be empty' ;;
-        'Cloudflare 凭证不能为空') printf '%s' 'Cloudflare credential must not be empty' ;;
-        'Cloudflare 凭证未提供，已中止') printf '%s' 'Cloudflare credential not provided; aborted' ;;
-        '连接串里的 SNI 格式不合法，已忽略') printf '%s' 'The SNI in the pasted URL is malformed and was ignored' ;;
-        '连接串里的 pin 不是 64 位小写十六进制，已忽略') printf '%s' 'The pin in the pasted URL is not 64 lowercase hex chars and was ignored' ;;
-        '连接串里的 dial 不是合法 IP，已重置为 auto') printf '%s' 'The dial in the pasted URL is not a valid IP; reset to auto' ;;
-        '连接串里的 dial4 不是合法 IPv4，已重置为 auto') printf '%s' 'The dial4 in the pasted URL is not a valid IPv4 address; reset to auto' ;;
-        '连接串里的 dial6 不是合法 IPv6，已重置为 auto') printf '%s' 'The dial6 in the pasted URL is not a valid IPv6 address; reset to auto' ;;
-        '连接串里的上行限速不合法，已重置为 0') printf '%s' 'The upload rate in the pasted URL is invalid; reset to 0' ;;
-        '连接串里的下行限速不合法，已重置为 0') printf '%s' 'The download rate in the pasted URL is invalid; reset to 0' ;;
-        '证书副本同步失败，服务可能无法读取新证书') printf '%s' 'Failed to sync the certificate copy; the service may not be able to read the new certificate' ;;
-        '创建专用低权用户失败，继续以 root 运行') printf '%s' 'Failed to create the dedicated low-privilege user; continuing to run as root' ;;
-        '证书副本同步失败，回退 root 运行') printf '%s' 'Failed to sync the certificate copy; falling back to running as root' ;;
-        '低权用户启动失败，回退为 root 运行') printf '%s' 'Failed to start as the low-privilege user; falling back to running as root' ;;
-        '创建临时工作目录失败') printf '%s' 'Failed to create a temporary working directory' ;;
-        'HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80') printf '%s' 'HTTP-01 conflicts with listening on port 80: certbot needs exclusive use of port 80 at renewal time' ;;
-        '80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01') printf '%s' 'Port 80 is already in use by another process; stop that service or use DNS-01 before HTTP-01 issuance' ;;
-        '证书副本已同步') printf '%s' 'Certificate copy synced' ;;
-        '新二进制试运行失败') printf '%s' 'New binary failed its trial run' ;;
-        'DNSPod 凭证不能为空') printf '%s' 'DNSPod credentials must not be empty' ;;
-        '阿里云凭证不能为空') printf '%s' 'Alibaba Cloud credentials must not be empty' ;;
-        '80 端口仍被占用，证书签发已中止') printf '%s' 'Port 80 is still in use; certificate issuance aborted' ;;
-        '注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 8）') printf '%s' 'Note: timer unit files are not in the backup; after restoring on another machine, reinstall the timers (Auto-maintenance menu 8)' ;;
-        'Xray 仍在使用 acme.sh 续期，已保留 acme.sh 的 cron 任务') printf '%s' 'Xray still uses acme.sh for renewal; the acme.sh cron task has been kept' ;;
-        '已移除 acme.sh 的 cron 续期任务') printf '%s' 'Removed the acme.sh cron renewal task' ;;
-        'acme.sh 目录仍保留，如确认不再需要请手动删除：rm -rf ~/.acme.sh') printf '%s' 'The acme.sh directory is kept; if you are sure it is no longer needed, delete it manually: rm -rf ~/.acme.sh' ;;
-        '备份内的角色与本机角色不一致，已中止恢复') printf '%s' 'The role in the backup does not match this machine; restore aborted' ;;
-        '已停用多余的 Snell 附加端口实例：') printf '%s' 'Stopped the extra Snell port instance that no longer has a config: ' ;;
-        '分端口模式下 TCP 与 UDP 端口不能相同，已将 UDP 端口改为') printf '%s' 'TCP and UDP ports must differ in split mode; the UDP port has been changed to' ;;
-        '本机现有二进制版本过低或无法识别（需要 Nowhere v3 及以上），将下载最新版') printf '%s' 'The existing binary is too old or unrecognized (Nowhere v3 or later is required); downloading the latest version' ;;
-        '另一个维护或安装任务正在运行') printf '%s' 'Another maintenance or install task is running' ;;
-        '仍要继续吗？') printf '%s' 'Continue anyway?' ;;
-        '配置备份失败，仍要继续吗？') printf '%s' 'Config backup failed; continue anyway?' ;;
-        '配置保存失败，已中止') printf '%s' 'Failed to save the config; aborted' ;;
-        '安装完成，但快捷命令校验未通过（服务本身不受影响），请稍后执行 adam shortcuts 重新安装') printf '%s' 'Install finished, but the shortcut check failed (the service itself is unaffected); run adam shortcuts later to reinstall the shortcuts' ;;
-        '已恢复旧配置') printf '%s' 'Old config restored' ;;
-        '检测到跨大版本升级，确认继续吗？') printf '%s' 'This is a cross-major upgrade; continue?' ;;
-        '迁移重启失败，已恢复旧配置并再次重启，请按日志排查') printf '%s' 'Migration restart failed; the old config has been restored and the service restarted again; please check the log' ;;
-        '迁移失败：已恢复旧配置，但服务仍未启动，请按上方日志排查') printf '%s' 'Migration failed: the old config was restored, but the service still did not start; please check the log above' ;;
-        '旧配置备份失败，迁移继续（失败时无法自动恢复）') printf '%s' 'Failed to back up the old config; migration continues (automatic restore will not be possible on failure)' ;;
-        '已恢复旧配置，服务已恢复运行（仍为 tls=1）') printf '%s' 'Old config restored and the service is running again (still tls=1)' ;;
-        '官方暂无可用版本，当前') printf '%s' 'No usable release is available from upstream; current' ;;
-        '未能获取官方版本信息，本次跳过；当前') printf '%s' 'Could not fetch upstream release info; skipping this time; current' ;;
-        '最新版本属于另一个大版本（v') printf '%s' 'The latest release belongs to another major version (v' ;;
-        '），不自动跨大版本，当前') printf '%s' '); not auto-upgrading across major versions; current' ;;
-        '限速不合法，已清空（不限速）') printf '%s' 'Invalid rate limit; cleared (no limit)' ;;
-        '出站源 IP 不合法，已重置为 auto') printf '%s' 'Invalid outbound source IP; reset to auto' ;;
-        '，') printf '%s' ',' ;;
-        '1/2，默认2') printf '%s' '1/2, default 2' ;;
-        '握手超时') printf '%s' 'Handshake timeout' ;;
-        '备份当前二进制失败，回退中止') printf '%s' 'Failed to back up the current binary; rollback aborted' ;;
-        '回退替换失败，当前二进制未动') printf '%s' 'Rollback replacement failed; the current binary was not touched' ;;
-        '备份交换失败，已尽力恢复原二进制') printf '%s' 'Backup swap failed; tried to restore the original binary' ;;
-        '未知证书方式') printf '%s' 'Unknown certificate method' ;;
-        'certbot.timer 启用失败，自动续期可能不工作') printf '%s' 'Failed to enable certbot.timer; auto-renewal may not work' ;;
-        '下载失败或远端内容不完整，请检查网络或脚本地址（现有脚本未改动）') printf '%s' 'Download failed or the remote content is incomplete; please check the network or script URL (the existing script was not changed)' ;;
-        '保活巡检未开启') printf '%s' 'Watchdog is off' ;;
-        'ss 工具缺失，无法列出监听端口（请安装 iproute2）') printf '%s' 'The ss tool is missing; cannot list listening ports (please install iproute2)' ;;
-        '移除定时器后，Xray 证书同步与自动续期将停止（证书到期前需手动续期或重装定时器）') printf '%s' 'Removing the timers will stop Xray certificate sync and auto-renewal (renew manually or reinstall the timers before certificates expire)' ;;
-        '（当前已是 tls=2）') printf '%s' '(already tls=2)' ;;
-        'Fail2ban 重启后校验失败，请查看: fail2ban-client status') printf '%s' 'Fail2ban check failed after restart; see: fail2ban-client status' ;;
-        '警告：SHA256 校验已被跳过，安装包未经校验') printf '%s' 'WARNING: SHA256 verification was skipped; the package was not verified' ;;
-        '（可能被 GitHub 限流，请稍后重试）') printf '%s' '(possibly rate-limited by GitHub; please retry later)' ;;
-        '备份二进制无法运行，回退已中止') printf '%s' 'The backup binary cannot run; rollback aborted' ;;
-        '节点 tag 不合法，已跳过证书目录清理') printf '%s' 'Invalid node tag; skipped certificate directory cleanup' ;;
-        '节点 tag 不合法，已中止删除') printf '%s' 'Invalid node tag; deletion aborted' ;;
-        '  入站网卡 listen_interface（如 eth0，回车默认自动）: ') printf '%s' '  Inbound NIC listen_interface (e.g. eth0, Enter for auto): ' ;;
-        '  出站源 IP through（回车默认自动）: ') printf '%s' '  Outbound source IP through (Enter for auto): ' ;;
-        '  出站网卡 interface（如 eth1，回车默认自动）: ') printf '%s' '  Outbound NIC interface (e.g. eth1, Enter for auto): ' ;;
-        '  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ') printf '%s' '  Weight per target (comma-separated, including the main target, e.g. 2,1; Enter for all weight 1): ' ;;
-        '  向目标发送 Proxy Protocol v2（send_proxy）？') printf '%s' '  Send Proxy Protocol v2 to the target (send_proxy)?' ;;
-        '  启用入站 MPTCP（accept_mptcp）？') printf '%s' '  Enable inbound MPTCP (accept_mptcp)?' ;;
-        '  启用出站 MPTCP（send_mptcp）？') printf '%s' '  Enable outbound MPTCP (send_mptcp)?' ;;
-        '  当前机器角色：1) 中转入口机（向外加密 remote_transport）  2) 落地出口机（入站解密 listen_transport）') printf '%s' '  This machine role: 1) Relay entry (encrypt outbound, remote_transport)  2) Exit node (decrypt inbound, listen_transport)' ;;
-        '  接收来源 Proxy Protocol（accept_proxy）？') printf '%s' '  Accept Proxy Protocol from the source (accept_proxy)?' ;;
-        '  负载策略：1) roundrobin（加权轮询）  2) iphash（源 IP 哈希）') printf '%s' '  Balance strategy: 1) roundrobin (weighted round-robin)  2) iphash (source IP hash)' ;;
-        '  选择 [1/2，默认 1]: ') printf '%s' '  Choose [1/2, default 1]: ' ;;
-        '  额外目标列表（逗号分隔，格式 host:port,host2:port）: ') printf '%s' '  Extra targets (comma-separated, host:port,host2:port): ' ;;
-        ' 失败') printf '%s' ' failed' ;;
-        ' 安装完成（') printf '%s' ' installed (' ;;
-        ' 已生效：') printf '%s' ' is now active: ' ;;
-        ' 已被其他进程占用：') printf '%s' ' is already in use by another process: ' ;;
-        'Host 不合法，回退标准透传') printf '%s' 'Invalid host, falling back to plain forwarding' ;;
-        'Realm ') printf '%s' 'Realm ' ;;
-        'Realm 下载或校验失败') printf '%s' 'Realm download or verification failed' ;;
-        'Realm 已卸载') printf '%s' 'Realm uninstalled' ;;
-        'Realm 已重启') printf '%s' 'Realm restarted' ;;
-        'Realm 暂不支持该架构：') printf '%s' 'Realm does not support this architecture: ' ;;
-        'Realm 更新失败') printf '%s' 'Realm update failed' ;;
-        'Realm 未安装，规则配置已保存，安装后生效') printf '%s' 'Realm is not installed; the rule config is saved and will take effect after installation' ;;
-        'Realm 端口转发管理') printf '%s' 'Realm port forwarding' ;;
-        'Realm 转发规则列表') printf '%s' 'Realm forwarding rules' ;;
-        'TCP + UDP 双栈（默认）') printf '%s' 'TCP + UDP (default)' ;;
-        'TLS SNI / 域名（如 example.com）: ') printf '%s' 'TLS SNI / domain (e.g. example.com): ' ;;
-        'WS Path（回车默认 /ws）: ') printf '%s' 'WS path (Enter for /ws): ' ;;
-        'Xray 未安装，转发配置已保存，重装 Xray 后生效') printf '%s' 'Xray is not installed; the forwarding config is saved and will take effect after reinstalling Xray' ;;
-        'Xray 端口转发（dokodemo-door）') printf '%s' 'Xray port forwarding (dokodemo-door)' ;;
-        'Xray 转发已重启') printf '%s' 'Xray forwarding restarted' ;;
-        'Xray 转发规则列表') printf '%s' 'Xray forwarding rules' ;;
-        ']？') printf '%s' ']?' ;;
-        'adam-realm 以专用用户启动失败，改以 root 重试') printf '%s' 'adam-realm failed to start as the dedicated user, retrying as root' ;;
-        'adam-realm 启动失败，请查看日志：journalctl -u adam-realm -n 20 --no-pager') printf '%s' 'adam-realm failed to start, see the logs: journalctl -u adam-realm -n 20 --no-pager' ;;
-        '下载 Realm ') printf '%s' 'Download Realm ' ;;
-        '下载的 realm 无法在本机运行，尝试另一构建') printf '%s' 'The downloaded realm binary cannot run on this machine, trying the other build' ;;
-        '仍要继续添加？') printf '%s' 'Add it anyway?' ;;
-        '传输隧道：') printf '%s' ' transport tunnel:' ;;
-        '伪装 Host（如 cdn.example.com）: ') printf '%s' 'Disguise host (e.g. cdn.example.com): ' ;;
-        '伪装域名 Host/SNI（如 cdn.example.com）: ') printf '%s' 'Disguise domain host/SNI (e.g. cdn.example.com): ' ;;
-        '入站解密') printf '%s' 'Inbound decrypt' ;;
-        '入站隧道') printf '%s' 'inbound tunnel' ;;
-        '出站加密') printf '%s' 'Outbound encrypt' ;;
-        '出站隧道') printf '%s' 'outbound tunnel' ;;
-        '出网卡:') printf '%s' 'out iface:' ;;
-        '创建 adam-realm 用户失败，改以 root 运行服务') printf '%s' 'Failed to create the adam-realm user, running the service as root' ;;
-        '创建临时文件失败') printf '%s' 'Failed to create a temporary file' ;;
-        '删除转发规则') printf '%s' 'Delete a forwarding rule' ;;
-        '卸载 Realm') printf '%s' 'Uninstall Realm' ;;
-        '压缩包损坏或格式无效') printf '%s' 'The archive is damaged or not a valid format' ;;
-        '同时删除规则配置目录') printf '%s' 'Also delete the rule config directory' ;;
-        '同时删除防火墙中 Realm 端口的放行规则（') printf '%s' 'Also delete the firewall allow rules for the Realm ports (' ;;
-        '启用 / 停用单条规则') printf '%s' 'Enable / disable a single rule' ;;
-        '域名不合法，回退标准透传') printf '%s' 'Invalid domain, falling back to plain forwarding' ;;
-        '备份为空或格式无效') printf '%s' 'The backup is empty or invalid' ;;
-        '备份包含 adam-realm 之外的成员，拒绝导入') printf '%s' 'The backup contains entries outside adam-realm; import refused' ;;
-        '备注含非法字符（\" 或 \），请去掉后重试') printf '%s' 'The remark contains illegal characters (" or \); remove them and retry' ;;
-        '安装 / 更新 Realm') printf '%s' 'Install / update Realm' ;;
-        '导入将覆盖 /etc/adam-realm 现有规则并重启服务，确认？') printf '%s' 'Import will overwrite the existing rules in /etc/adam-realm and restart the service. Continue?' ;;
-        '导入规则（从备份恢复）') printf '%s' 'Import rules (restore from backup)' ;;
-        '导出规则（迁移备份）') printf '%s' 'Export rules (migration backup)' ;;
-        '尚未安装 Realm，请先安装') printf '%s' 'Realm is not installed yet, please install it first' ;;
-        '已保留规则目录') printf '%s' 'Rule directory kept' ;;
-        '已删除规则 ') printf '%s' 'Deleted rule ' ;;
-        '已剔除无效目标：') printf '%s' 'Removed invalid target: ' ;;
-        '已是最新版本，仍要重新安装？') printf '%s' 'Already the latest version. Reinstall anyway?' ;;
-        '当前没有已启用的转发规则，adam-realm 已停止') printf '%s' 'No enabled forwarding rules; adam-realm has stopped' ;;
-        '恢复后重载仍失败，请检查 Xray 配置与日志') printf '%s' 'Reload still failed after restore; check the Xray config and logs' ;;
-        '找不到文件: ') printf '%s' 'File not found: ' ;;
-        '新版本启动失败，自动回滚到旧二进制...') printf '%s' 'The new version failed to start, rolling back to the old binary...' ;;
-        '新规则未能生效，已自动撤回（原有规则不受影响）') printf '%s' 'The new rule did not take effect and was rolled back automatically (existing rules are unaffected)' ;;
-        '新转发规则未能生效，已自动撤回') printf '%s' 'The new forwarding rule did not take effect and was rolled back automatically' ;;
-        '无法获取 Realm 最新版本号，请检查网络') printf '%s' 'Cannot get the latest Realm version; check the network' ;;
-        '暂无可测试的规则') printf '%s' 'No rules to test' ;;
-        '暂无规则') printf '%s' 'No rules yet' ;;
-        '暂无转发规则') printf '%s' 'No forwarding rules yet' ;;
-        '未取到官方 SHA256 摘要，跳过校验（') printf '%s' 'Official SHA256 digest unavailable, skipping verification (' ;;
-        '未找到 Realm 配置目录') printf '%s' 'Realm config directory not found' ;;
-        '未知的 realm 子命令:') printf '%s' 'Unknown realm subcommand:' ;;
-        '未知的 xray fwd 子命令:') printf '%s' 'Unknown xray fwd subcommand:' ;;
-        '本机监听 IP（回车默认 ') printf '%s' 'Listen IP on this machine (Enter for default ' ;;
-        '本机监听端口 (1-65535): ') printf '%s' 'Listen port on this machine (1-65535): ' ;;
-        '权重数量与目标数不符或含非数字，已按等权生成') printf '%s' 'Weight count does not match the target count or contains non-numbers; equal weights generated' ;;
-        '条规则') printf '%s' 'rules' ;;
-        '查看转发规则列表') printf '%s' 'List forwarding rules' ;;
-        '标准透传（推荐，性能最高，适用于已加密协议）') printf '%s' 'Plain forwarding (recommended, fastest, for already-encrypted protocols)' ;;
-        '正在查询 Realm 官方最新版本...') printf '%s' 'Querying the latest official Realm version...' ;;
-        '测试目标连通性与延迟') printf '%s' 'Test target connectivity and latency' ;;
-        '添加 Realm 转发规则') printf '%s' 'Add a Realm forwarding rule' ;;
-        '添加 Xray 端口转发') printf '%s' 'Add Xray port forwarding' ;;
-        '添加转发规则') printf '%s' 'Add a forwarding rule' ;;
-        '添加转发规则（TCP/UDP/LB/隧道/多网卡）') printf '%s' 'Add a forwarding rule (TCP/UDP/LB/tunnel/multi-NIC)' ;;
-        '源IP:') printf '%s' 'src IP:' ;;
-        '监听 IP 格式不合法') printf '%s' 'Invalid listen IP format' ;;
-        '目标地址格式不合法') printf '%s' 'Invalid target address format' ;;
-        '目标地址（域名、公网 IP 或同区免费内网 IP）: ') printf '%s' 'Target address (domain, public IP, or same-region free private IP): ' ;;
-        '目标地址（域名或 IP）: ') printf '%s' 'Target address (domain or IP): ' ;;
-        '目标端口 (1-65535): ') printf '%s' 'Target port (1-65535): ' ;;
-        '目标证书由 CA 签发（可校验）？') printf '%s' 'Is the target certificate CA-issued (verifiable)?' ;;
-        '确认删除规则 [') printf '%s' 'Confirm deleting rule [' ;;
-        '确认卸载 Realm（含服务与二进制）？') printf '%s' 'Confirm uninstalling Realm (including the service and binary)?' ;;
-        '私钥文件路径: ') printf '%s' 'Private key file path: ' ;;
-        '端口 ') printf '%s' 'Port ' ;;
-        '纯 TCP') printf '%s' 'TCP only' ;;
-        '纯 UDP') printf '%s' 'UDP only' ;;
-        '纯 UDP（自动跳过 WS/TLS 隧道选项）') printf '%s' 'UDP only (WS/TLS tunnel options are skipped automatically)' ;;
-        '纯TCP') printf '%s' 'TCP only' ;;
-        '纯UDP') printf '%s' 'UDP only' ;;
-        '缺少必需工具：') printf '%s' 'Missing required tool: ' ;;
-        '网卡名格式不合法，已忽略') printf '%s' 'Invalid NIC name, ignored' ;;
-        '规则 ') printf '%s' 'Rule ' ;;
-        '规则备注（可选）: ') printf '%s' 'Rule remark (optional): ' ;;
-        '规则备注（可选，如 香港VPC落地）: ') printf '%s' 'Rule remark (optional, e.g. HK VPC exit): ' ;;
-        '规则导入完成') printf '%s' 'Rules imported' ;;
-        '规则已导出至: ') printf '%s' 'Rules exported to: ' ;;
-        '规则渲染失败，已跳过：') printf '%s' 'Failed to render rule, skipped: ' ;;
-        '规则状态已切换为：') printf '%s' 'Rule status changed to: ' ;;
-        '证书或私钥文件不存在，回退内置自签') printf '%s' 'Certificate or key file not found, falling back to the built-in self-signed certificate' ;;
-        '证书文件路径（回车使用 Realm 内置自签）: ') printf '%s' 'Certificate file path (Enter to use the Realm built-in self-signed certificate): ' ;;
-        '跟随系统重定向（followRedirect，仅配合 iptables 转发规则使用）？') printf '%s' 'Follow system redirect (followRedirect, only with iptables redirect rules)?' ;;
-        '路径含非法字符（\" 或 \），回退内置自签') printf '%s' 'The path contains illegal characters (" or \); falling back to the built-in self-signed certificate' ;;
-        '路径含非法字符（\" 或 \），回退标准透传') printf '%s' 'The path contains illegal characters (" or \); falling back to plain forwarding' ;;
-        '跳过（纯 UDP 无法做 TCP 握手探测）') printf '%s' 'Skipped (pure UDP cannot be probed with a TCP handshake)' ;;
-        '转发协议：') printf '%s' 'Forwarding protocol:' ;;
-        '转发目标连通性测试（TCP 握手延迟）') printf '%s' 'Forwarding target connectivity test (TCP handshake latency)' ;;
-        '转发规则 ') printf '%s' 'Forwarding rule ' ;;
-        '转发配置重载失败，恢复上一版本') printf '%s' 'Forwarding config reload failed, restoring the previous version' ;;
-        '输入导出的 .tgz 备份文件路径: ') printf '%s' 'Enter the exported .tgz backup file path: ' ;;
-        '输入规则序号（回车取消）: ') printf '%s' 'Enter the rule number (Enter to cancel): ' ;;
-        '返回 Xray 菜单') printf '%s' 'Back to the Xray menu' ;;
-        '选择 [1-3，默认 1]: ') printf '%s' 'Choose [1-3, default 1]: ' ;;
-        '选择 [1-4，默认 1]: ') printf '%s' 'Choose [1-4, default 1]: ' ;;
-        '配置 WS / TLS / WSS 双端加密隧道？') printf '%s' 'Configure a WS / TLS / WSS two-ended encrypted tunnel?' ;;
-        '配置多目标负载均衡（extra_remotes）？') printf '%s' 'Configure multi-target load balancing (extra_remotes)?' ;;
-        '配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？') printf '%s' 'Configure advanced options (outbound source IP/NIC, Proxy Protocol, MPTCP)?' ;;
-        '重启服务 / 查看状态与日志') printf '%s' 'Restart the service / view status and logs' ;;
-        '非合法 IP，已忽略') printf '%s' 'Not a valid IP, ignored' ;;
-        '额外目标全部无效，已跳过负载均衡') printf '%s' 'All extra targets are invalid, load balancing skipped' ;;
-        '首次安装启动失败，已删除新二进制') printf '%s' 'First install failed to start; the new binary has been removed' ;;
-        '（可用: add / list / toggle / delete / test / restart / status）') printf '%s' '(available: add / list / toggle / delete / test / restart / status)' ;;
-        '（可用: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall）') printf '%s' '(available: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall)' ;;
-        '）: ') printf '%s' '): ' ;;
-        '），尝试另一构建') printf '%s' '), trying the other build' ;;
-        '，请先安装') printf '%s' ', please install it first' ;;
-        '端口转发') printf '%s' 'Port forwarding' ;;
-        '端口转发（dokodemo-door）') printf '%s' 'Port forwarding (dokodemo-door)' ;;
-        '端口转发（TCP / UDP 转发、负载均衡、WS / TLS 隧道）') printf '%s' 'Port forwarding (TCP/UDP forwarding, load balancing, WS/TLS tunnels)' ;;
-        'realm                      打开 Realm 端口转发菜单') printf '%s' 'realm                      Open the Realm port forwarding menu' ;;
-        '当前没有节点与转发规则，Xray 服务已停止') printf '%s' 'No nodes or forwarding rules; the Xray service has stopped' ;;
-        '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm 均未安装）') printf '%s' 'No service ports managed by this script need allowing (Nowhere / Snell / Xray / Realm are not installed)' ;;
-        '条转发规则') printf '%s' 'forwarding rules' ;;
-        '个节点') printf '%s' 'nodes' ;;
-        '（无 Nowhere/Snell/Xray/Realm 的 TCP 监听）') printf '%s' '(no Nowhere/Snell/Xray/Realm TCP listeners)' ;;
-        '（无 Nowhere/Snell/Xray/Realm 的 UDP 监听）') printf '%s' '(no Nowhere/Snell/Xray/Realm UDP listeners)' ;;
-        '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm 等现有配置，并重启已启用的服务') printf '%s' 'Restore will overwrite the existing configs in /etc/nowhere, /etc/snell, /etc/adam-xray and /etc/adam-realm, and restart the enabled services' ;;
-        '（可用: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall）') printf '%s' '(available: install / add / list / links / delete / update / health / repair / status / logs / restart / cnblock / fwd / uninstall)' ;;
-        '是否同时卸载 Realm 端口转发？') printf '%s' 'Also uninstall Realm port forwarding?' ;;
-        '规则文件内容非法，已跳过：') printf '%s' 'Invalid rule file content, skipped: ' ;;
-        '导入的规则文件内容非法，已恢复原配置') printf '%s' 'The imported rule file content is invalid; the previous config has been restored' ;;
-        '解包失败，已恢复原配置') printf '%s' 'Extraction failed; the previous config has been restored' ;;
-        '规则已导入，但服务重载失败，请检查日志') printf '%s' 'Rules imported, but the service failed to reload; check the logs' ;;
-        '服务重载失败，删除未生效，请检查日志') printf '%s' 'Service reload failed; the deletion did not take effect, check the logs' ;;
-        '转发配置已移除，但 Xray 重载失败，请检查日志') printf '%s' 'Forwarding config removed, but Xray reload failed; check the logs' ;;
-        '已记录 root 运行标记，下次安装不再写入专用用户：') printf '%s' 'Recorded the run-as-root marker; the dedicated user will not be written on the next install: ' ;;
-        '改写服务文件失败') printf '%s' 'Failed to modify the service file' ;;
-        '创建 Realm 配置目录失败') printf '%s' 'Failed to create the Realm config directory' ;;
-        '备份旧二进制失败') printf '%s' 'Failed to back up the old binary' ;;
-        '安装 Realm 二进制失败') printf '%s' 'Failed to install the Realm binary' ;;
-        '导出失败') printf '%s' 'Export failed' ;;
-        '规则状态切换失败') printf '%s' 'Failed to change the rule status' ;;
-        '转发配置文件写入失败') printf '%s' 'Failed to write the forwarding config file' ;;
-        'Realm 服务恢复后重载失败，请检查日志') printf '%s' 'Realm failed to reload after restore; check the logs' ;;
-        '路径含 ; 或 =，回退标准透传') printf '%s' 'The path contains ; or =; falling back to plain forwarding' ;;
-        '路径含 ; 或 =，回退内置自签') printf '%s' 'The path contains ; or =; falling back to the built-in self-signed certificate' ;;
-        '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm）') printf '%s' 'Allow this script'\''s service ports in one click (SSH / Nowhere / Snell / Xray / Realm)' ;;
-        '规则文件内容非法，已恢复原配置') printf '%s' 'Invalid rule file content; the previous config has been restored' ;;
-        *) printf '%s' "$1" ;;
-    esac
+    local k="${1:-}"
+    if [ "${ADAM_LANG:-zh}" != "en" ] || [ -z "$k" ]; then printf '%s' "$k"; return 0; fi
+    [ "$_I18N_INIT" = "1" ] || init_i18n_en
+    printf '%s' "${I18N[$k]:-$k}"
 }
 
 set_lang_menu() {
@@ -2295,6 +2446,7 @@ set_lang() {
     mkdir -p "$(dirname "$LANG_FILE")"
     printf '%s\n' "$want" > "$LANG_FILE"
     ADAM_LANG="$want"
+    [ "$ADAM_LANG" = "en" ] && init_i18n_en
     success "$(L '语言已切换为') ${want}$(L '（zh=中文 / en=English），下次打开菜单生效')"
 }
 
@@ -2410,11 +2562,18 @@ version_ge() {
         if (( 10#$x > 10#$y )); then return 0; fi
         if (( 10#$x < 10#$y )); then return 1; fi
     done
-    # 数字部分相等：带预发布后缀（-rc/-beta/b3 等）的版本小于正式版；都有后缀时按后缀字典序比
+    # 数字部分相等：带预发布后缀（-rc/-beta/b3 等）的版本小于正式版；都有后缀时按自然序比（b10 > b2）
     if [ "$asuf" = "$bsuf" ]; then return 0; fi
     if [ -z "$asuf" ]; then return 0; fi
     if [ -z "$bsuf" ]; then return 1; fi
-    [[ "$asuf" > "$bsuf" ]]
+    local as_tag as_num bs_tag bs_num
+    as_tag="${asuf%%[0-9]*}"; as_num="${asuf#"$as_tag"}"
+    bs_tag="${bsuf%%[0-9]*}"; bs_num="${bsuf#"$bs_tag"}"
+    if [ "$as_tag" = "$bs_tag" ] && [[ "$as_num" =~ ^[0-9]+$ ]] && [[ "$bs_num" =~ ^[0-9]+$ ]]; then
+        (( 10#$as_num >= 10#$bs_num ))
+        return $?
+    fi
+    [ "$(printf '%s\n%s\n' "$asuf" "$bsuf" | sort -V | tail -n 1)" = "$asuf" ]
 }
 
 # record_previous_version TAG：只把符合 ^v?[0-9] 的版本号写入 PREV_VERSION_FILE（M1）
@@ -2694,6 +2853,12 @@ urlencode() {
     local input="${1:-}"
     python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$input" 2>/dev/null \
         || echo -n "$input" | od -An -tx1 | tr ' ' % | tr -d '\n'
+}
+
+urldecode() {
+    local input="${1:-}"
+    python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "$input" 2>/dev/null \
+        || printf '%s' "$input"
 }
 
 # 编码文件路径（crt=/key= 的值）：保留 / 不编码，只编码空格、&、#、% 等会切断 URL 查询串
@@ -3043,7 +3208,8 @@ build_portal_url() {
     endpoint="$(build_portal_endpoint)"
     query="tls=${TLS_MODE}"
     if [[ "$TLS_MODE" == "2" ]]; then
-        query="${query}&crt=$(encode_path "$CRT")&key=$(encode_path "$KEY_PEM")"
+        local _url_crt="${CRT_RUNTIME:-$CRT}" _url_key="${KEY_PEM_RUNTIME:-$KEY_PEM}"
+        query="${query}&crt=$(encode_path "$_url_crt")&key=$(encode_path "$_url_key")"
     fi
     query="${query}&morph=${MORPH}"
     case "$OUT_TYPE" in
@@ -3513,10 +3679,11 @@ if [ -f "${CONFIG_DIR}/nowhere.env" ]; then
     source "${CONFIG_DIR}/nowhere.env" 2>/dev/null || true
 fi
 _crt="\${CRT_VALUE:-}"; _key="\${KEY_PEM_VALUE:-}"
-if [ -n "\$_crt" ] && [ -n "\$_key" ] && [ -f "\$_crt" ] && [ -f "\$_key" ]; then
-    install -d -m 700 -o nowhere -g nowhere "${CONFIG_DIR}/certs" 2>/dev/null || install -d -m 700 "${CONFIG_DIR}/certs" 2>/dev/null || true
-    install -m 600 -o nowhere -g nowhere "\$_crt" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null || install -m 600 "\$_crt" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null || true
-    install -m 600 -o nowhere -g nowhere "\$_key" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null || install -m 600 "\$_key" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null || true
+_dest="${CONFIG_DIR}/certs"
+if [ -n "\$_crt" ] && [ -n "\$_key" ] && [ -f "\$_crt" ] && [ -f "\$_key" ] && [ "\$_crt" != "\$_dest/fullchain.pem" ]; then
+    install -d -m 700 -o nowhere -g nowhere "\$_dest" 2>/dev/null || install -d -m 700 "\$_dest" 2>/dev/null || true
+    install -m 600 -o nowhere -g nowhere "\$_crt" "\$_dest/fullchain.pem" 2>/dev/null || install -m 600 "\$_crt" "\$_dest/fullchain.pem" 2>/dev/null || true
+    install -m 600 -o nowhere -g nowhere "\$_key" "\$_dest/privkey.pem" 2>/dev/null || install -m 600 "\$_key" "\$_dest/privkey.pem" 2>/dev/null || true
 fi
 systemctl restart nowhere 2>/dev/null || true
 SYNCEOF
@@ -3532,6 +3699,8 @@ nowhere_sync_cert_copy() {
     local dest="${CONFIG_DIR}/certs"
     [ -d "$dest" ] || return 0
     [ -f "$CRT" ] && [ -f "$KEY_PEM" ] || return 0
+    # 源路径与副本路径相同时跳过，避免自己拷贝自己
+    [ "$CRT" != "$dest/fullchain.pem" ] || return 0
     if cmp -s "$CRT" "$dest/fullchain.pem" && cmp -s "$KEY_PEM" "$dest/privkey.pem"; then return 0; fi
     install -m 600 -o nowhere -g nowhere "$CRT" "$dest/fullchain.pem" 2>/dev/null || install -m 600 "$CRT" "$dest/fullchain.pem" 2>/dev/null || return 1
     install -m 600 -o nowhere -g nowhere "$KEY_PEM" "$dest/privkey.pem" 2>/dev/null || install -m 600 "$KEY_PEM" "$dest/privkey.pem" 2>/dev/null || return 1
@@ -3628,6 +3797,8 @@ TLS_MODE_VALUE="${TLS_MODE}"
 CERT_METHOD_VALUE="${CERT_METHOD}"
 CRT_VALUE="${CRT:-}"
 KEY_PEM_VALUE="${KEY_PEM:-}"
+CRT_RUNTIME_VALUE="${CRT_RUNTIME:-${CRT:-}}"
+KEY_PEM_RUNTIME_VALUE="${KEY_PEM_RUNTIME:-${KEY_PEM:-}}"
 OUT_TYPE_VALUE="${OUT_TYPE}"
 SOCKS_VALUE="$(dq_escape "$SOCKS")"
 DIAL_MODE_VALUE="${DIAL_MODE}"
@@ -3678,16 +3849,23 @@ setup_nowhere_user() {
     return 0
 }
 
-# tls=2 时把 LE 证书复制到 CONFIG_DIR/certs 供低权用户读取（User=nowhere 读不到 /etc/letsencrypt 的私钥）。
-# 成功时把 CRT/KEY_PEM 指到副本；失败返回 1（调用方回退 root）。非 tls=2 时直接返回 0
+# tls=2 时把源证书复制到 CONFIG_DIR/certs 供低权用户读取（User=nowhere 读不到 /etc/letsencrypt 的私钥）。
+# 保持 CRT/KEY_PEM 为原始源路径不变，将副本路径写入 CRT_RUNTIME/KEY_PEM_RUNTIME（供 Portal URL 使用）。
 sync_portal_cert_copy() {
+    CRT_RUNTIME="${CRT:-}"
+    KEY_PEM_RUNTIME="${KEY_PEM:-}"
     [ "${TLS_MODE:-}" = "2" ] || return 0
     [ -f "$CRT" ] && [ -f "$KEY_PEM" ] || return 1
     local dest="${CONFIG_DIR}/certs"
     install -d -m 700 -o nowhere -g nowhere "$dest" 2>/dev/null || return 1
-    install -m 600 -o nowhere -g nowhere "$CRT" "$dest/fullchain.pem" 2>/dev/null || return 1
-    install -m 600 -o nowhere -g nowhere "$KEY_PEM" "$dest/privkey.pem" 2>/dev/null || return 1
-    CRT="$dest/fullchain.pem"; KEY_PEM="$dest/privkey.pem"
+    if [ "$CRT" != "$dest/fullchain.pem" ]; then
+        install -m 600 -o nowhere -g nowhere "$CRT" "$dest/fullchain.pem" 2>/dev/null || return 1
+    fi
+    if [ "$KEY_PEM" != "$dest/privkey.pem" ]; then
+        install -m 600 -o nowhere -g nowhere "$KEY_PEM" "$dest/privkey.pem" 2>/dev/null || return 1
+    fi
+    CRT_RUNTIME="$dest/fullchain.pem"
+    KEY_PEM_RUNTIME="$dest/privkey.pem"
     return 0
 }
 
@@ -3866,6 +4044,14 @@ obtain_portal_cert() {
     if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
         info "$(L '检测到有效证书（剩余') $(cert_expiry_days "$CRT") $(L '天，域名匹配），跳过申请')"
     elif [ "$CERT_METHOD" = "letsencrypt-http" ]; then
+        if has_tcp && [ "$(tcp_port)" = "80" ]; then
+            warn "$(L 'HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80')"
+        fi
+        if tcp_listening 80; then
+            warn "$(L '80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01')"
+            systemctl stop nowhere 2>/dev/null || true
+            if tcp_listening 80; then error "$(L '80 端口仍被占用，证书签发已中止')"; fi
+        fi
         info "$(L '申请证书中（HTTP-01，需 80 端口）...')"
         ufw allow 80/tcp 2>/dev/null || true
         certbot certonly \
@@ -3926,7 +4112,7 @@ setup_certbot_renewal() {
 #!/bin/bash
 # Renewal hook: re-sync the service-readable cert copies (low-priv user cannot read /etc/letsencrypt), then restart
 sync_ok=1
-if [ -d "${CONFIG_DIR}/certs" ] && [ -f "${CRT}" ] && [ -f "${KEY_PEM}" ]; then
+if [ -d "${CONFIG_DIR}/certs" ] && [ -f "${CRT}" ] && [ -f "${KEY_PEM}" ] && [ "${CRT}" != "${CONFIG_DIR}/certs/fullchain.pem" ]; then
     install -m 600 -o nowhere -g nowhere "${CRT}" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null || sync_ok=0
     install -m 600 -o nowhere -g nowhere "${KEY_PEM}" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null || sync_ok=0
 fi
@@ -3938,17 +4124,26 @@ else
 fi
 HOOKEOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
-    # pre/post hook：HTTP-01 续期需独占 80 端口，先停 nowhere、续完再起；cron 与 timer 两路都走同一 hook 目录
-    mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
-    cat > /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh << HOOKEOF
+    # pre/post hook：仅 HTTP-01 且 nowhere 实际占用 80 端口时才停机，避免 DNS-01 或 443 端口场景无故断流
+    if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
+        mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+        cat > /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh << 'HOOKEOF'
 #!/bin/bash
-systemctl stop nowhere 2>/dev/null || true
+if ss -tlnp 2>/dev/null | awk 'NR>1 && /"nowhere"/{n=split($4,a,":"); if(a[n]=="80") f=1} END{exit !f}'; then
+    systemctl stop nowhere 2>/dev/null && touch /run/nowhere-stopped-by-certbot
+fi
 HOOKEOF
-    cat > /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh << HOOKEOF
+        cat > /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh << 'HOOKEOF'
 #!/bin/bash
-systemctl start nowhere 2>/dev/null || true
+if [ -f /run/nowhere-stopped-by-certbot ]; then
+    rm -f /run/nowhere-stopped-by-certbot
+    systemctl start nowhere 2>/dev/null || true
+fi
 HOOKEOF
-    chmod +x /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh
+        chmod +x /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh
+    else
+        rm -f /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh /run/nowhere-stopped-by-certbot
+    fi
     info "$(L '已安装续期 hook：证书更新后自动 restart nowhere')"
 
     if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
@@ -4005,6 +4200,7 @@ menu_status_summary() {
     echo -e "  Snell   : $(snell_state_text)"
     echo -e "  Xray    : $(xray_state_text)"
     echo -e "  Realm   : $(realm_state_text)"
+    echo -e "  $(L '反代')    : $(proxy_state_text)"
     echo -e "  $(L '防火墙')  : $(fw_state_text)      Fail2ban : $(f2b_state_text)      $(L '保活巡检') : $(maint_timer_state adam-watchdog.timer)"
 }
 
@@ -4013,7 +4209,7 @@ show_menu() {
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║         Adam Nowhere Portal $(L '一键管理脚本')                     ║"
-    echo "║   Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · $(L '防火墙') · Fail2ban · $(L '调优')║"
+    echo "║  Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · $(L '反代') · $(L '调优') ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     menu_time_ip
@@ -4030,21 +4226,23 @@ show_menu() {
     echo -e "  ${BOLD}7)${NC} $(L '系统调优')$(L '（')$(L 'TCP 调优 tcpfit / XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6')$(L '）')"
     echo -e "  ${BOLD}8)${NC} $(L '自动维护')$(L '（')$(L '保活巡检 / 脚本与内核自动更新')$(L '）')"
     echo -e "  ${BOLD}9)${NC} Realm $(L '端口转发（TCP / UDP 转发、负载均衡、WS / TLS 隧道）')"
+    echo -e "  ${BOLD}10)${NC} $(L '域名反代（Caddy 多域名自动 HTTPS / Cloudflare Tunnel）')"
     echo -e "  ${BOLD}0)${NC} $(L '退出')"
     divider
     if [ -x /usr/local/bin/adam ]; then
         echo -e "  ${YELLOW}$(L '提示：可直接输入')${NC} ${CYAN}adam${NC} ${YELLOW}$(L '唤出此菜单，或用')${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}$(L '快捷执行；')${NC}${CYAN}adam help${NC} ${YELLOW}$(L '查看全部子命令')${NC}"
         divider
     fi
-    read -rp "$(L '请选择操作') [0-9]: " MENU_CHOICE
+    read -rp "$(L '请选择操作') [0-10]: " MENU_CHOICE
 }
 
 nowhere_state_text() {
-    local role
+    local role ver
     role="$(current_role)"
     case "$role" in portal) role="Portal" ;; egress) role="Egress" ;; *) role="" ;; esac
     if [ -x "$BIN_PATH" ]; then
-        printf '%s' "$(read_installed_version)${role:+ · ${role}} · $(svc_state nowhere)"
+        ver="$(read_installed_version)"
+        printf '%s' "${ver:-$(L '未知')}${role:+ · ${role}} · $(svc_state nowhere)"
     else
         printf '%s' "${YELLOW}$(L '未安装')${NC}"
     fi
@@ -4080,10 +4278,12 @@ nowhere_menu() {
         echo -e "  ${GREEN}15)${NC} $(L '快速回退到上一个版本')"
         echo -e "  ${BOLD}──${NC}"
         echo -e "  ${GREEN}16)${NC} ${RED}$(L '卸载')${NC} Nowhere"
+        maint_load
         echo -e "  ${GREEN}17)${NC} $(L 'tls=1 升级为真实证书 (tls=2)')${_tls2_note}"
+        echo -e "  ${GREEN}18)${NC} $(L 'Nowhere 自动更新（仅 NW3 同代安全更新）') [$(maint_onoff "${MAINT_NOWHERE_AUTO:-0}")]"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-17]: " choice
+        read -rp "$(L '请选择') [0-18]: " choice
         case "$choice" in
             1)  run_action do_install ;;
             2)  run_action do_install_egress_service ;;
@@ -4102,6 +4302,7 @@ nowhere_menu() {
             15) run_action do_rollback ;;
             16) run_action do_uninstall ;;
             17) run_action do_migrate_tls2 ;;
+            18) run_action maint_toggle MAINT_NOWHERE_AUTO ;;
             0)  return 0 ;;
             *)  warn "$(L '无效选择')" ;;
         esac
@@ -4138,13 +4339,14 @@ script_menu() {
 
 # 精确检测端口是否被其他进程占用：只比对 ss 第 4 列（本地地址）最后一个冒号后的端口号，
 # 不用 grep ":端口\b"（会误命中 IPv6 地址段里的十六进制段）
+# check_port_occupied_by_other PROTO PORT [EXCLUDE_PROC，默认 nowhere]
 check_port_occupied_by_other() {
-    local proto="$1" port="$2" flag="-tlnp"
+    local proto="$1" port="$2" own="${3:-nowhere}" flag="-tlnp"
     command -v ss >/dev/null 2>&1 || return 0
     [ "$proto" = "udp" ] && flag="-ulnp"
-    ss "$flag" 2>/dev/null | awk -v p="$port" '
+    ss "$flag" 2>/dev/null | awk -v p="$port" -v own="\""own"\"" '
         NR == 1 { next }
-        /"nowhere"/ { next }
+        own != "\"__none__\"" && index($0, own) > 0 { next }
         {
             n = split($4, a, ":")
             if (a[n] == p) print $0
@@ -4502,6 +4704,7 @@ do_install() {
     echo -e "  $(L '共享密钥      :') ${GREEN}$(mask_secret "$SHARED_KEY")$(L '（32 位十六进制）')${NC}"
     echo -e "  $(L 'Morph 乱形    :') ${GREEN}$([ "$MORPH" = "1" ] && echo "开启 morph=1（默认）" || echo "关闭 morph=0")${NC}"
     [ "$MORPH" = "1" ] && echo -e "  $(L 'Prelude 策略  :') ${GREEN}${MORPH_TCP_PRELUDE}$(L '（写入生成的 Vector / Egress 启动命令，Portal 自身不使用）')${NC}"
+    echo -e "  $(L '握手超时      :') ${GREEN}${HANDSHAKE_TIMEOUT}${NC}"
     echo -e "  $(L 'Portal 出口   :') ${GREEN}${OUT_TYPE}$([ "$OUT_TYPE" = "socks" ] && echo " ($(display_socks "$SOCKS"))")${NC}"
     if [ "$OUT_TYPE" != "egress" ]; then
         if [ "$DIAL_MODE" = "dual" ]; then
@@ -4566,14 +4769,8 @@ do_install() {
         divider
 
         if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
-            # HTTP-01 前先做 DNS 预检：域名必须解析到本机，否则 certbot 必败
+            # HTTP-01 前先做 DNS 预检；80 端口占用检查在 obtain_portal_cert 内（已有有效证书时不误拦）
             check_domain_dns "$DOMAIN" || true
-            if has_tcp && [ "$(tcp_port)" = "80" ]; then warn "$(L 'HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80')"; fi
-            if tcp_listening 80; then
-                warn "$(L '80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01')"
-                systemctl stop nowhere 2>/dev/null || true
-                if tcp_listening 80; then error "$(L '80 端口仍被占用，证书签发已中止')"; fi
-            fi
         fi
         if [ "$CERT_METHOD" = "letsencrypt-dns" ] && [ "${DNS_API}" = "unsupported" ]; then
             error "$(L '您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云')"
@@ -4667,16 +4864,16 @@ ProtectHome=read-only"
 
     restart_nowhere_with_fallback 0 || true
 
-    LISTENING=""
-    if has_tcp && tcp_listening "$(tcp_port)"; then LISTENING="tcp:$(tcp_port)"; fi
-    if [ -z "$LISTENING" ] && has_udp && udp_listening "$(udp_port)"; then LISTENING="udp:$(udp_port)"; fi
+    local _nw_missing=""
+    if has_tcp && ! tcp_listening "$(tcp_port)"; then _nw_missing="${_nw_missing} tcp:$(tcp_port)"; fi
+    if has_udp && ! udp_listening "$(udp_port)"; then _nw_missing="${_nw_missing} udp:$(udp_port)"; fi
 
     local _nw_active=0
     systemctl is-active --quiet nowhere && _nw_active=1
-    if [ "$_nw_active" = "1" ] && [ -n "$LISTENING" ]; then
+    if [ "$_nw_active" = "1" ] && [ -z "$_nw_missing" ]; then
         success "$(L '服务启动成功，且已确认端口正在监听')"
-    elif [ "$_nw_active" = "1" ] && [ -z "$LISTENING" ]; then
-        warn "$(L 'systemd 显示服务 active，但未检测到端口实际在监听')"
+    elif [ "$_nw_active" = "1" ] && [ -n "$_nw_missing" ]; then
+        warn "$(L 'systemd 显示服务 active，但未检测到端口实际在监听') $(L '（存在端口未监听：')${_nw_missing# }$(L '）')"
         warn "$(L '常见原因：证书路径错误、端口被抢占、密钥格式不合 v3 规范（必须 32 位小写十六进制）')"
         journalctl -u nowhere -n 30 --no-pager
         warn "$(L '服务处于不确定状态，建议排查后再连接客户端，否则会一直 timeout')"
@@ -4875,6 +5072,18 @@ load_saved_config() {
     CERT_METHOD="$CERT_METHOD_VALUE"
     CRT="$CRT_VALUE"
     KEY_PEM="$KEY_PEM_VALUE"
+    CRT_RUNTIME="${CRT_RUNTIME_VALUE:-$CRT}"
+    KEY_PEM_RUNTIME="${KEY_PEM_RUNTIME_VALUE:-$KEY_PEM}"
+    # 兼容 v8.4 旧配置（CRT_VALUE 曾被覆写成副本路径）：若原始 LE/acme 证书在位则自动还原源路径
+    if [ "$TLS_MODE" = "2" ] && [ "$CRT" = "${CONFIG_DIR}/certs/fullchain.pem" ] && [ -n "${DOMAIN:-}" ]; then
+        if [ "$CERT_METHOD" = "letsencrypt-dns" ] && [ -f "${CONFIG_DIR}/certs/${DOMAIN}/fullchain.pem" ]; then
+            CRT="${CONFIG_DIR}/certs/${DOMAIN}/fullchain.pem"
+            KEY_PEM="${CONFIG_DIR}/certs/${DOMAIN}/privkey.pem"
+        elif [ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]; then
+            CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+            KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+        fi
+    fi
     # 兼容旧版（v1.5 脚本）配置文件：旧字段 ALPN/POOL/LOG/SOCKS含义已变，只做迁移提示不直接沿用
     OUT_TYPE="${OUT_TYPE_VALUE:-}"
     if [[ -z "$OUT_TYPE" ]]; then
@@ -4959,7 +5168,7 @@ install_nowhere_binary_only() {
 egress_query_param() {
     local q="&$1&" k="$2" v
     case "$q" in
-        *"&${k}="*) v="${q##*&${k}=}"; v="${v%%&*}"; printf '%s' "$v"; return 0 ;;
+        *"&${k}="*) v="${q##*&${k}=}"; v="${v%%&*}"; urldecode "$v"; return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -4991,13 +5200,13 @@ parse_egress_url() {
         [[ "$query" =~ $re_query ]] || return 1
         if [[ "&${query}&" == *"&morph=0&"* ]]; then PE_MORPH="0"; fi
         local _v
-        _v="$(egress_query_param "$query" sni)"; [ -n "$_v" ] && PE_SNI="$_v"
-        _v="$(egress_query_param "$query" pin)"; [ -n "$_v" ] && PE_PIN="$_v"
-        _v="$(egress_query_param "$query" dial)"; [ -n "$_v" ] && PE_DIAL="$_v"
-        _v="$(egress_query_param "$query" dial4)"; [ -n "$_v" ] && PE_DIAL4="$_v"
-        _v="$(egress_query_param "$query" dial6)"; [ -n "$_v" ] && PE_DIAL6="$_v"
-        _v="$(egress_query_param "$query" rate)"; [ -n "$_v" ] && PE_RATE="$_v"
-        _v="$(egress_query_param "$query" etar)"; [ -n "$_v" ] && PE_ETAR="$_v"
+        _v="$(egress_query_param "$query" sni || true)"; [ -n "$_v" ] && PE_SNI="$_v"
+        _v="$(egress_query_param "$query" pin || true)"; [ -n "$_v" ] && PE_PIN="$_v"
+        _v="$(egress_query_param "$query" dial || true)"; [ -n "$_v" ] && PE_DIAL="$_v"
+        _v="$(egress_query_param "$query" dial4 || true)"; [ -n "$_v" ] && PE_DIAL4="$_v"
+        _v="$(egress_query_param "$query" dial6 || true)"; [ -n "$_v" ] && PE_DIAL6="$_v"
+        _v="$(egress_query_param "$query" rate || true)"; [ -n "$_v" ] && PE_RATE="$_v"
+        _v="$(egress_query_param "$query" etar || true)"; [ -n "$_v" ] && PE_ETAR="$_v"
     fi
     return 0
 }
@@ -5043,6 +5252,20 @@ do_install_egress_service() {
             validate_ip_or_auto "$eg_dial6" 6 || { warn "$(L '连接串里的 dial6 不是合法 IPv6，已重置为 auto')"; eg_dial6="auto"; }
             validate_rate "$eg_rate" || { warn "$(L '连接串里的上行限速不合法，已重置为 0')"; eg_rate="0"; }
             validate_rate "$eg_etar" || { warn "$(L '连接串里的下行限速不合法，已重置为 0')"; eg_etar="0"; }
+            # 按清洗后的字段重建 eg_url，确保非法参数被彻底剔除、IPv6 dial/dial6 正确编码
+            eg_host_part="$(format_host_for_url "$eg_host")"
+            eg_query="morph=${eg_morph}"
+            if [ "$eg_dial_mode" = "dual" ]; then
+                [[ "$eg_dial4" != "auto" ]] && eg_query="${eg_query}&dial4=$(urlencode "$eg_dial4")"
+                [[ "$eg_dial6" != "auto" ]] && eg_query="${eg_query}&dial6=$(urlencode "$eg_dial6")"
+            elif [ "$eg_dial" != "auto" ]; then
+                eg_query="${eg_query}&dial=$(urlencode "$eg_dial")"
+            fi
+            [[ "$eg_rate" != "0" ]] && eg_query="${eg_query}&rate=${eg_rate}"
+            [[ "$eg_etar" != "0" ]] && eg_query="${eg_query}&etar=${eg_etar}"
+            [[ -n "$eg_sni" ]] && eg_query="${eg_query}&sni=$(urlencode "$eg_sni")"
+            [[ -n "$eg_pin" ]] && eg_query="${eg_query}&pin=${eg_pin}"
+            eg_url="egress://${eg_key}@${eg_host_part}/${eg_carrier}${eg_family}:${eg_port}?${eg_query}"
             # 握手超时不在连接串里：粘贴后也要问一次，否则静默落回 10s
             read -rp "$(L '握手超时 NOW_HANDSHAKE_TIMEOUT（v3.3.0 起未设置时从 Shared Key 派生 3s–30s；持续时间格式如 10s/500ms/1m/1h，回车默认 10s）:') " eg_handshake || { [ -n "$eg_handshake" ] || return 1; }
             eg_handshake=${eg_handshake:-10s}
@@ -5211,7 +5434,7 @@ PrivateTmp=false
 ProtectSystem=full
 ProtectHome=read-only"
     echo "egress" > "$ROLE_FILE"
-    restart_nowhere_with_fallback 0
+    restart_nowhere_with_fallback 0 || true
     if systemctl is-active --quiet nowhere; then
         success "$(L 'Egress 服务已启动（注册结果请看日志：ACCEPTED 为成功；BUSY 表示 Portal 的待命注册容量已满（主要出现在 TLS 载体），本机会自动重试）')"
     else
@@ -5292,18 +5515,19 @@ do_uninstall() {
     local old_specs s cron_now
     old_specs="$(nowhere_ports 2>/dev/null || true)"
     systemctl disable --now nowhere 2>/dev/null || true
-    rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH" "$ROLE_FILE"
-    rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh
+    local _had_deploy_hook=0
+    [ -x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh ] && _had_deploy_hook=1
+    rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH" "$ROLE_FILE" "${CONFIG_DIR}/cert-sync.sh"
+    rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh           /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh           /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh           /run/nowhere-stopped-by-certbot
     cron_now="$(crontab -l 2>/dev/null || true)"
-    # plain certbot renew cron 清理（复用 certbot_renewal_cron_ensure 的清理思路）：
-    # deploy hook 在位时可删全部 certbot renew 行，否则只删无 deploy-hook 的 plain 行
-    if [ -x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh ]; then
+    # 卸载前若存在本脚本的 deploy hook 且无 Xray 续期依赖，则清理 certbot renew 兜底 cron
+    if [ "$_had_deploy_hook" = "1" ] && ! xray_needs_port80 && ! xray_uses_cf_creds; then
         if [[ "$cron_now" == *"certbot renew"* ]]; then
             printf '%s\n' "$cron_now" | grep -v 'certbot renew' | crontab - || true
             info "$(L '已移除 certbot 续期的 cron 兜底任务')"
         fi
-    elif [[ "$cron_now" == *"certbot renew --quiet"* ]]; then
-        printf '%s\n' "$cron_now" | grep -v 'certbot renew --quiet$' | crontab - || true
+    elif [[ "$cron_now" == *"certbot renew --quiet --deploy-hook"* ]]; then
+        printf '%s\n' "$cron_now" | grep -v 'certbot renew --quiet --deploy-hook' | crontab - || true
         info "$(L '已移除 certbot 续期的 cron 兜底任务')"
     fi
     # acme.sh cron：Xray 仍在用 acme.sh 续期时保留，否则删除
@@ -5338,6 +5562,12 @@ do_uninstall() {
     if realm_installed || [ -d "$REALM_DIR" ] || [ -f "$REALM_SERVICE" ]; then
         if confirm "$(L '是否同时卸载 Realm 端口转发？')" n; then
             realm_uninstall_do
+        fi
+    fi
+    if caddy_installed || cf_tunnel_installed || [ -d "$CADDY_DIR" ] || [ -d "$CF_TUNNEL_DIR" ]; then
+        if confirm "$(L '是否同时卸载域名反代（Caddy / Cloudflare Tunnel）？')" n; then
+            caddy_uninstall_do || true
+            cf_tunnel_uninstall_do || true
         fi
     fi
     read -rp "$(L '是否同时删除快捷命令 adam/zt/pz/cxpz/cq？')[y/N]: " RM_SHORTCUTS || { [ -n "$RM_SHORTCUTS" ] || return 1; }
@@ -5391,6 +5621,50 @@ do_update() {
     if [ "$cross_major" = "1" ]; then
         warn "$(L '跨代升级后请接着用Nowhere 菜单「3')) $(L '重新配置」按新版向导重建配置（新密钥 + 新 URL），再同步更新所有对端')"
     fi
+}
+
+
+# Nowhere 定时自动更新（仅限 NW3 同大版本，不跨代；校验 SHA256 + 预检 + 失败自动回滚）
+nowhere_autoupdate() {
+    [ -x "$BIN_PATH" ] || return 0
+    local current latest cur_major latest_major
+    current="$(read_installed_version)"
+    latest="$(get_latest_tag)"
+    if [ -z "$latest" ]; then
+        echo "[Nowhere] $(L '未能获取官方版本信息，本次跳过；当前') ${current:-$(L '未知')}"
+        return 1
+    fi
+    cur_major="$(version_major "$current")"
+    latest_major="$(version_major "$latest")"
+    if [ -n "$latest_major" ] && [ "$latest_major" != "3" ]; then
+        echo "[Nowhere] $(L '最新版本属于另一个大版本（v')${latest_major}$(L '），不自动跨大版本，当前') ${current:-$(L '未知')}"
+        return 0
+    fi
+    if [ -n "$cur_major" ] && [ "$cur_major" != "3" ]; then
+        echo "[Nowhere] $(L '当前安装的是') ${current:-$(L '未知')}$(L '，不自动跨大版本')"
+        return 0
+    fi
+    if [ -n "$current" ] && [ "$current" = "$latest" ]; then
+        echo "[Nowhere] $(L '已是最新:') ${current}"
+        return 0
+    fi
+    if [ -n "$current" ] && version_ge "$current" "$latest"; then
+        echo "[Nowhere] $(L '已是最新:') ${current}"
+        return 0
+    fi
+    # 跨 v3.2.0 存在 Authenticated Prelude 兼容要求，定时任务跳过并提示手动升级
+    if [ "$(current_role)" = "portal" ] && [ -n "$current" ] && version_ge "$latest" "v3.2.0" && ! version_ge "$current" "v3.2.0"; then
+        maint_log "[Nowhere] 发现 ${latest}（跨 v3.2.0 需先升级对端），跳过自动更新"
+        return 0
+    fi
+    echo "[Nowhere] $(L '发现新版本:') ${current:-$(L '未知')} -> ${latest}$(L '，开始更新')"
+    if install_nowhere_version "$latest"; then
+        save_current_pin >/dev/null 2>&1 || true
+        maint_log "[Nowhere] $(L '已自动更新:') ${current:-$(L '未知')} -> ${latest}"
+        return 0
+    fi
+    maint_log "[Nowhere] $(L '自动更新到') ${latest} $(L '失败，当前仍为') $(read_installed_version)"
+    return 1
 }
 
 do_show_version() {
@@ -5709,12 +5983,6 @@ do_migrate_tls2() {
     ensure_ipv4_preference
     if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
         check_domain_dns "$DOMAIN" || true
-        if has_tcp && [ "$(tcp_port)" = "80" ]; then warn "$(L 'HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80')"; fi
-        if tcp_listening 80; then
-            warn "$(L '80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01')"
-            systemctl stop nowhere 2>/dev/null || true
-            if tcp_listening 80; then error "$(L '80 端口仍被占用，证书签发已中止')"; fi
-        fi
     fi
     obtain_portal_cert
 
@@ -5880,6 +6148,7 @@ managed_ports() {
     done < <(snell_all_ports)
     xray_ports
     realm_ports
+    caddy_ports
     return 0
 }
 
@@ -5902,7 +6171,7 @@ fw_sync_managed() {
         fi
     done < <(managed_ports)
     if [ "$n" -eq 0 ]; then
-        info "$(L '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm 均未安装）')"
+        info "$(L '当前没有由本脚本管理的服务端口需要放行（Nowhere / Snell / Xray / Realm / Caddy 均未安装）')"
     fi
     return 0
 }
@@ -6323,7 +6592,7 @@ fw_menu() {
         echo -e "  ${GREEN}5)${NC} ${GREEN}$(L '启用')${NC}$(L '防火墙')"
         echo -e "  ${GREEN}6)${NC} ${RED}$(L '停用')${NC}$(L '防火墙')"
         echo -e "  ${GREEN}7)${NC} $(L '防火墙状态（详细）')"
-        echo -e "  ${GREEN}8)${NC} $(L '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm）')"
+        echo -e "  ${GREEN}8)${NC} $(L '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm / Caddy）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
         read -rp "$(L '请选择') [0-8]: " choice
@@ -6921,12 +7190,12 @@ state_save() {
 }
 
 maint_load() {
-    state_load "$MAINT_ENV" "MAINT_WATCHDOG=1 MAINT_SCRIPT_AUTO=0 MAINT_DAILY_RESTART=0 MAINT_SCRIPT_ASKED=0"
+    state_load "$MAINT_ENV" "MAINT_WATCHDOG=1 MAINT_SCRIPT_AUTO=0 MAINT_DAILY_RESTART=0 MAINT_SCRIPT_ASKED=0 MAINT_NOWHERE_AUTO=0 MAINT_REALM_AUTO=0 MAINT_CADDY_AUTO=0"
     return 0
 }
 
 maint_save() {
-    state_save "$MAINT_ENV" "$MAINT_DIR" 755 MAINT_WATCHDOG MAINT_SCRIPT_AUTO MAINT_DAILY_RESTART MAINT_SCRIPT_ASKED
+    state_save "$MAINT_ENV" "$MAINT_DIR" 755 MAINT_WATCHDOG MAINT_SCRIPT_AUTO MAINT_DAILY_RESTART MAINT_SCRIPT_ASKED MAINT_NOWHERE_AUTO MAINT_REALM_AUTO MAINT_CADDY_AUTO
 }
 
 # 事件日志：保活重启、自动更新结果。超过约 200KB 时只留最后 400 行
@@ -7047,6 +7316,8 @@ maint_unit_healthy() {
         snell-port@*) snell_extra_healthy "${1#snell-port@}" ;;
         adam-xray) xray_healthy ;;
         adam-realm) realm_healthy ;;
+        adam-caddy) caddy_healthy ;;
+        adam-cloudflared) systemctl is-active --quiet adam-cloudflared 2>/dev/null ;;
         *)         systemctl is-active --quiet "$1" 2>/dev/null ;;
     esac
 }
@@ -7157,7 +7428,7 @@ maint_watchdog() {
     maint_lock 0 || { maint_log "[$(L '保活')] $(L '另一个维护任务仍在运行，本次跳过')"; return 0; }
     local -a units=(snell)
     while IFS= read -r unit; do units+=("snell-port@${unit}"); done < <(snell_extra_ports)
-    units+=(adam-xray nowhere adam-realm)
+    units+=(adam-xray nowhere adam-realm adam-caddy adam-cloudflared)
     for unit in "${units[@]}"; do
         maint_unit_installed "$unit" || continue
         # 只管"设为开机自启"的服务：手动 disable 掉的不会被拉起
@@ -7227,6 +7498,9 @@ maint_daily() {
             ADAM_REEXEC=1 exec "$MANAGER_PATH" maintain
         fi
     fi
+    if [ -x "$BIN_PATH" ] && [ "${MAINT_NOWHERE_AUTO:-0}" = "1" ]; then
+        nowhere_autoupdate || true
+    fi
     snell_load_state
     if [ -x "$SNELL_BIN" ] && [ "$SNELL_AUTO_UPDATE" = "1" ]; then
         snell_autoupdate || true
@@ -7235,13 +7509,19 @@ maint_daily() {
     if [ -x "$XRAY_BIN" ] && [ "$XRAY_AUTO_UPDATE" = "1" ]; then
         xray_autoupdate || true
     fi
+    if [ -x "$REALM_BIN" ] && [ "${MAINT_REALM_AUTO:-0}" = "1" ]; then
+        realm_autoupdate || true
+    fi
+    if [ -x "$CADDY_BIN" ] && [ "${MAINT_CADDY_AUTO:-0}" = "1" ]; then
+        caddy_autoupdate || true
+    fi
     if [ -x "$XRAY_BIN" ]; then xray_sync_certs || true; xray_sync_reality_snis || true; fi
     nowhere_sync_cert_copy || true
     reserved_ports_sync || true
     if [ "$MAINT_DAILY_RESTART" = "1" ]; then
         local -a runits=(snell)
         while IFS= read -r unit; do runits+=("snell-port@${unit}"); done < <(snell_extra_ports)
-        runits+=(adam-xray nowhere)
+        runits+=(adam-xray nowhere adam-realm)
         for unit in "${runits[@]}"; do
             if systemctl is-active --quiet "$unit" 2>/dev/null; then
                 systemctl restart "$unit" >/dev/null 2>&1 || true
@@ -7309,7 +7589,7 @@ do_backup() {
     ts="$(date +%Y%m%d-%H%M%S)"
     dest="/root/adam-backup-${ts}.tgz"
     local d
-    for d in /etc/nowhere /etc/snell /etc/adam-xray /etc/adam-realm /etc/adam /etc/fail2ban/jail.d/adam-sshd.local /etc/cloudflare/credentials.ini /etc/letsencrypt; do
+    for d in /etc/nowhere /etc/snell /etc/adam-xray /etc/adam-realm /etc/adam-caddy /etc/adam-cloudflared /etc/adam /etc/fail2ban/jail.d/adam-sshd.local /etc/cloudflare/credentials.ini /etc/letsencrypt; do
         [ -e "$d" ] && dirs+=("$d")
     done
     [ "${#dirs[@]}" -gt 0 ] || { warn "$(L '没有找到可备份的配置目录')"; return 1; }
@@ -7332,28 +7612,28 @@ do_restore() {
     [ -f "$file" ] || error "$(L '找不到备份文件：')${file}"
     tar -tzf "$file" >/dev/null 2>&1 || error "$(L '备份文件损坏或不是有效的 tgz')"
     local bak_role="" cur_role=""
-    bak_role="$(tar -xzOf "$file" etc/nowhere/role 2>/dev/null | tr -d ' \\r\\n' || true)"
-    if [ -z "$bak_role" ]; then bak_role="$(tar -xzOf "$file" /etc/nowhere/role 2>/dev/null | tr -d ' \\r\\n' || true)"; fi
+    bak_role="$(tar -xzOf "$file" etc/nowhere/role 2>/dev/null | tr -d ' \r\n' || true)"
+    if [ -z "$bak_role" ]; then bak_role="$(tar -xzOf "$file" /etc/nowhere/role 2>/dev/null | tr -d ' \r\n' || true)"; fi
     cur_role="$(current_role)"
     if [ -n "$bak_role" ] && [ "$cur_role" != "none" ] && [ "$bak_role" != "$cur_role" ]; then error "$(L '备份内的角色与本机角色不一致，已中止恢复')"; fi
     # 校验成员路径：只允许恢复到本脚本管理的配置目录，拒绝 ../ 越界成员
     while IFS= read -r m; do
         case "$m" in
             *".."*) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
-            etc/nowhere|etc/nowhere/*|etc/snell|etc/snell/*|etc/adam-realm|etc/adam-realm/*|etc/adam-xray|etc/adam-xray/*|etc/adam|etc/adam/*|etc/fail2ban/jail.d|etc/fail2ban/jail.d/*|etc/cloudflare|etc/cloudflare/*|etc/letsencrypt|etc/letsencrypt/*|/etc/nowhere|/etc/nowhere/*|/etc/snell|/etc/snell/*|/etc/adam-realm|/etc/adam-realm/*|/etc/adam-xray|/etc/adam-xray/*|/etc/adam|/etc/adam/*|/etc/fail2ban/jail.d|/etc/fail2ban/jail.d/*|/etc/cloudflare|/etc/cloudflare/*|/etc/letsencrypt|/etc/letsencrypt/*) ;;
+            etc/nowhere|etc/nowhere/*|etc/snell|etc/snell/*|etc/adam-realm|etc/adam-realm/*|etc/adam-caddy|etc/adam-caddy/*|etc/adam-cloudflared|etc/adam-cloudflared/*|etc/adam-xray|etc/adam-xray/*|etc/adam|etc/adam/*|etc/fail2ban/jail.d|etc/fail2ban/jail.d/*|etc/cloudflare|etc/cloudflare/*|etc/letsencrypt|etc/letsencrypt/*|/etc/nowhere|/etc/nowhere/*|/etc/snell|/etc/snell/*|/etc/adam-realm|/etc/adam-realm/*|/etc/adam-caddy|/etc/adam-caddy/*|/etc/adam-cloudflared|/etc/adam-cloudflared/*|/etc/adam-xray|/etc/adam-xray/*|/etc/adam|/etc/adam/*|/etc/fail2ban/jail.d|/etc/fail2ban/jail.d/*|/etc/cloudflare|/etc/cloudflare/*|/etc/letsencrypt|/etc/letsencrypt/*) ;;
             *) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
         esac
     done < <(tar -tzf "$file" 2>/dev/null || true)
     tar -tzf "$file" | head -20
-    warn "$(L '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm 等现有配置，并重启已启用的服务')"
+    warn "$(L '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm、/etc/adam-caddy、/etc/adam-cloudflared 等现有配置，并重启已启用的服务')"
     confirm "$(L '确认从') ${file} $(L '恢复？')" n || { info "$(L '已取消')"; return 0; }
     local u
-    for u in nowhere snell adam-xray adam-realm; do
+    for u in nowhere snell adam-xray adam-realm adam-caddy adam-cloudflared; do
         systemctl is-active --quiet "$u" 2>/dev/null && systemctl stop "$u" >/dev/null 2>&1 || true
     done
     tar -xzf "$file" -C / || error "$(L '解包失败，现有配置可能已不完整，请检查')"
     systemctl daemon-reload
-    for u in nowhere snell adam-xray adam-realm; do
+    for u in nowhere snell adam-xray adam-realm adam-caddy adam-cloudflared; do
         if systemctl is-enabled --quiet "$u" 2>/dev/null; then
             systemctl restart "$u" >/dev/null 2>&1 || warn "${u} $(L '重启失败，请看 journalctl -u') ${u}"
         fi
@@ -7373,16 +7653,17 @@ do_doctor() {
     divider
     echo "  $(L '管理脚本 :') ${SCRIPT_VERSION}$(L '（适配 Nowhere') ${TARGET_NW_VERSION}$(L '） 语言：')${ADAM_LANG}"
     echo "  Nowhere  : $([ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>&1 | head -1 || echo "$(L '未安装')") $(L '· 角色') $(current_role) · $(svc_state nowhere)"
-    echo "  Snell    : $([ -x "$SNELL_BIN" ] && "$SNELL_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state snell)"
-    echo "  Xray     : $([ -x "$XRAY_BIN" ] && "$XRAY_BIN" --version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state adam-xray)"
+    echo "  Snell    : $([ -x "$SNELL_BIN" ] && { snell_installed_version; } || echo "$(L '未安装')") · $(svc_state snell)"
+    echo "  Xray     : $([ -x "$XRAY_BIN" ] && "$XRAY_BIN" version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state adam-xray)"
     echo "  Realm    : $(realm_state_text)"
+    echo "  $(L '域名反代') : $(proxy_state_text)"
     if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
     echo "  $(L '保活巡检 :') $(maint_timer_state adam-watchdog.timer)    $(L '每日维护 :') $(maint_timer_state adam-maintain.timer)"
     echo ""
     info "$(L '监听端口（ss）：')"
     if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm 的 TCP 监听）')"
-        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm 的 UDP 监听）')"
+        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）')"
+        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）')"
     else
         warn "$(L 'ss 工具缺失，无法列出监听端口（请安装 iproute2）')"
     fi
@@ -7405,7 +7686,7 @@ do_doctor() {
         local _dtag _ddays
         while IFS= read -r _dtag; do
             xray_node_load "$_dtag" || continue
-            if [ "$N_TYPE" = "xhttp-tls" ] || [ "$N_TYPE" = "xhttp-cdn" ]; then
+            if [ "$N_TYPE" = "xhttp-tls" ] || { [ "$N_TYPE" = "xhttp-cdn" ] && [ "${N_ORIGIN:-tls}" != "plain" ]; }; then
                 if [ -f "${XRAY_CERT_DIR}/${_dtag}/fullchain.pem" ]; then
                     _ddays="$(cert_expiry_days "${XRAY_CERT_DIR}/${_dtag}/fullchain.pem" 2>/dev/null || echo "")"
                     if [[ "$_ddays" =~ ^-?[0-9]+$ ]]; then
@@ -7459,32 +7740,38 @@ maint_menu() {
         echo -e "  ${GREEN}2)${NC} $(L '管理脚本自动从仓库拉取更新（每日）')                      [$(maint_onoff "$MAINT_SCRIPT_AUTO")]"
         echo -e "  ${GREEN}3)${NC} Snell $(L '跟随官方发布自动更新')$(L '（')${SNELL_CHANNEL} $(L '通道')$(L '）')                  [$(maint_onoff "$SNELL_AUTO_UPDATE")]"
         echo -e "  ${GREEN}4)${NC} Xray $(L '跟随官方发布自动更新')$(L '（')${XRAY_CHANNEL} $(L '通道')$(L '）')              [$(maint_onoff "$XRAY_AUTO_UPDATE")]"
-        echo -e "  ${GREEN}5)${NC} $(L '每日定时重启 Snell / Xray / Nowhere（随每日维护执行）')              [$(maint_onoff "$MAINT_DAILY_RESTART")]"
-        echo -e "  ${GREEN}6)${NC} $(L '立即执行一次维护与巡检')"
-        echo -e "  ${GREEN}7)${NC} $(L '查看维护记录')"
-        echo -e "  ${GREEN}8)${NC} $(L '重装定时器（修复）')"
-        echo -e "  ${GREEN}9)${NC} ${RED}$(L '移除')${NC}$(L '全部定时器')"
-        echo -e "  ${GREEN}10)${NC} $(L '备份全部配置')"
-        echo -e "  ${GREEN}11)${NC} $(L '恢复配置（从备份文件）')"
-        echo -e "  ${GREEN}12)${NC} $(L '一键诊断')"
-        echo -e "  ${GREEN}13)${NC} $(L '清理日志（保留 200M）')"
+        echo -e "  ${GREEN}5)${NC} $(L 'Nowhere 跟随官方发布自动更新（仅 NW3 同代）')             [$(maint_onoff "${MAINT_NOWHERE_AUTO:-0}")]"
+        echo -e "  ${GREEN}6)${NC} $(L 'Realm 跟随官方发布自动更新')                              [$(maint_onoff "${MAINT_REALM_AUTO:-0}")]"
+        echo -e "  ${GREEN}7)${NC} $(L 'Caddy 跟随官方发布自动更新')                              [$(maint_onoff "${MAINT_CADDY_AUTO:-0}")]"
+        echo -e "  ${GREEN}8)${NC} $(L '每日定时重启 Snell / Xray / Nowhere / Realm（随每日维护执行）') [$(maint_onoff "$MAINT_DAILY_RESTART")]"
+        echo -e "  ${GREEN}9)${NC} $(L '立即执行一次维护与巡检')"
+        echo -e "  ${GREEN}10)${NC} $(L '查看维护记录')"
+        echo -e "  ${GREEN}11)${NC} $(L '重装定时器（修复）')"
+        echo -e "  ${GREEN}12)${NC} ${RED}$(L '移除')${NC}$(L '全部定时器')"
+        echo -e "  ${GREEN}13)${NC} $(L '备份全部配置')"
+        echo -e "  ${GREEN}14)${NC} $(L '恢复配置（从备份文件）')"
+        echo -e "  ${GREEN}15)${NC} $(L '一键诊断')"
+        echo -e "  ${GREEN}16)${NC} $(L '清理日志（保留 200M）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-13]: " choice
+        read -rp "$(L '请选择') [0-16]: " choice
         case "$choice" in
             1) run_action maint_toggle MAINT_WATCHDOG ;;
             2) run_action maint_toggle MAINT_SCRIPT_AUTO ;;
             3) run_action maint_toggle_snell ;;
             4) run_action maint_toggle_xray ;;
-            5) run_action maint_toggle MAINT_DAILY_RESTART ;;
-            6) run_action maint_run_now ;;
-            7) run_action maint_show_log ;;
-            8) run_action maint_install_timers ;;
-            9) run_action maint_remove_timers ;;
-            10) run_action do_backup ;;
-            11) run_action do_restore ;;
-            12) run_action do_doctor ;;
-            13) run_action do_log_cleanup ;;
+            5) run_action maint_toggle MAINT_NOWHERE_AUTO ;;
+            6) run_action maint_toggle MAINT_REALM_AUTO ;;
+            7) run_action maint_toggle MAINT_CADDY_AUTO ;;
+            8) run_action maint_toggle MAINT_DAILY_RESTART ;;
+            9) run_action maint_run_now ;;
+            10) run_action maint_show_log ;;
+            11) run_action maint_install_timers ;;
+            12) run_action maint_remove_timers ;;
+            13) run_action do_backup ;;
+            14) run_action do_restore ;;
+            15) run_action do_doctor ;;
+            16) run_action do_log_cleanup ;;
             0) return 0 ;;
             *) warn "$(L '无效选择')" ;;
         esac
@@ -8260,7 +8547,7 @@ snell_autoupdate() {
         echo "$(L '提示：官方已发布更高大版本') ${SNELL_NEWER_MAJOR}$(L '，需要客户端同步升级，不会自动跨大版本')"
     fi
     local _auc_rc=0
-    autoupdate_check "$current" "$SNELL_LATEST" "$SNELL_MAJOR" "$SNELL_SOURCE_OK" snell_ver_gt; _auc_rc=$?
+    autoupdate_check "$current" "$SNELL_LATEST" "$SNELL_MAJOR" "$SNELL_SOURCE_OK" snell_ver_gt || _auc_rc=$?
     case "$_auc_rc" in
         0) ;;
         1) return 0 ;;
@@ -9067,7 +9354,19 @@ xray_cnblock() {
 
 xray_write_base() {
     install -d -m 750 "$XRAY_CONF_D"
-    local cn_rules=""
+    local fwd_rule="" fwd_tags="" f fid fen cn_rules=""
+    while IFS= read -r f; do
+        fen="$(xray_fwd_env_get "$f" FWD_ENABLED)"
+        [ "$fen" = "1" ] || continue
+        fid="$(xray_fwd_env_get "$f" FWD_ID)"
+        [ -n "$fid" ] || continue
+        fwd_tags="${fwd_tags:+${fwd_tags}, }\"fwd-${fid}\""
+    done < <(xray_fwd_rule_files)
+    # 端口转发入站（dokodemo-door）最高优先级直连，避免转发到 VPC 内网 IP（geoip:private）或国内中转被黑洞拦截
+    if [ -n "$fwd_tags" ]; then
+        fwd_rule="      { \"type\": \"field\", \"inboundTag\": [${fwd_tags}], \"outboundTag\": \"direct\" },
+"
+    fi
     if [ "${XRAY_CN_BLOCK:-1}" = "1" ]; then
         cn_rules=",
       { \"type\": \"field\", \"ip\": [\"geoip:cn\"], \"outboundTag\": \"block\" },
@@ -9083,7 +9382,7 @@ xray_write_base() {
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }${cn_rules}
+${fwd_rule}      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }${cn_rules}
     ]
   }
 }
@@ -9129,17 +9428,18 @@ xray_node_load() {
 # 全部节点的端口，每行一个 ufw 规格（SS 同时需要 UDP）
 xray_ports() {
     local tag
-    [ -d "$XRAY_NODE_DIR" ] || return 0
-    local -a _ntags=()
-    while IFS= read -r tag; do [ -n "$tag" ] && _ntags+=("$tag"); done < <(xray_node_tags)
-    for tag in "${_ntags[@]}"; do
-        (
-            xray_node_load "$tag" || exit 0
-            [[ "$N_PORT" =~ ^[0-9]+$ ]] || exit 0
-            echo "${N_PORT}/tcp"
-            if [ "$N_TYPE" = "ss2022" ]; then echo "${N_PORT}/udp"; fi
-        )
-    done
+    if [ -d "$XRAY_NODE_DIR" ]; then
+        local -a _ntags=()
+        while IFS= read -r tag; do [ -n "$tag" ] && _ntags+=("$tag"); done < <(xray_node_tags)
+        for tag in "${_ntags[@]}"; do
+            (
+                xray_node_load "$tag" || exit 0
+                [[ "$N_PORT" =~ ^[0-9]+$ ]] || exit 0
+                echo "${N_PORT}/tcp"
+                if [ "$N_TYPE" = "ss2022" ]; then echo "${N_PORT}/udp"; fi
+            )
+        done
+    fi
     xray_fwd_ports
     return 0
 }
@@ -9279,9 +9579,13 @@ xray_new_node_begin() {
     xray_ask_port "$(xray_default_port "$def")" || return 1
     XN_PORT="$XP_PORT"
     XN_UUID="$(xray_gen_uuid)"
-    XN_SID="$(openssl rand -hex 8)"
+    XN_SID="$(openssl rand -hex 8 2>/dev/null || true)"
     XN_LISTEN="$(xray_listen_addr)"
-    XN_PATH="/$(openssl rand -hex 6)"
+    XN_PATH="/$(openssl rand -hex 6 2>/dev/null || true)"
+    if [[ ! "$XN_UUID" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || [[ ! "$XN_SID" =~ ^[0-9a-f]{16}$ ]] || [ "${#XN_PATH}" -lt 8 ]; then
+        warn "$(L '生成随机密钥/UUID 失败，请检查 openssl 与 Xray 二进制')"
+        return 1
+    fi
     XN_TAG="${prefix}-${XN_PORT}"
     XN_NAME="${name_prefix}-${XN_PORT}"
     return 0
@@ -9795,9 +10099,17 @@ xray_add_ss() {
         3) method="2022-blake3-chacha20-poly1305"; bytes=32 ;;
         *) : ;;
     esac
-    xray_new_node_begin "$(random_free_port)" ss SS2022 || return 1
+    while true; do
+        xray_new_node_begin "$(random_free_port)" ss SS2022 || return 1
+        if udp_listening "$XN_PORT"; then
+            warn "$(L 'UDP 端口已被占用，请换一个') (${XN_PORT})"
+            continue
+        fi
+        break
+    done
     port="$XN_PORT"; listen="$XN_LISTEN"; tag="$XN_TAG"; name="$XN_NAME"
-    pass="$(openssl rand -base64 "$bytes" | tr -d '\n')"
+    pass="$(openssl rand -base64 "$bytes" 2>/dev/null | tr -d '\n' || true)"
+    if [ -z "$pass" ]; then warn "$(L '生成随机密钥/UUID 失败，请检查 openssl 与 Xray 二进制')"; return 1; fi
     xray_commit_node "$tag" "    {
       \"tag\": \"${tag}\", \"listen\": \"${listen}\", \"port\": ${port}, \"protocol\": \"shadowsocks\",
       \"settings\": { \"method\": \"${method}\", \"password\": \"${pass}\", \"network\": \"tcp,udp\" },
@@ -9824,7 +10136,7 @@ xray_node_link() {
             xhttp-reality)
                 echo "vless://${N_UUID}@${h}:${N_PORT}?encryption=${N_ENC}&security=reality&sni=${N_SNI}&fp=chrome&pbk=${N_PBK}&sid=${N_SID}&type=xhttp&path=${pathenc}&mode=auto&support-x25519mlkem768=true#${N_NAME}" ;;
             xhttp-cdn)
-                echo "vless://${N_UUID}@${N_DOMAIN}:${N_CPORT}?encryption=${N_ENC}&security=tls&sni=${N_DOMAIN}&fp=chrome&alpn=h2&type=xhttp&host=${N_DOMAIN}&path=${pathenc}&mode=auto#${N_NAME}" ;;
+                echo "vless://${N_UUID}@${N_DOMAIN}:${N_CPORT}?encryption=${N_ENC}&security=tls&sni=${N_DOMAIN}&fp=chrome&alpn=h2&type=xhttp&host=${N_DOMAIN}&path=${pathenc}&mode=packet-up#${N_NAME}" ;;
             xhttp-tls)
                 echo "vless://${N_UUID}@${h}:${N_PORT}?encryption=${N_ENC}&security=tls&sni=${N_DOMAIN}&fp=chrome&alpn=h2&type=xhttp&host=${N_DOMAIN}&path=${pathenc}&mode=auto#${N_NAME}" ;;
             venc)
@@ -10070,8 +10382,8 @@ xray_install() {
     fi
     info "$(L '将安装:') ${XRAY_TARGET}$(L '（')$(xray_asset_name)$(L '）')"
     xray_fetch "$XRAY_TARGET" || return 1
-    # 有现成节点时先用新内核校验现有配置（与 xray_upgrade_to 一致），不通过不替换
-    if [ -x "$XRAY_BIN" ] && [ "$(xray_node_count)" -gt 0 ]; then
+    # 有现成节点或转发规则时先用新内核校验现有配置（与 xray_upgrade_to 一致），不通过不替换
+    if [ -x "$XRAY_BIN" ] && { [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; }; then
         if ! out="$(XRAY_LOCATION_ASSET="$XRAY_DIR" "$XRAY_DL_DIR/xray" run -test -confdir "$XRAY_CONF_D" 2>&1)"; then
             warn "$(L '新内核未通过现有配置校验，保持当前版本不变（上游可能有不兼容改动）')"
             printf '%s\n' "$out" | tail -n 5
@@ -10114,7 +10426,7 @@ xray_install() {
     maint_ask_script_auto
     maint_install_timers || true
     success "Xray $(xray_installed_version) $(L '安装完成')"
-    if [ "$(xray_node_count)" -gt 0 ]; then
+    if [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; then
         if xray_reload; then
             success "$(L '现有节点已随新内核重启')"
         elif [ -f "${XRAY_BIN}.previous" ]; then
@@ -10139,7 +10451,7 @@ xray_upgrade_to() {
     local ver="$1" prev out
     prev="$(xray_installed_version)"
     xray_fetch "$ver" || return 1
-    if [ "$(xray_node_count)" -gt 0 ]; then
+    if [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; then
         if ! out="$(XRAY_LOCATION_ASSET="$XRAY_DIR" "$XRAY_DL_DIR/xray" run -test -confdir "$XRAY_CONF_D" 2>&1)"; then
             maint_log "[Xray] ${ver} $(L '无法通过现有配置的校验，保持') ${prev} $(L '不变（上游可能有不兼容改动）')"
             printf '%s\n' "$out" | tail -n 5
@@ -10147,7 +10459,7 @@ xray_upgrade_to() {
         fi
     fi
     xray_apply_binary
-    if [ "$(xray_node_count)" -eq 0 ]; then
+    if [ "$(xray_node_count)" -eq 0 ] && [ "$(xray_fwd_enabled_count)" -eq 0 ]; then
         maint_log "[Xray] $(L '已更新:') ${prev:-$(L '未知')} -> ${ver}"
         return 0
     fi
@@ -10174,9 +10486,9 @@ xray_autoupdate() {
     fi
     cur="$(xray_installed_version)"
     xray_query_latest "$XRAY_CHANNEL"
-    local _auc_rc=0 _xray_major=""
-    _xray_major="$(version_major "$cur")"
-    autoupdate_check "$cur" "$XRAY_LATEST" "$_xray_major" "$XRAY_SOURCE_OK" xray_ver_gt; _auc_rc=$?
+    local _auc_rc=0
+    # Xray 采用 CalVer（v26→v27），不按主版本号拦截跨年更新；安全由新内核 run -test 预检与失败自动回滚保障
+    autoupdate_check "$cur" "$XRAY_LATEST" "" "$XRAY_SOURCE_OK" xray_ver_gt || _auc_rc=$?
     case "$_auc_rc" in
         0) ;;
         1) return 0 ;;
@@ -10965,6 +11277,30 @@ services_adapt_ipv6() {
             fi
         fi
     fi
+    # 同步调整 Xray 转发规则的默认监听地址
+    if [ -d "$XRAY_FWD_DIR" ]; then
+        local _fchg=0 _ff
+        while IFS= read -r _ff; do
+            if snell_ipv6_ok; then
+                if grep -q '^FWD_LIP="0.0.0.0"$' "$_ff"; then sed -i 's/^FWD_LIP="0.0.0.0"$/FWD_LIP="::"/' "$_ff"; _fchg=1; fi
+            else
+                if grep -q '^FWD_LIP="::"$' "$_ff"; then sed -i 's/^FWD_LIP="::"$/FWD_LIP="0.0.0.0"/' "$_ff"; _fchg=1; fi
+            fi
+        done < <(xray_fwd_rule_files)
+        [ "$_fchg" = "1" ] && xray_fwd_rebuild >/dev/null 2>&1 || true
+    fi
+    # 同步调整 Realm 规则的默认监听地址
+    if [ -d "$REALM_RULE_DIR" ]; then
+        local _rchg=0 _rf
+        while IFS= read -r _rf; do
+            if snell_ipv6_ok; then
+                if grep -q '^RULE_LIP="0.0.0.0"$' "$_rf"; then sed -i 's/^RULE_LIP="0.0.0.0"$/RULE_LIP="[::]"/' "$_rf"; _rchg=1; fi
+            else
+                if grep -q '^RULE_LIP="\[::\]"$' "$_rf"; then sed -i 's/^RULE_LIP="\[::\]"$/RULE_LIP="0.0.0.0"/' "$_rf"; _rchg=1; fi
+            fi
+        done < <(realm_rule_files)
+        [ "$_rchg" = "1" ] && realm_reload_service >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -11668,7 +12004,22 @@ realm_prompt_transport() {
             realm_has_toml_special "$path" && { warn "$(L '路径含非法字符（\" 或 \），回退标准透传')"; return 0; }
             case "$path" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退标准透传')"; return 0 ;; esac
             if [ "$is_server" = "1" ]; then
-                REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"
+                read -rp "    $(L '证书文件路径（回车使用 Realm 内置自签）: ')" crt || { [ -n "$crt" ] || return 0; }
+                if [ -n "$crt" ]; then
+                    if realm_has_toml_special "$crt"; then warn "$(L '路径含非法字符（\" 或 \），回退内置自签')"; REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"; return 0; fi
+                    case "$crt" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退内置自签')"; REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"; return 0 ;; esac
+                    read -rp "    $(L '私钥文件路径: ')" key || { [ -n "$key" ] || return 0; }
+                    if [ -f "$crt" ] && [ -n "$key" ] && [ -f "$key" ]; then
+                        if realm_has_toml_special "$key"; then warn "$(L '路径含非法字符（\" 或 \），回退内置自签')"; REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"; return 0; fi
+                        case "$key" in *';'*|*'='*) warn "$(L '路径含 ; 或 =，回退内置自签')"; REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"; return 0 ;; esac
+                        REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;cert=${crt};key=${key}"
+                    else
+                        warn "$(L '证书或私钥文件不存在，回退内置自签')"
+                        REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"
+                    fi
+                else
+                    REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;servername=${host}"
+                fi
             else
                 if confirm "$(L '目标证书由 CA 签发（可校验）？')" n; then
                     REALM_TRANS_RESULT="ws;host=${host};path=${path};tls;sni=${host}"
@@ -11712,11 +12063,15 @@ realm_add_rule() {
     done
     lport=$((10#$lport))
 
-    # 冲突检测：同协议下是否被其他进程占用（排除 realm 自身监听）
+    # 冲突检测：先查本 Realm 模块是否已有同端口规则，再查其他进程（排除 realm）
+    if realm_port_used "$lport" "$proto"; then
+        warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
+        return 1
+    fi
     if command -v ss >/dev/null 2>&1; then
         occ=""
-        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" || true)"
-        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" || true)"
+        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" realm || true)"
+        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" realm || true)"
         if [ -n "$occ" ]; then
             warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
             echo "$occ"
@@ -11857,6 +12212,7 @@ RULEEOF
     [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
     [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
     fw_allow_for_service "${fw_specs[@]}"
+    reserved_ports_sync || true
     success "$(L '规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
 }
 
@@ -11963,6 +12319,23 @@ realm_test_rules() {
             else
                 echo -e "  [${RULE_ID}] ${RULE_RHOST}:${RULE_RPORT}  ${RED}${res}${NC}  ${RULE_REMARK}"
             fi
+            if [ -n "${RULE_EXTRA_REMOTES:-}" ]; then
+                local _ex _eh _ep _eres
+                local -a _exarr=()
+                IFS=',' read -r -a _exarr <<< "$RULE_EXTRA_REMOTES"
+                for _ex in "${_exarr[@]}"; do
+                    _ex="${_ex//[[:space:]]/}"
+                    [ -n "$_ex" ] || continue
+                    _eh="${_ex%:*}"; _ep="${_ex##*:}"
+                    [ "$_eh" = "$_ex" ] && continue
+                    _eres="$(probe_tcp_host_port "$_eh" "$_ep")"
+                    if [[ "$_eres" == OK* ]]; then
+                        echo -e "    └─ [LB] ${_eh}:${_ep}  ${GREEN}${_eres}${NC}"
+                    else
+                        echo -e "    └─ [LB] ${_eh}:${_ep}  ${RED}${_eres}${NC}"
+                    fi
+                done
+            fi
         )
     done < <(realm_rule_files)
     [ "$any" -eq 0 ] && info "$(L '暂无可测试的规则')"
@@ -12039,8 +12412,13 @@ realm_uninstall_do() {
         warn "$(L '已保留规则目录') ${REALM_DIR}"
     fi
     if [ -n "${old_specs// /}" ] && ufw_installed && confirm "$(L '同时删除防火墙中 Realm 端口的放行规则（')${old_specs}$(L '）？')" y; then
-        fw_prune_old_specs "$old_specs"
+        local _rs
+        while IFS= read -r _rs; do
+            [ -n "$_rs" ] || continue
+            fw_delete_spec "$_rs"
+        done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
     fi
+    reserved_ports_sync || true
     success "$(L 'Realm 已卸载')"
 }
 
@@ -12051,37 +12429,440 @@ realm_uninstall() {
     realm_uninstall_do
 }
 
+
+# 端口是否已被本 Realm 模块已启用的同协议规则占用（可选 $3 排除指定规则 ID）
+realm_port_used() {
+    local want="$1" proto="${2:-both}" skip_id="${3:-}" f
+    while IFS= read -r f; do
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 1
+            [ "${RULE_ENABLED:-0}" = "1" ] || exit 1
+            [ -n "$skip_id" ] && [ "${RULE_ID:-}" = "$skip_id" ] && exit 1
+            [ "${RULE_LPORT:-}" = "$want" ] || exit 1
+            if [ "$proto" = "both" ] || [ "${RULE_PROTO:-both}" = "both" ] || [ "$proto" = "${RULE_PROTO:-both}" ]; then
+                exit 0
+            fi
+            exit 1
+        ) && return 0
+    done < <(realm_rule_files)
+    return 1
+}
+
+# Realm 定时自动更新（从 zhboner/realm 官方仓库拉取 + SHA256 digest 校验 + 失败自动回滚）
+realm_autoupdate() {
+    realm_installed || return 0
+    local cur latest
+    cur="$(cat "$REALM_VERSION_FILE" 2>/dev/null || true)"
+    latest="$(realm_latest_tag)"
+    if [ -z "$latest" ]; then
+        echo "[Realm] $(L '未能获取官方版本信息，本次跳过；当前') ${cur:-$(L '未知')}"
+        return 1
+    fi
+    if [ -n "$cur" ] && [ "${cur#v}" = "${latest#v}" ]; then
+        echo "[Realm] $(L '已是最新:') ${cur}"
+        return 0
+    fi
+    if [ -n "$cur" ] && version_ge "$cur" "$latest"; then
+        echo "[Realm] $(L '已是最新:') ${cur}"
+        return 0
+    fi
+    echo "[Realm] $(L '发现新版本:') ${cur:-$(L '未知')} -> ${latest}$(L '，开始更新')"
+    if ! realm_fetch_binary "$latest"; then
+        maint_log "[Realm] $(L '自动更新到') ${latest} $(L '失败，当前仍为') ${cur:-$(L '未知')}"
+        return 1
+    fi
+    if [ -f "$REALM_BIN" ]; then cp -f "$REALM_BIN" "$REALM_BIN_BACKUP" 2>/dev/null || true; fi
+    install -m 755 "$REALM_DL_BIN" "$REALM_BIN" || return 1
+    if [ "$(realm_enabled_count)" -gt 0 ]; then
+        if ! realm_reload_service; then
+            if [ -f "$REALM_BIN_BACKUP" ]; then
+                install -m 755 "$REALM_BIN_BACKUP" "$REALM_BIN"
+                realm_reload_service >/dev/null 2>&1 || true
+            fi
+            maint_log "[Realm] $(L '自动更新到') ${latest} $(L '失败，当前仍为') ${cur:-$(L '未知')}"
+            return 1
+        fi
+    fi
+    echo "$latest" > "$REALM_VERSION_FILE"
+    maint_log "[Realm] $(L '已自动更新:') ${cur:-$(L '未知')} -> ${latest}"
+    return 0
+}
+
+# 批量添加转发规则（支持端口段 10000-10020 或逗号列表 8080,8443；单次原子重载）
+realm_add_batch_rules() {
+    realm_installed || { warn "$(L '尚未安装 Realm，请先安装')"; return 1; }
+    step "$(L '批量添加转发规则（端口段 / 多端口）')"
+    divider
+
+    local remark proto proto_c def_lip lip spec rhost rmode rport_fixed=""
+    local -a ports=() added_files=() fw_specs=()
+    local item a b p id env_file ok_cnt=0 skip_cnt=0
+
+    read -rp "$(L '规则备注（可选，如 香港VPC落地）: ')" remark || { [ -n "$remark" ] || return 1; }
+    if realm_has_toml_special "$remark"; then warn "$(L '备注含非法字符（\" 或 \），请去掉后重试')"; return 1; fi
+
+    echo "$(L '转发协议：')"
+    echo "  1) $(L 'TCP + UDP 双栈（默认）')"
+    echo "  2) $(L '纯 TCP')"
+    echo "  3) $(L '纯 UDP（自动跳过 WS/TLS 隧道选项）')"
+    read -rp "$(L '选择 [1-3，默认 1]: ')" proto_c || { [ -n "$proto_c" ] || return 1; }
+    case "${proto_c:-1}" in 2) proto="tcp" ;; 3) proto="udp" ;; *) proto="both" ;; esac
+
+    def_lip="$(realm_default_listen_ip)"
+    read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
+    lip="${lip:-$def_lip}"
+    local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
+    is_ip "$_lip_check" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+
+    read -rp "$(L '端口段或逗号列表（如 10000-10010 或 8080,8443,9000）: ')" spec || { [ -n "$spec" ] || return 1; }
+    spec="${spec//[[:space:]]/}"
+    [ -n "$spec" ] || { warn "$(L '输入不合法，未做任何修改')"; return 1; }
+    local -a items=()
+    IFS=',' read -r -a items <<< "$spec"
+    for item in "${items[@]}"; do
+        [ -n "$item" ] || continue
+        if [[ "$item" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
+            if [ "$a" -lt 1 ] || [ "$b" -gt 65535 ] || [ "$a" -gt "$b" ]; then
+                warn "$(L '端口超出范围:') ${item}"; return 1
+            fi
+            for ((p=a; p<=b; p++)); do
+                ports+=("$p")
+                if [ "${#ports[@]}" -gt 100 ]; then
+                    warn "$(L '单次批量最多支持 100 个端口，请缩小范围')"; return 1
+                fi
+            done
+        elif validate_port "$item"; then
+            ports+=("$((10#$item))")
+            if [ "${#ports[@]}" -gt 100 ]; then
+                warn "$(L '单次批量最多支持 100 个端口，请缩小范围')"; return 1
+            fi
+        else
+            warn "$(L '无法识别的端口写法:') ${item}"; return 1
+        fi
+    done
+    [ "${#ports[@]}" -gt 0 ] || { warn "$(L '输入不合法，未做任何修改')"; return 1; }
+
+    while true; do
+        read -rp "$(L '目标地址（域名、公网 IP 或同区免费内网 IP）: ')" rhost || { [ -n "$rhost" ] || return 1; }
+        rhost="${rhost//[[:space:]]/}"
+        is_safe_host "$rhost" && break
+        warn "$(L '目标地址格式不合法')"
+    done
+
+    echo "$(L '目标端口模式：1) 同端口一对一映射（推荐）  2) 全部指向同一个目标端口')"
+    read -rp "$(L '  选择 [1/2，默认 1]: ')" rmode || { [ -n "$rmode" ] || return 1; }
+    if [ "${rmode:-1}" = "2" ]; then
+        while true; do
+            read -rp "$(L '目标端口 (1-65535): ')" rport_fixed || { [ -n "$rport_fixed" ] || return 1; }
+            validate_port "$rport_fixed" && { rport_fixed=$((10#$rport_fixed)); break; }
+            warn "$(L '端口不合法')"
+        done
+    fi
+
+    local rp
+    for p in "${ports[@]}"; do
+        if realm_port_used "$p" "$proto"; then
+            warn "$(L '端口 ')${p} $(L '已被占用，请换一个')"
+            skip_cnt=$((skip_cnt + 1))
+            continue
+        fi
+        rp="${rport_fixed:-$p}"
+        id="$(realm_next_id)"
+        env_file="${REALM_RULE_DIR}/${id}.env"
+        cat > "$env_file" << RULEEOF
+RULE_ID="${id}"
+RULE_ENABLED="1"
+RULE_REMARK="$(dq_escape "${remark:+${remark}-}${p}")"
+RULE_PROTO="${proto}"
+RULE_LIP="${lip}"
+RULE_LPORT="${p}"
+RULE_RHOST="${rhost}"
+RULE_RPORT="${rp}"
+RULE_EXTRA_REMOTES=""
+RULE_BALANCE=""
+RULE_THROUGH=""
+RULE_OUT_IF=""
+RULE_IN_IF=""
+RULE_LTRANS=""
+RULE_RTRANS=""
+RULE_SEND_PROXY="0"
+RULE_ACCEPT_PROXY="0"
+RULE_SEND_MPTCP="0"
+RULE_ACCEPT_MPTCP="0"
+RULEEOF
+        chmod 600 "$env_file"
+        added_files+=("$env_file")
+        [ "$proto" != "udp" ] && fw_specs+=("${p}/tcp")
+        [ "$proto" != "tcp" ] && fw_specs+=("${p}/udp")
+        ok_cnt=$((ok_cnt + 1))
+    done
+
+    [ "$ok_cnt" -gt 0 ] || { warn "$(L '没有找到') (0)"; return 0; }
+
+    if ! realm_reload_service; then
+        for env_file in "${added_files[@]}"; do rm -f "$env_file"; done
+        realm_reload_service >/dev/null 2>&1 || true
+        error "$(L '新规则未能生效，已自动撤回（原有规则不受影响）')"
+    fi
+
+    [ "${#fw_specs[@]}" -gt 0 ] && fw_allow_for_service "${fw_specs[@]}"
+    reserved_ports_sync || true
+    success "$(L '批量添加完成：成功 ')${ok_cnt}$(L '，跳过 ')${skip_cnt}"
+}
+
+# 编辑已有转发规则（回车保持原值，失败自动恢复原配置）
+realm_edit_rule() {
+    realm_pick_rule_file || return 0
+    local f="$PICKED_RULE_FILE" bak ans
+    realm_env_file_safe "$f" || { warn "$(L '规则文件内容非法，已跳过：')${f}"; return 1; }
+    # shellcheck disable=SC1090
+    source "$f"
+    local old_port="$RULE_LPORT" old_proto="$RULE_PROTO"
+    local remark="$RULE_REMARK" proto="$RULE_PROTO" lip="$RULE_LIP" lport="$RULE_LPORT"
+    local rhost="$RULE_RHOST" rport="$RULE_RPORT"
+    local extra_remotes="${RULE_EXTRA_REMOTES:-}" balance="${RULE_BALANCE:-}"
+    local through="${RULE_THROUGH:-}" out_if="${RULE_OUT_IF:-}" in_if="${RULE_IN_IF:-}"
+    local ltrans="${RULE_LTRANS:-}" rtrans="${RULE_RTRANS:-}"
+    local send_proxy="${RULE_SEND_PROXY:-0}" accept_proxy="${RULE_ACCEPT_PROXY:-0}"
+    local send_mptcp="${RULE_SEND_MPTCP:-0}" accept_mptcp="${RULE_ACCEPT_MPTCP:-0}"
+
+    step "$(L '编辑已有转发规则') [${RULE_ID}]"
+    divider
+    read -rp "$(L '规则备注（可选）: ') [${remark}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    if [ -n "$ans" ]; then
+        if realm_has_toml_special "$ans"; then warn "$(L '备注含非法字符（\" 或 \），请去掉后重试')"; return 1; fi
+        remark="$ans"
+    fi
+
+    echo "$(L '转发协议：') [$(L '当前:') ${proto}]"
+    echo "  1) $(L 'TCP + UDP 双栈（默认）')  2) $(L '纯 TCP')  3) $(L '纯 UDP')"
+    read -rp "$(L '选择') [1-3, $(L '回车保持')]: " ans || { [ -n "$ans" ] || return 1; }
+    case "$ans" in 1) proto="both" ;; 2) proto="tcp" ;; 3) proto="udp" ;; *) : ;; esac
+
+    read -rp "$(L '本机监听 IP（回车默认 ')${lip}$(L '）: ')" ans || { [ -n "$ans" ] || return 1; }
+    if [ -n "$ans" ]; then
+        local _lc="${ans#[}"; _lc="${_lc%]}"
+        is_ip "$_lc" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+        lip="$ans"
+    fi
+
+    read -rp "$(L '本机监听端口 (1-65535): ') [${lport}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    if [ -n "$ans" ]; then
+        validate_port "$ans" || { warn "$(L '端口不合法')"; return 1; }
+        lport=$((10#$ans))
+        if realm_port_used "$lport" "$proto" "$RULE_ID"; then
+            warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
+            return 1
+        fi
+    fi
+
+    read -rp "$(L '目标地址（域名、公网 IP 或同区免费内网 IP）: ') [${rhost}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    if [ -n "$ans" ]; then
+        ans="${ans//[[:space:]]/}"
+        is_safe_host "$ans" || { warn "$(L '目标地址格式不合法')"; return 1; }
+        rhost="$ans"
+    fi
+
+    read -rp "$(L '目标端口 (1-65535): ') [${rport}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    if [ -n "$ans" ]; then
+        validate_port "$ans" || { warn "$(L '端口不合法')"; return 1; }
+        rport=$((10#$ans))
+    fi
+
+    if confirm "$(L '配置多目标负载均衡（extra_remotes）？')" n; then
+        read -rp "$(L '  额外目标列表（逗号分隔，格式 host:port,host2:port）: ') [${extra_remotes:-$(L '无')}]: " ans || { [ -n "$ans" ] || return 1; }
+        if [ -z "$ans" ]; then
+            extra_remotes=""; balance=""
+        else
+            local _clean="" _item _ih _ip _cnt=1
+            local -a _eitems=()
+            IFS=',' read -r -a _eitems <<< "$ans"
+            for _item in "${_eitems[@]}"; do
+                _item="${_item//[[:space:]]/}"
+                [ -n "$_item" ] || continue
+                _ih="${_item%:*}"; _ip="${_item##*:}"
+                if [ "$_ih" = "$_item" ] || ! is_safe_host "$_ih" || ! validate_port "$_ip"; then
+                    warn "$(L '已剔除无效目标：')${_item}"; continue
+                fi
+                _clean="${_clean:+${_clean},}${_item}"; _cnt=$((_cnt + 1))
+            done
+            extra_remotes="$_clean"
+            if [ -n "$extra_remotes" ]; then
+                balance="roundrobin: $(printf '1, %.0s' $(seq 1 "$_cnt") | sed 's/, $//')"
+            else
+                balance=""
+            fi
+        fi
+    fi
+
+    if [ "$proto" != "udp" ] && confirm "$(L '配置 WS / TLS / WSS 双端加密隧道？')" n; then
+        echo "$(L '  当前机器角色：1) 中转入口机（向外加密 remote_transport）  2) 落地出口机（入站解密 listen_transport）')"
+        local trole
+        read -rp "$(L '  选择 [1/2，默认 1]: ')" trole || { [ -n "$trole" ] || return 1; }
+        if [ "${trole:-1}" = "2" ]; then
+            realm_prompt_transport "$(L '入站解密')" 1
+            ltrans="$REALM_TRANS_RESULT"; rtrans=""
+        else
+            realm_prompt_transport "$(L '出站加密')" 0
+            rtrans="$REALM_TRANS_RESULT"; ltrans=""
+        fi
+    elif [ "$proto" = "udp" ]; then
+        ltrans=""; rtrans=""
+    fi
+
+    bak="${f}.bak"
+    cp -f "$f" "$bak" || return 1
+    cat > "$f" << RULEEOF
+RULE_ID="${RULE_ID}"
+RULE_ENABLED="${RULE_ENABLED}"
+RULE_REMARK="$(dq_escape "$remark")"
+RULE_PROTO="${proto}"
+RULE_LIP="${lip}"
+RULE_LPORT="${lport}"
+RULE_RHOST="${rhost}"
+RULE_RPORT="${rport}"
+RULE_EXTRA_REMOTES="$(dq_escape "$extra_remotes")"
+RULE_BALANCE="$(dq_escape "$balance")"
+RULE_THROUGH="${through}"
+RULE_OUT_IF="${out_if}"
+RULE_IN_IF="${in_if}"
+RULE_LTRANS="$(dq_escape "$ltrans")"
+RULE_RTRANS="$(dq_escape "$rtrans")"
+RULE_SEND_PROXY="${send_proxy}"
+RULE_ACCEPT_PROXY="${accept_proxy}"
+RULE_SEND_MPTCP="${send_mptcp}"
+RULE_ACCEPT_MPTCP="${accept_mptcp}"
+RULEEOF
+    chmod 600 "$f"
+
+    if ! realm_reload_service; then
+        mv -f "$bak" "$f"
+        realm_reload_service >/dev/null 2>&1 || true
+        error "$(L '规则更新失败，已自动恢复原配置')"
+    fi
+    rm -f "$bak"
+
+    local -a fw_specs=()
+    [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
+    [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
+    fw_allow_for_service "${fw_specs[@]}"
+    if [ "$old_port" != "$lport" ] || [ "$old_proto" != "$proto" ]; then
+        local old_specs=""
+        [ "$old_proto" != "udp" ] && old_specs="${old_specs} ${old_port}/tcp"
+        [ "$old_proto" != "tcp" ] && old_specs="${old_specs} ${old_port}/udp"
+        fw_prune_old_specs "$old_specs"
+    fi
+    reserved_ports_sync || true
+    success "$(L '规则已更新并生效：')${lip}:${lport} -> ${rhost}:${rport}"
+}
+
+realm_show_config() {
+    step "$(L '查看完整有效配置（TOML）')"
+    divider
+    if [ -f "${REALM_CONF_D}/00-base.toml" ]; then
+        echo -e "${CYAN}# === 00-base.toml ===${NC}"
+        cat "${REALM_CONF_D}/00-base.toml"
+    fi
+    local t any=0
+    for t in "${REALM_CONF_D}"/rule-*.toml; do
+        [ -f "$t" ] || continue
+        any=1
+        echo ""
+        echo -e "${CYAN}# === $(basename "$t") ===${NC}"
+        cat "$t"
+    done
+    [ "$any" -eq 0 ] && info "$(L '暂无转发规则')"
+}
+
+realm_tune_global() {
+    realm_write_base_config
+    step "$(L '全局网络 / DNS 参数调优')"
+    divider
+    echo "  DNS mode: 1) ipv4_and_ipv6  2) ipv4_only  3) ipv6_only  4) ipv4_then_ipv6  5) ipv6_then_ipv4"
+    local ans dns_mode="ipv4_and_ipv6" tcp_to="5" udp_to="30" ka="15"
+    read -rp "  DNS mode [1-5, default 1]: " ans || { [ -n "$ans" ] || return 1; }
+    case "${ans:-1}" in
+        2) dns_mode="ipv4_only" ;;
+        3) dns_mode="ipv6_only" ;;
+        4) dns_mode="ipv4_then_ipv6" ;;
+        5) dns_mode="ipv6_then_ipv4" ;;
+        *) dns_mode="ipv4_and_ipv6" ;;
+    esac
+    read -rp "  tcp_timeout (s, default 5): " ans || { [ -n "$ans" ] || return 1; }
+    [[ "${ans:-5}" =~ ^[1-9][0-9]*$ ]] && tcp_to="${ans:-5}"
+    read -rp "  udp_timeout (s, default 30): " ans || { [ -n "$ans" ] || return 1; }
+    [[ "${ans:-30}" =~ ^[1-9][0-9]*$ ]] && udp_to="${ans:-30}"
+    read -rp "  tcp_keepalive (s, default 15): " ans || { [ -n "$ans" ] || return 1; }
+    [[ "${ans:-15}" =~ ^[1-9][0-9]*$ ]] && ka="${ans:-15}"
+
+    cat > "${REALM_CONF_D}/00-base.toml" << BASEEOF
+[log]
+level = "warn"
+output = "stdout"
+
+[dns]
+mode = "${dns_mode}"
+protocol = "tcp_and_udp"
+min_ttl = 600
+max_ttl = 3600
+cache_size = 256
+
+[network]
+no_tcp = false
+use_udp = true
+tcp_timeout = ${tcp_to}
+udp_timeout = ${udp_to}
+tcp_keepalive = ${ka}
+tcp_keepalive_probe = 3
+BASEEOF
+    chmod 644 "${REALM_CONF_D}/00-base.toml"
+    realm_reload_service && success "$(L '配置已更新并重启')"
+}
+
 realm_menu() {
     local choice
     while true; do
         clear 2>/dev/null || true
+        maint_load
         echo -e "${BOLD}${CYAN}━━━ $(L 'Realm 端口转发管理') ━━━${NC}"
-        echo -e "  $(L '当前状态:') $(realm_state_text)"
+        echo -e "  $(L '当前状态:') $(realm_state_text)    $(L '自动更新:') $(maint_onoff "${MAINT_REALM_AUTO:-0}")"
         divider
         echo -e "  ${GREEN}1)${NC}  $(L '安装 / 更新 Realm')"
         echo -e "  ${GREEN}2)${NC}  $(L '添加转发规则（TCP/UDP/LB/隧道/多网卡）')"
-        echo -e "  ${GREEN}3)${NC}  $(L '查看转发规则列表')"
-        echo -e "  ${GREEN}4)${NC}  $(L '启用 / 停用单条规则')"
-        echo -e "  ${GREEN}5)${NC}  $(L '删除转发规则')"
-        echo -e "  ${GREEN}6)${NC}  $(L '测试目标连通性与延迟')"
-        echo -e "  ${GREEN}7)${NC}  $(L '重启服务 / 查看状态与日志')"
-        echo -e "  ${GREEN}8)${NC}  $(L '导出规则（迁移备份）')"
-        echo -e "  ${GREEN}9)${NC}  $(L '导入规则（从备份恢复）')"
-        echo -e "  ${GREEN}10)${NC} ${RED}$(L '卸载')${NC} Realm"
+        echo -e "  ${GREEN}3)${NC}  $(L '批量添加转发规则（端口段 / 多端口）')"
+        echo -e "  ${GREEN}4)${NC}  $(L '查看转发规则列表')"
+        echo -e "  ${GREEN}5)${NC}  $(L '编辑已有转发规则')"
+        echo -e "  ${GREEN}6)${NC}  $(L '启用 / 停用单条规则')"
+        echo -e "  ${GREEN}7)${NC}  $(L '删除转发规则')"
+        echo -e "  ${GREEN}8)${NC}  $(L '测试目标连通性与延迟')"
+        echo -e "  ${GREEN}9)${NC}  $(L '查看完整有效配置（TOML）')"
+        echo -e "  ${GREEN}10)${NC} $(L '全局网络 / DNS 参数调优')"
+        echo -e "  ${GREEN}11)${NC} $(L 'Realm 自动更新 开 / 关') [$(maint_onoff "${MAINT_REALM_AUTO:-0}")]"
+        echo -e "  ${GREEN}12)${NC} $(L '重启服务 / 查看状态与日志')"
+        echo -e "  ${GREEN}13)${NC} $(L '导出规则（迁移备份）')"
+        echo -e "  ${GREEN}14)${NC} $(L '导入规则（从备份恢复）')"
+        echo -e "  ${GREEN}15)${NC} ${RED}$(L '卸载')${NC} Realm"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-10]: " choice
+        read -rp "$(L '请选择') [0-15]: " choice
         case "$choice" in
             1)  run_action realm_install ;;
             2)  run_action realm_add_rule ;;
-            3)  run_action realm_list_rules ;;
-            4)  run_action realm_toggle_rule ;;
-            5)  run_action realm_delete_rule ;;
-            6)  run_action realm_test_rules ;;
-            7)  run_action bash -c 'systemctl restart adam-realm 2>/dev/null || true; systemctl status adam-realm --no-pager || true; journalctl -u adam-realm -n 20 --no-pager || true' ;;
-            8)  run_action realm_export_rules ;;
-            9)  run_action realm_import_rules ;;
-            10) run_action realm_uninstall ;;
+            3)  run_action realm_add_batch_rules ;;
+            4)  run_action realm_list_rules ;;
+            5)  run_action realm_edit_rule ;;
+            6)  run_action realm_toggle_rule ;;
+            7)  run_action realm_delete_rule ;;
+            8)  run_action realm_test_rules ;;
+            9)  run_action realm_show_config ;;
+            10) run_action realm_tune_global ;;
+            11) run_action maint_toggle MAINT_REALM_AUTO ;;
+            12) run_action bash -c 'systemctl restart adam-realm 2>/dev/null || true; systemctl status adam-realm --no-pager || true; journalctl -u adam-realm -n 20 --no-pager || true' ;;
+            13) run_action realm_export_rules ;;
+            14) run_action realm_import_rules ;;
+            15) run_action realm_uninstall ;;
             0)  return 0 ;;
             *)  warn "$(L '无效选择')" ;;
         esac
@@ -12096,17 +12877,22 @@ realm_cli() {
         menu)      realm_menu ;;
         install|update) realm_install ;;
         add)       realm_add_rule ;;
+        batch)     realm_add_batch_rules ;;
+        edit)      realm_edit_rule ;;
         list)      realm_list_rules ;;
         toggle)    realm_toggle_rule ;;
         delete)    realm_delete_rule ;;
         test)      realm_test_rules ;;
+        config)    realm_show_config ;;
+        tune)      realm_tune_global ;;
+        auto)      maint_toggle MAINT_REALM_AUTO ;;
         restart)   realm_reload_service && success "$(L 'Realm 已重启')" ;;
         status)    systemctl status adam-realm --no-pager || true ;;
         logs)      journalctl -u adam-realm -f || true ;;
         export)    realm_export_rules ;;
         import)    realm_import_rules ;;
         uninstall) realm_uninstall ;;
-        *) error "$(L '未知的 realm 子命令:') ${sub}$(L '（可用: install / add / list / toggle / delete / test / restart / status / logs / export / import / uninstall）')" ;;
+        *) error "$(L '未知的 realm 子命令:') ${sub}$(L '（可用: install / add / batch / edit / list / toggle / delete / test / config / tune / auto / restart / status / logs / export / import / uninstall）')" ;;
     esac
 }
 
@@ -12232,6 +13018,7 @@ xray_fwd_rule_json() {
         udp) network="udp" ;;
         *)   network="tcp,udp" ;;
     esac
+    rhost="${rhost#[}"; rhost="${rhost%]}"
     fr="false"; [ "$follow" = "1" ] && fr="true"
     printf '%s' "{\"tag\":\"fwd-${id}\",\"listen\":\"${lip}\",\"port\":${lport},\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"${rhost}\",\"port\":${rport},\"network\":\"${network}\",\"followRedirect\":${fr}}}"
 }
@@ -12259,6 +13046,9 @@ xray_fwd_rebuild() {
         mv -f "$tmpf" "$XRAY_FWD_JSON" || { rm -f "$tmpf"; warn "$(L '转发配置文件写入失败')"; return 1; }
         chmod 644 "$XRAY_FWD_JSON" || true
     fi
+    # 同步刷新 00-base.json 中的 fwd-* 直连路由规则，确保内网/国内目标不被阻断
+    xray_load_state
+    xray_write_base
     if [ ! -x "$XRAY_BIN" ]; then
         info "$(L 'Xray 未安装，转发配置已保存，重装 Xray 后生效')"
         return 0
@@ -12303,11 +13093,15 @@ xray_fwd_add() {
     done
     lport=$((10#$lport))
 
-    # 冲突检测：同协议下是否被其他进程占用（排除 Xray 自身监听）
+    # 冲突检测：先查本 Xray 模块是否已用该端口，再查系统监听（排除 xray 自身）
+    if xray_port_used "$lport"; then
+        warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
+        return 1
+    fi
     if command -v ss >/dev/null 2>&1; then
         occ=""
-        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" || true)"
-        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" || true)"
+        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" xray || true)"
+        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" xray || true)"
         if [ -n "$occ" ]; then
             warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
             echo "$occ"
@@ -12356,6 +13150,7 @@ FWDEOF
     [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
     [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
     fw_allow_for_service "${fw_specs[@]}"
+    reserved_ports_sync || true
     success "$(L '转发规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
 }
 
@@ -12509,11 +13304,792 @@ xray_fwd_cli() {
     esac
 }
 
+# ══════════════════════════════════════════════════════════════
+#   一键域名反代模块（Caddy 多域名自动 HTTPS + Cloudflare Tunnel）
+#   Caddy 配置：/etc/adam-caddy/Caddyfile + /etc/adam-caddy/sites/<id>.env / <id>.caddy
+#   Cloudflare Tunnel：/etc/adam-cloudflared/tunnel.env（TUNNEL_TOKEN 600 权限，不进命令行参数）
+# ══════════════════════════════════════════════════════════════
+
+caddy_installed() { [ -x "$CADDY_BIN" ]; }
+cf_tunnel_installed() { [ -x "$CF_TUNNEL_BIN" ]; }
+
+caddy_load_state() {
+    state_load "$CADDY_STATE_FILE" "CADDY_EMAIL="
+    return 0
+}
+
+caddy_save_state() {
+    state_save "$CADDY_STATE_FILE" "$CADDY_DIR" 755 CADDY_EMAIL
+}
+
+caddy_site_files() {
+    local f
+    [ -d "$CADDY_SITES_DIR" ] || return 0
+    for f in "${CADDY_SITES_DIR}"/*.env; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+caddy_enabled_count() {
+    local f n=0
+    while IFS= read -r f; do
+        grep -q '^SITE_ENABLED="1"$' "$f" 2>/dev/null && n=$((n + 1))
+    done < <(caddy_site_files)
+    printf '%s' "$n"
+}
+
+caddy_ports() {
+    local f
+    while IFS= read -r f; do
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            [ "${SITE_ENABLED:-0}" = "1" ] || exit 0
+            if [ "${SITE_MODE:-https}" = "http" ]; then
+                validate_port "${SITE_PORT:-80}" && echo "${SITE_PORT:-80}/tcp"
+            else
+                echo "80/tcp"
+                echo "443/tcp"
+                echo "443/udp"
+            fi
+        )
+    done < <(caddy_site_files) | sort -u
+}
+
+caddy_healthy() {
+    [ "$(caddy_enabled_count)" -gt 0 ] || return 0
+    caddy_installed || return 1
+    systemctl is-active --quiet adam-caddy 2>/dev/null || return 1
+    local spec
+    while IFS= read -r spec; do
+        [ -n "$spec" ] || continue
+        if [[ "$spec" == */tcp ]]; then
+            tcp_listening "${spec%/tcp}" || return 1
+        fi
+    done < <(caddy_ports)
+    return 0
+}
+
+proxy_state_text() {
+    local ctxt="" ttxt=""
+    if caddy_installed; then
+        local total=0 en=0 f cver
+        while IFS= read -r f; do
+            total=$((total + 1))
+            grep -q '^SITE_ENABLED="1"$' "$f" 2>/dev/null && en=$((en + 1))
+        done < <(caddy_site_files)
+        cver="$("$CADDY_BIN" version 2>/dev/null | awk '{print $1}' || true)"
+        ctxt="Caddy ${cver:-?} (${en}/${total} $(L '个站点') · $(svc_state adam-caddy))"
+    fi
+    if cf_tunnel_installed; then
+        if systemctl is-active --quiet adam-cloudflared 2>/dev/null; then
+            ttxt="CF-Tunnel ${GREEN}$(L '隧道已运行')${NC}"
+        elif [ -f "$CF_TUNNEL_ENV" ]; then
+            ttxt="CF-Tunnel $(L '已配置') · $(svc_state adam-cloudflared)"
+        else
+            ttxt="CF-Tunnel $(L '已安装')"
+        fi
+    fi
+    if [ -n "$ctxt" ] && [ -n "$ttxt" ]; then
+        printf '%s  |  %s' "$ctxt" "$ttxt"
+    elif [ -n "$ctxt" ]; then
+        printf '%s' "$ctxt"
+    elif [ -n "$ttxt" ]; then
+        printf '%s' "$ttxt"
+    else
+        printf '%s' "${YELLOW}$(L '未安装')${NC}"
+    fi
+}
+
+caddy_latest_tag() {
+    local tag=""
+    tag="$(curl -fsS --max-time 20 "https://api.github.com/repos/${CADDY_REPO}/releases/latest" 2>/dev/null \
+        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
+    if [ -z "$tag" ]; then
+        tag="$(curl -fsSI --max-time 20 "https://github.com/${CADDY_REPO}/releases/latest" 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
+    fi
+    printf '%s' "$tag"
+}
+
+caddy_fetch_binary() {
+    local tag="$1" arch ver_num asset url sums_url expected actual bin
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l)        arch="armv7" ;;
+        *) warn "$(L '不支持的架构:') $(uname -m)"; return 1 ;;
+    esac
+    ver_num="${tag#v}"
+    asset="caddy_${ver_num}_linux_${arch}.tar.gz"
+    url="https://github.com/${CADDY_REPO}/releases/download/${tag}/${asset}"
+    sums_url="https://github.com/${CADDY_REPO}/releases/download/${tag}/caddy_${ver_num}_checksums.txt"
+
+    CADDY_DL_BIN=""
+    make_workdir || return 1
+    local wd="$WORKDIR"
+    if ! curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "${wd}/${asset}" "$url"; then
+        warn "$(L '下载失败:') ${url}"
+        return 1
+    fi
+    actual="$(sha256sum "${wd}/${asset}" | awk '{print $1}')"
+    expected=""
+    if curl -fsSL --max-time 20 -o "${wd}/checksums.txt" "$sums_url" 2>/dev/null; then
+        expected="$(awk -v a="$asset" '$2 == a || $2 == "*"a {print $1; exit}' "${wd}/checksums.txt" || true)"
+    fi
+    if [ -n "$expected" ]; then
+        if [ "$expected" != "$actual" ]; then
+            warn "$(L 'SHA256 校验失败（官方') ${expected}$(L '，实际') ${actual}$(L '），已中止')"
+            return 1
+        fi
+        success "$(L 'SHA256 校验通过（')${asset}$(L '）')"
+    else
+        warn "$(L '未取到官方 SHA256 摘要，跳过校验（')${asset}$(L '）')"
+    fi
+    tar -xzf "${wd}/${asset}" -C "$wd" || { warn "$(L '解压失败')"; return 1; }
+    bin="$(find "$wd" -maxdepth 2 -type f -name caddy | head -1)"
+    [ -n "$bin" ] || { warn "$(L '解压失败')"; return 1; }
+    chmod 755 "$bin"
+    "$bin" version >/dev/null 2>&1 || { warn "$(L '下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动')"; return 1; }
+    CADDY_DL_BIN="$bin"
+    return 0
+}
+
+caddy_write_main_config() {
+    install -d -m 755 "$CADDY_DIR" "$CADDY_SITES_DIR" "$CADDY_DATA_DIR"
+    caddy_load_state
+    local email_line=""
+    [ -n "${CADDY_EMAIL:-}" ] && email_line="    email ${CADDY_EMAIL}"
+    cat > "$CADDY_FILE" << CADEOF
+{
+    admin off
+${email_line}
+}
+
+import ${CADDY_SITES_DIR}/*.caddy
+CADEOF
+    chmod 644 "$CADDY_FILE"
+}
+
+caddy_write_service() {
+    local run_user="adam-caddy" run_group="adam-caddy"
+    if [ -f "${CADDY_DIR}/run-as-root" ]; then
+        run_user=""; run_group=""
+    elif ! ensure_system_user adam-caddy adam-caddy 2>/dev/null; then
+        run_user=""; run_group=""
+    else
+        install -d -m 750 -o adam-caddy -g adam-caddy "$CADDY_DATA_DIR" 2>/dev/null || true
+    fi
+    write_service_unit "$CADDY_SERVICE" "Adam Caddy Reverse Proxy" "https://caddyserver.com/docs/" "60" "$run_user" "$run_group" \
+        "${CADDY_BIN} run --environ --config ${CADDY_FILE} --adapter caddyfile" \
+        "CAP_NET_BIND_SERVICE" "1048576" "always" "3" \
+        "Environment=XDG_DATA_HOME=${CADDY_DATA_DIR}
+Environment=XDG_CONFIG_HOME=${CADDY_DATA_DIR}
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=${CADDY_DATA_DIR}" "StartLimitBurst=10"
+    systemctl daemon-reload || true
+}
+
+caddy_render_site() {
+    local id="$1"
+    local env_file="${CADDY_SITES_DIR}/${id}.env"
+    local caddy_file="${CADDY_SITES_DIR}/${id}.caddy"
+    [ -f "$env_file" ] || { rm -f "$caddy_file"; return 0; }
+    (
+        # shellcheck disable=SC1090
+        source "$env_file" 2>/dev/null || exit 1
+        if [ "${SITE_ENABLED:-0}" != "1" ]; then
+            rm -f "$caddy_file"
+            exit 0
+        fi
+        local addr="" up="${SITE_UPSTREAM}"
+        case "${SITE_MODE:-https}" in
+            http)
+                local sp="${SITE_PORT:-80}"
+                addr="http://${SITE_DOMAIN}:${sp}"
+                ;;
+            *)
+                addr="${SITE_DOMAIN}"
+                ;;
+        esac
+        local tmpf
+        tmpf="$(mktemp "${CADDY_SITES_DIR}/.${id}.XXXXXX")" || exit 1
+        {
+            echo "# id=${id} mode=${SITE_MODE:-https} remark=${SITE_REMARK:-}"
+            echo "${addr} {"
+            echo "    encode zstd gzip"
+            if [ "${SITE_MODE:-https}" = "remote" ]; then
+                echo "    reverse_proxy ${up} {"
+                echo "        header_up Host {upstream_hostport}"
+                echo "        header_up X-Real-IP {remote_host}"
+                if [ "${SITE_INSECURE:-0}" = "1" ]; then
+                    echo "        transport http {"
+                    echo "            tls_insecure_skip_verify"
+                    echo "        }"
+                fi
+                echo "    }"
+            else
+                echo "    reverse_proxy ${up} {"
+                echo "        flush_interval -1"
+                echo "        header_up X-Real-IP {remote_host}"
+                if [ "${SITE_INSECURE:-0}" = "1" ]; then
+                    echo "        transport http {"
+                    echo "            tls_insecure_skip_verify"
+                    echo "        }"
+                fi
+                echo "    }"
+            fi
+            echo "}"
+        } > "$tmpf" || { rm -f "$tmpf"; exit 1; }
+        chmod 644 "$tmpf"
+        mv -f "$tmpf" "$caddy_file"
+    )
+}
+
+caddy_rebuild_all() {
+    caddy_write_main_config
+    local f id
+    while IFS= read -r f; do
+        id="$(basename "$f" .env)"
+        caddy_render_site "$id" || true
+    done < <(caddy_site_files)
+    local c
+    for c in "${CADDY_SITES_DIR}"/*.caddy; do
+        [ -f "$c" ] || continue
+        id="$(basename "$c" .caddy)"
+        [ -f "${CADDY_SITES_DIR}/${id}.env" ] || rm -f "$c"
+    done
+}
+
+caddy_reload_service() {
+    caddy_rebuild_all
+    if [ "$(caddy_enabled_count)" -eq 0 ]; then
+        systemctl disable --now adam-caddy 2>/dev/null || true
+        return 0
+    fi
+    caddy_installed || return 0
+    local out
+    if ! out="$("$CADDY_BIN" validate --config "$CADDY_FILE" --adapter caddyfile 2>&1)"; then
+        warn "$(L '配置校验未通过：')"
+        printf '%s\n' "$out" | tail -n 8
+        return 1
+    fi
+    systemctl enable adam-caddy >/dev/null 2>&1 || true
+    if svc_restart_wait adam-caddy 2 15; then
+        return 0
+    fi
+    if grep -q '^User=' "$CADDY_SERVICE" 2>/dev/null; then
+        sed -i '/^User=/d; /^Group=/d' "$CADDY_SERVICE" || return 1
+        systemctl daemon-reload || true
+        if svc_restart_wait adam-caddy 2 15; then
+            touch "${CADDY_DIR}/run-as-root" 2>/dev/null || true
+            return 0
+        fi
+    fi
+    return 1
+}
+
+caddy_install() {
+    step "$(L '安装 / 更新 Caddy（官方仓库）')"
+    divider
+    apt_install curl tar ca-certificates iproute2 || true
+    info "$(L '正在查询 Caddy 官方最新版本...')"
+    local tag cur=""
+    tag="$(caddy_latest_tag)"
+    [ -n "$tag" ] || error "$(L '无法获取 Caddy 最新版本号，请检查网络')"
+    if caddy_installed; then cur="$("$CADDY_BIN" version 2>/dev/null | awk '{print $1}' || true)"; fi
+    info "$(L '最新版本:') ${tag}"
+    [ -n "$cur" ] && info "$(L '当前版本:') ${cur}"
+    if [ -n "$cur" ] && [ "${cur#v}" = "${tag#v}" ]; then
+        confirm "$(L '已是最新版本，仍要重新安装？')" n || return 0
+    fi
+    caddy_fetch_binary "$tag" || error "$(L '下载或校验失败，已中止')"
+    install -d -m 755 "$CADDY_DIR" "$CADDY_SITES_DIR" "$CADDY_DATA_DIR"
+    if [ -f "$CADDY_BIN" ]; then cp -f "$CADDY_BIN" "$CADDY_BIN_BACKUP" 2>/dev/null || true; fi
+    install -m 755 "$CADDY_DL_BIN" "$CADDY_BIN"
+    caddy_load_state
+    if [ -z "${CADDY_EMAIL:-}" ] && [ -t 0 ]; then
+        local em=""
+        read -rp "$(L 'ACME 邮箱（证书账户用）:') " em || true
+        em="$(printf '%s' "$em" | tr -d ' \r\n')"
+        if [[ "$em" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            CADDY_EMAIL="$em"; caddy_save_state
+        fi
+    fi
+    caddy_write_main_config
+    caddy_write_service
+    if [ "$(caddy_enabled_count)" -gt 0 ]; then
+        if ! caddy_reload_service; then
+            if [ -f "$CADDY_BIN_BACKUP" ]; then
+                install -m 755 "$CADDY_BIN_BACKUP" "$CADDY_BIN"
+                caddy_reload_service >/dev/null 2>&1 || true
+            fi
+            error "$(L '更新失败')"
+        fi
+    fi
+    success "$(L 'Caddy 安装完成') (${tag})"
+}
+
+caddy_autoupdate() {
+    caddy_installed || return 0
+    local cur latest
+    cur="$("$CADDY_BIN" version 2>/dev/null | awk '{print $1}' || true)"
+    latest="$(caddy_latest_tag)"
+    if [ -z "$latest" ]; then
+        echo "[Caddy] $(L '未能获取官方版本信息，本次跳过；当前') ${cur:-$(L '未知')}"
+        return 1
+    fi
+    if [ -n "$cur" ] && version_ge "$cur" "$latest"; then
+        echo "[Caddy] $(L '已是最新:') ${cur}"
+        return 0
+    fi
+    if ! caddy_fetch_binary "$latest"; then
+        maint_log "[Caddy] $(L '自动更新到') ${latest} $(L '失败，当前仍为') ${cur:-$(L '未知')}"
+        return 1
+    fi
+    cp -f "$CADDY_BIN" "$CADDY_BIN_BACKUP" 2>/dev/null || true
+    install -m 755 "$CADDY_DL_BIN" "$CADDY_BIN"
+    if [ "$(caddy_enabled_count)" -gt 0 ] && ! caddy_reload_service; then
+        [ -f "$CADDY_BIN_BACKUP" ] && install -m 755 "$CADDY_BIN_BACKUP" "$CADDY_BIN"
+        caddy_reload_service >/dev/null 2>&1 || true
+        maint_log "[Caddy] $(L '自动更新到') ${latest} $(L '失败，当前仍为') ${cur:-$(L '未知')}"
+        return 1
+    fi
+    maint_log "[Caddy] $(L '已自动更新:') ${cur:-$(L '未知')} -> ${latest}"
+    return 0
+}
+
+caddy_next_id() {
+    local i=1 id
+    while true; do
+        id="$(printf 's%02d' "$i")"
+        [ ! -f "${CADDY_SITES_DIR}/${id}.env" ] && { printf '%s' "$id"; return 0; }
+        i=$((i + 1))
+    done
+}
+
+caddy_add_site() {
+    caddy_installed || { warn "$(L '尚未安装 Caddy，请先安装')"; return 1; }
+    step "$(L '添加域名反代站点（自动 HTTPS）')"
+    divider
+
+    local id domain upstream mode="https" port="443" insecure=0 remark="" ans
+    local re_dom='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+
+    while true; do
+        read -rp "$(L '请输入域名（如: nhk.example.com）:') " domain || { [ -n "$domain" ] || return 1; }
+        domain="$(printf '%s' "$domain" | tr -d ' \r\n')"
+        domain="${domain,,}"
+        if [[ "$domain" == *.* && "$domain" =~ $re_dom ]]; then break; fi
+        warn "$(L '域名格式不正确')"
+    done
+
+    echo "$(L '反代模式：')"
+    echo "  1) $(L '标准反代（本机/内网服务，自动 HTTPS + WebSocket/XHTTP 透传，推荐）')"
+    echo "  2) $(L '反代远程站点（自动改写 Host 头，支持 HTTPS 上游）')"
+    echo "  3) $(L 'HTTP 明文反代 / 自定义端口（适合套 Cloudflare CDN 灵活模式或非 443 端口）')"
+    read -rp "$(L '选择 [1-3，默认 1]: ')" ans || { [ -n "$ans" ] || return 1; }
+    case "${ans:-1}" in
+        2) mode="remote" ;;
+        3)
+            mode="http"
+            read -rp "$(L '本机监听端口 (1-65535): ') [default 80]: " port || { [ -n "$port" ] || return 1; }
+            port="${port:-80}"
+            validate_port "$port" || { warn "$(L '端口不合法')"; return 1; }
+            port=$((10#$port))
+            ;;
+        *) mode="https" ;;
+    esac
+
+    if [ "$mode" != "http" ]; then
+        check_domain_dns "$domain" || true
+        local occ=""
+        occ="$(check_port_occupied_by_other tcp 443 caddy || true)"
+        if [ -n "$occ" ]; then
+            warn "$(L '端口 ')443$(L ' 已被其他进程占用：')"
+            echo "$occ"
+            confirm "$(L '仍要继续添加？')" n || return 0
+        fi
+    fi
+
+    while true; do
+        read -rp "$(L '上游目标地址（如 127.0.0.1:8080 或 https://example.com）: ')" upstream || { [ -n "$upstream" ] || return 1; }
+        upstream="$(printf '%s' "$upstream" | tr -d ' \r\n')"
+        if [[ "$upstream" =~ ^[A-Za-z0-9._:/\[\]-]+$ ]] && [[ "$upstream" == *:* ]]; then break; fi
+        warn "$(L '目标地址格式不合法')"
+    done
+    if [[ "$upstream" == https://* ]]; then
+        if confirm "$(L '跳过上游 TLS 证书校验（自签上游选 y）？')" n; then insecure=1; fi
+    fi
+
+    read -rp "$(L '规则备注（可选）: ')" remark || { [ -n "$remark" ] || return 1; }
+    remark="${remark//\"/}"
+
+    id="$(caddy_next_id)"
+    local env_file="${CADDY_SITES_DIR}/${id}.env"
+    install -d -m 755 "$CADDY_SITES_DIR"
+    cat > "$env_file" << SITEEOF
+SITE_ID="${id}"
+SITE_ENABLED="1"
+SITE_DOMAIN="${domain}"
+SITE_MODE="${mode}"
+SITE_PORT="${port}"
+SITE_UPSTREAM="${upstream}"
+SITE_INSECURE="${insecure}"
+SITE_REMARK="$(dq_escape "$remark")"
+SITEEOF
+    chmod 600 "$env_file"
+
+    if ! caddy_reload_service; then
+        rm -f "$env_file" "${CADDY_SITES_DIR}/${id}.caddy"
+        caddy_reload_service >/dev/null 2>&1 || true
+        error "$(L 'Caddy 配置校验失败，已自动撤回改动')"
+    fi
+
+    if [ "$mode" = "http" ]; then
+        fw_allow_for_service "${port}/tcp"
+    else
+        fw_allow_for_service "80/tcp" "443/tcp" "443/udp"
+    fi
+    reserved_ports_sync || true
+    success "$(L '反代站点已生效：')${domain} -> ${upstream}"
+}
+
+caddy_list_sites() {
+    step "$(L '反代站点列表')"
+    divider
+    local f idx=0 st
+    while IFS= read -r f; do
+        idx=$((idx + 1))
+        (
+            # shellcheck disable=SC1090
+            source "$f" 2>/dev/null || exit 0
+            if [ "${SITE_ENABLED:-0}" = "1" ]; then st="${GREEN}$(L '启用')${NC}"; else st="${YELLOW}$(L '停用')${NC}"; fi
+            local pinfo=""
+            [ "${SITE_MODE:-https}" = "http" ] && pinfo=":${SITE_PORT:-80} [HTTP]" || pinfo=" [HTTPS/${SITE_MODE}]"
+            echo -e "  ${BOLD}${idx})${NC} [${SITE_ID}] ${st}  ${CYAN}${SITE_DOMAIN}${pinfo}${NC} -> ${GREEN}${SITE_UPSTREAM}${NC}${SITE_REMARK:+  # ${SITE_REMARK}}"
+        )
+    done < <(caddy_site_files)
+    [ "$idx" -eq 0 ] && info "$(L '暂无反代站点')"
+}
+
+caddy_pick_site() {
+    local -a files=()
+    local f choice
+    while IFS= read -r f; do files+=("$f"); done < <(caddy_site_files)
+    [ "${#files[@]}" -gt 0 ] || { info "$(L '暂无反代站点')"; return 1; }
+    caddy_list_sites
+    echo ""
+    read -rp "$(L '输入站点序号（回车取消）: ')" choice || { [ -n "$choice" ] || return 1; }
+    [[ -n "$choice" && "$choice" =~ ^[0-9]+$ ]] || return 1
+    choice=$((10#$choice))
+    [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ] || { warn "$(L '序号无效')"; return 1; }
+    PICKED_SITE_FILE="${files[$((choice - 1))]}"
+    return 0
+}
+
+caddy_toggle_site() {
+    caddy_pick_site || return 0
+    local f="$PICKED_SITE_FILE" cur next
+    cur="$(grep -m1 '^SITE_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
+    sed -i "s|^SITE_ENABLED=.*|SITE_ENABLED=\"${next}\"|" "$f"
+    caddy_reload_service && success "$(L '站点状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+}
+
+caddy_edit_site() {
+    caddy_pick_site || return 0
+    local f="$PICKED_SITE_FILE" bak ans
+    # shellcheck disable=SC1090
+    source "$f"
+    local domain="$SITE_DOMAIN" upstream="$SITE_UPSTREAM" mode="$SITE_MODE" port="${SITE_PORT:-443}" insecure="${SITE_INSECURE:-0}" remark="${SITE_REMARK:-}"
+    read -rp "$(L '请输入域名（如: nhk.example.com）:') [${domain}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    [ -n "$ans" ] && domain="${ans,,}"
+    read -rp "$(L '上游目标地址（如 127.0.0.1:8080 或 https://example.com）: ') [${upstream}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    [ -n "$ans" ] && upstream="${ans//[[:space:]]/}"
+    read -rp "$(L '规则备注（可选）: ') [${remark}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+    [ -n "$ans" ] && remark="${ans//\"/}"
+    bak="${f}.bak"
+    cp -f "$f" "$bak"
+    cat > "$f" << SITEEOF
+SITE_ID="${SITE_ID}"
+SITE_ENABLED="${SITE_ENABLED}"
+SITE_DOMAIN="${domain}"
+SITE_MODE="${mode}"
+SITE_PORT="${port}"
+SITE_UPSTREAM="${upstream}"
+SITE_INSECURE="${insecure}"
+SITE_REMARK="$(dq_escape "$remark")"
+SITEEOF
+    chmod 600 "$f"
+    if ! caddy_reload_service; then
+        mv -f "$bak" "$f"
+        caddy_reload_service >/dev/null 2>&1 || true
+        error "$(L 'Caddy 配置校验失败，已自动撤回改动')"
+    fi
+    rm -f "$bak"
+    success "$(L '反代站点已生效：')${domain} -> ${upstream}"
+}
+
+caddy_delete_site() {
+    caddy_pick_site || return 0
+    local f="$PICKED_SITE_FILE"
+    # shellcheck disable=SC1090
+    source "$f"
+    confirm "$(L '确认删除反代站点 ')${SITE_DOMAIN}$(L '？')" n || return 0
+    rm -f "$f" "${CADDY_SITES_DIR}/${SITE_ID}.caddy"
+    caddy_reload_service || true
+    reserved_ports_sync || true
+    success "$(L '已删除反代站点 ')${SITE_DOMAIN}"
+}
+
+caddy_show_config() {
+    step "$(L '查看当前 Caddyfile 配置')"
+    divider
+    [ -f "$CADDY_FILE" ] && cat "$CADDY_FILE"
+    local c
+    for c in "${CADDY_SITES_DIR}"/*.caddy; do
+        [ -f "$c" ] || continue
+        echo ""
+        echo -e "${CYAN}# === $(basename "$c") ===${NC}"
+        cat "$c"
+    done
+}
+
+caddy_uninstall_do() {
+    if ! caddy_installed && [ ! -d "$CADDY_DIR" ] && [ ! -f "$CADDY_SERVICE" ]; then return 0; fi
+    systemctl disable --now adam-caddy 2>/dev/null || true
+    rm -f "$CADDY_SERVICE" "$CADDY_BIN" "$CADDY_BIN_BACKUP"
+    systemctl daemon-reload || true
+    if confirm "$(L '同时删除配置目录') ${CADDY_DIR}$(L '？')" n; then
+        rm -rf "$CADDY_DIR" "$CADDY_DATA_DIR"
+        userdel adam-caddy >/dev/null 2>&1 || true
+    fi
+    reserved_ports_sync || true
+    success "$(L 'Caddy 已卸载')"
+}
+
+# ── Cloudflare Tunnel (cloudflared) ─────────────────────────────
+
+cf_tunnel_latest_tag() {
+    local tag=""
+    tag="$(curl -fsS --max-time 20 "https://api.github.com/repos/${CF_TUNNEL_REPO}/releases/latest" 2>/dev/null \
+        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
+    if [ -z "$tag" ]; then
+        tag="$(curl -fsSI --max-time 20 "https://github.com/${CF_TUNNEL_REPO}/releases/latest" 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
+    fi
+    printf '%s' "$tag"
+}
+
+cf_tunnel_install() {
+    step "$(L '安装 / 更新 cloudflared（官方仓库）')"
+    divider
+    local arch asset tag url api_json digest actual
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l)        arch="arm" ;;
+        *) error "$(L '不支持的架构:') $(uname -m)" ;;
+    esac
+    info "$(L '正在查询 cloudflared 官方最新版本...')"
+    tag="$(cf_tunnel_latest_tag)"
+    [ -n "$tag" ] || error "$(L '无法获取 cloudflared 最新版本号，请检查网络')"
+    asset="cloudflared-linux-${arch}"
+    url="https://github.com/${CF_TUNNEL_REPO}/releases/download/${tag}/${asset}"
+    make_workdir || return 1
+    local wd="$WORKDIR"
+    curl -fL --retry 3 --connect-timeout 10 --max-time 300 -o "${wd}/cloudflared" "$url" || error "$(L '下载失败:') ${url}"
+    actual="$(sha256sum "${wd}/cloudflared" | awk '{print $1}')"
+    api_json="$(curl -fsS --max-time 20 "https://api.github.com/repos/${CF_TUNNEL_REPO}/releases/tags/${tag}" 2>/dev/null || true)"
+    digest=""
+    if [ -n "$api_json" ] && command -v python3 >/dev/null 2>&1; then
+        digest="$(printf '%s' "$api_json" | ASSET="$asset" python3 -c 'import json,os,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for a in d.get("assets",[]):
+    if a.get("name")==os.environ["ASSET"]:
+        print((a.get("digest") or "").replace("sha256:",""))
+        break' 2>/dev/null || true)"
+    fi
+    if [ -n "$digest" ] && [ "$digest" != "$actual" ]; then
+        error "$(L 'SHA256 校验失败（官方') ${digest}$(L '，实际') ${actual}$(L '），已中止')"
+    fi
+    chmod 755 "${wd}/cloudflared"
+    "${wd}/cloudflared" --version >/dev/null 2>&1 || error "$(L '下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动')"
+    [ -f "$CF_TUNNEL_BIN" ] && cp -f "$CF_TUNNEL_BIN" "$CF_TUNNEL_BIN_BACKUP" 2>/dev/null || true
+    install -m 755 "${wd}/cloudflared" "$CF_TUNNEL_BIN"
+    if [ -f "$CF_TUNNEL_SERVICE" ] && systemctl is-enabled --quiet adam-cloudflared 2>/dev/null; then
+        systemctl restart adam-cloudflared 2>/dev/null || true
+    fi
+    success "$(L 'cloudflared 安装完成') (${tag})"
+}
+
+cf_tunnel_setup_token() {
+    cf_tunnel_installed || cf_tunnel_install || return 1
+    step "$(L '配置持久化隧道（粘贴 Zero Trust Token）')"
+    divider
+    local token=""
+    read -rsp "$(L '粘贴 Cloudflare Zero Trust Tunnel Token（输入不回显）: ')" token || { [ -n "$token" ] || return 1; }; echo
+    token="$(printf '%s' "$token" | tr -d ' \r\n')"
+    [ -n "$token" ] || { warn "$(L 'Token 不能为空')"; return 1; }
+    install -d -m 700 "$CF_TUNNEL_DIR"
+    printf 'TUNNEL_TOKEN="%s"\n' "$(dq_escape "$token")" > "$CF_TUNNEL_ENV"
+    chmod 600 "$CF_TUNNEL_ENV"
+    write_service_unit "$CF_TUNNEL_SERVICE" "Adam Cloudflare Tunnel" "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" "60" "" "" \
+        "${CF_TUNNEL_BIN} --no-autoupdate tunnel run" "" "65536" "always" "5" \
+        "EnvironmentFile=${CF_TUNNEL_ENV}
+ProtectSystem=full
+ProtectHome=read-only" "StartLimitBurst=10"
+    systemctl daemon-reload
+    systemctl enable adam-cloudflared >/dev/null 2>&1 || true
+    if svc_restart_wait adam-cloudflared 3 20; then
+        success "$(L 'Cloudflare Tunnel 持久化服务已启动')"
+    else
+        warn "$(L 'Cloudflare Tunnel 启动失败，请查看日志：journalctl -u adam-cloudflared -n 20 --no-pager')"
+        return 1
+    fi
+}
+
+cf_tunnel_quick() {
+    cf_tunnel_installed || cf_tunnel_install || return 1
+    step "$(L '启动临时快速隧道（trycloudflare.com，免配置）')"
+    divider
+    local port=""
+    read -rp "$(L '输入本地服务端口（如 8080，将映射到 *.trycloudflare.com）: ')" port || { [ -n "$port" ] || return 1; }
+    validate_port "$port" || { warn "$(L '端口不合法')"; return 1; }
+    info "Ctrl+C 停止临时隧道 ..."
+    "$CF_TUNNEL_BIN" tunnel --url "http://127.0.0.1:$((10#$port))" || true
+}
+
+cf_tunnel_uninstall_do() {
+    if ! cf_tunnel_installed && [ ! -d "$CF_TUNNEL_DIR" ] && [ ! -f "$CF_TUNNEL_SERVICE" ]; then return 0; fi
+    systemctl disable --now adam-cloudflared 2>/dev/null || true
+    rm -f "$CF_TUNNEL_SERVICE" "$CF_TUNNEL_BIN" "$CF_TUNNEL_BIN_BACKUP"
+    systemctl daemon-reload || true
+    if confirm "$(L '同时删除配置目录') ${CF_TUNNEL_DIR}$(L '？')" n; then
+        rm -rf "$CF_TUNNEL_DIR"
+    fi
+    success "$(L 'cloudflared 已卸载')"
+}
+
+cf_tunnel_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        echo -e "${BOLD}${CYAN}━━━ $(L 'Cloudflare Tunnel 管理（Zero Trust / 临时隧道）') ━━━${NC}"
+        echo -e "  $(L '当前状态:') $([ -x "$CF_TUNNEL_BIN" ] && "$CF_TUNNEL_BIN" --version 2>/dev/null | head -1 || echo "$(L '未安装')") · $(svc_state adam-cloudflared)"
+        divider
+        echo -e "  ${GREEN}1)${NC} $(L '安装 / 更新 cloudflared（官方仓库）')"
+        echo -e "  ${GREEN}2)${NC} $(L '配置持久化隧道（粘贴 Zero Trust Token）')"
+        echo -e "  ${GREEN}3)${NC} $(L '启动临时快速隧道（trycloudflare.com，免配置）')"
+        echo -e "  ${GREEN}4)${NC} $(L '查看隧道状态与日志')"
+        echo -e "  ${GREEN}5)${NC} $(L '重启持久化隧道')"
+        echo -e "  ${GREEN}6)${NC} ${RED}$(L '停用 / 卸载 cloudflared')${NC}"
+        echo -e "  ${GREEN}0)${NC} $(L '返回')"
+        divider
+        read -rp "$(L '请选择') [0-6]: " choice
+        case "$choice" in
+            1) run_action cf_tunnel_install ;;
+            2) run_action cf_tunnel_setup_token ;;
+            3) run_action cf_tunnel_quick ;;
+            4) run_action bash -c 'systemctl status adam-cloudflared --no-pager || true; journalctl -u adam-cloudflared -n 20 --no-pager || true' ;;
+            5) run_action svc_restart_wait adam-cloudflared 2 15 ;;
+            6) run_action cf_tunnel_uninstall_do ;;
+            0) return 0 ;;
+            *) warn "$(L '无效选择')" ;;
+        esac
+        pause_return
+    done
+}
+
+proxy_menu() {
+    local choice
+    while true; do
+        clear 2>/dev/null || true
+        maint_load
+        echo -e "${BOLD}${CYAN}━━━ $(L '一键域名反代管理') ━━━${NC}"
+        echo -e "  $(L '当前状态:') $(proxy_state_text)"
+        divider
+        echo -e "  ${BOLD}── Caddy $(L '域名反代') ──${NC}"
+        echo -e "  ${GREEN}1)${NC}  $(L '安装 / 更新 Caddy（官方仓库）')"
+        echo -e "  ${GREEN}2)${NC}  $(L '添加域名反代站点（自动 HTTPS）')"
+        echo -e "  ${GREEN}3)${NC}  $(L '查看反代站点列表')"
+        echo -e "  ${GREEN}4)${NC}  $(L '编辑反代站点')"
+        echo -e "  ${GREEN}5)${NC}  $(L '启用 / 停用站点')"
+        echo -e "  ${GREEN}6)${NC}  $(L '删除反代站点')"
+        echo -e "  ${GREEN}7)${NC}  $(L '查看当前 Caddyfile 配置')"
+        echo -e "  ${GREEN}8)${NC}  $(L 'Caddy 自动更新 开 / 关') [$(maint_onoff "${MAINT_CADDY_AUTO:-0}")]"
+        echo -e "  ${GREEN}9)${NC}  $(L '重启 Caddy / 查看状态与日志')"
+        echo -e "  ${GREEN}10)${NC} ${RED}$(L '卸载 Caddy')${NC}"
+        echo -e "  ${BOLD}── Cloudflare Tunnel ──${NC}"
+        echo -e "  ${GREEN}11)${NC} $(L 'Cloudflare Tunnel 管理（Zero Trust / 临时隧道）')"
+        echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
+        divider
+        read -rp "$(L '请选择') [0-11]: " choice
+        case "$choice" in
+            1)  run_action caddy_install ;;
+            2)  run_action caddy_add_site ;;
+            3)  run_action caddy_list_sites ;;
+            4)  run_action caddy_edit_site ;;
+            5)  run_action caddy_toggle_site ;;
+            6)  run_action caddy_delete_site ;;
+            7)  run_action caddy_show_config ;;
+            8)  run_action maint_toggle MAINT_CADDY_AUTO ;;
+            9)  run_action bash -c 'systemctl restart adam-caddy 2>/dev/null || true; systemctl status adam-caddy --no-pager || true; journalctl -u adam-caddy -n 20 --no-pager || true' ;;
+            10) run_action caddy_uninstall_do ;;
+            11) cf_tunnel_menu ;;
+            0)  return 0 ;;
+            *)  warn "$(L '无效选择')" ;;
+        esac
+        pause_return
+    done
+}
+
+proxy_cli() {
+    local sub="${1:-menu}"
+    [ "$#" -gt 0 ] && shift
+    case "$sub" in
+        menu)      proxy_menu ;;
+        install|update) caddy_install ;;
+        add)       caddy_add_site ;;
+        list)      caddy_list_sites ;;
+        edit)      caddy_edit_site ;;
+        toggle)    caddy_toggle_site ;;
+        delete)    caddy_delete_site ;;
+        config)    caddy_show_config ;;
+        auto)      maint_toggle MAINT_CADDY_AUTO ;;
+        restart)   caddy_reload_service && success "$(L '已重启')" ;;
+        status)    systemctl status adam-caddy --no-pager || true ;;
+        logs)      journalctl -u adam-caddy -f || true ;;
+        uninstall) caddy_uninstall_do ;;
+        tunnel)    cf_tunnel_cli "$@" ;;
+        *) error "$(L '未知的 proxy 子命令:') ${sub}" ;;
+    esac
+}
+
+cf_tunnel_cli() {
+    local sub="${1:-menu}"
+    [ "$#" -gt 0 ] && shift
+    case "$sub" in
+        menu)      cf_tunnel_menu ;;
+        install|update) cf_tunnel_install ;;
+        token)     cf_tunnel_setup_token ;;
+        quick)     cf_tunnel_quick ;;
+        restart)   svc_restart_wait adam-cloudflared 2 15 ;;
+        status)    systemctl status adam-cloudflared --no-pager || true ;;
+        logs)      journalctl -u adam-cloudflared -f || true ;;
+        uninstall) cf_tunnel_uninstall_do ;;
+        *) error "$(L '未知的 proxy 子命令:') ${sub}" ;;
+    esac
+}
+
 usage() {
     cat << USAGEEOF
 $(L '用法'): adam [$(L '命令')]          $(L '（')$(L '不带参数 = 打开主菜单')$(L '）')
 
-$(L '主菜单'): 1 Nowhere · 2 Snell · 3 Xray · 4 $(L '脚本更新') · 5 $(L '防火墙') · 6 Fail2ban · 7 $(L '系统调优') · 8 $(L '自动维护') · 9 Realm $(L '端口转发')
+$(L '主菜单'): 1 Nowhere · 2 Snell · 3 Xray · 4 $(L '脚本更新') · 5 $(L '防火墙') · 6 Fail2ban · 7 $(L '系统调优') · 8 $(L '自动维护') · 9 Realm · 10 $(L '域名反代')
 
 Nowhere:
   $(L 'nowhere                    打开 Nowhere 菜单')
@@ -12534,7 +14110,11 @@ Xray (SS / VLESS):
 
 Realm $(L '端口转发'):
   $(L 'realm                      打开 Realm 端口转发菜单')
-  realm install | add | list | toggle | delete | test | restart | status | logs | export | import | uninstall
+  realm install | add | batch | edit | list | toggle | delete | test | config | tune | auto | restart | status | logs | export | import | uninstall
+
+$(L '域名反代') (Caddy / Cloudflare Tunnel):
+  $(L 'proxy                      打开域名反代菜单（Caddy / Cloudflare Tunnel）')
+  $(L 'caddy / tunnel             直接操作 Caddy 反代或 Cloudflare Tunnel')
 
 $(L '系统与网络调优:')
   $(L 'tune                       打开调优菜单')
@@ -12584,6 +14164,7 @@ run_interactive_menu() {
             7) tune_menu ;;
             8) maint_menu ;;
             9) realm_menu ;;
+            10) proxy_menu ;;
             0) exit 0 ;;
             *) warn "$(L '无效选择')"; pause_return ;;
         esac
@@ -12617,7 +14198,9 @@ case "$ACTION" in
     nowhere)    nowhere_menu ;;
     script)     script_menu ;;
     xray)       xray_cli "${ACTION_ARGS[@]}" ;;
-    realm)      realm_cli "${ACTION_ARGS[@]}" ;;
+    realm|pf)   realm_cli "${ACTION_ARGS[@]}" ;;
+    proxy|caddy) proxy_cli "${ACTION_ARGS[@]}" ;;
+    tunnel)     cf_tunnel_cli "${ACTION_ARGS[@]}" ;;
     tune)       tune_cli "${ACTION_ARGS[@]}" ;;
     auto|maint) maint_menu ;;
     watchdog)   maint_watchdog ;;
