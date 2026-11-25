@@ -379,6 +379,7 @@ REALM_BIN="/usr/local/bin/realm"
 REALM_BIN_BACKUP="/usr/local/bin/realm.previous"
 REALM_DIR="/etc/adam-realm"
 REALM_CONF_D="${REALM_DIR}/conf.d"
+REALM_CONFIG_FILE="${REALM_DIR}/config.toml"
 REALM_RULE_DIR="${REALM_DIR}/rules"
 REALM_VERSION_FILE="${REALM_DIR}/version.txt"
 REALM_SERVICE="/etc/systemd/system/adam-realm.service"
@@ -11729,7 +11730,7 @@ realm_write_service() {
         warn "$(L '创建 adam-realm 用户失败，改以 root 运行服务')"
         run_user=""; run_group=""
     fi
-    write_service_unit "$REALM_SERVICE" "Adam Realm Port Forwarder" "https://github.com/${REALM_REPO}" "60" "$run_user" "$run_group" "${REALM_BIN} -c ${REALM_CONF_D}" "CAP_NET_BIND_SERVICE CAP_NET_RAW" "1048576" "always" "3" "ProtectSystem=full
+    write_service_unit "$REALM_SERVICE" "Adam Realm Port Forwarder" "https://github.com/${REALM_REPO}" "60" "$run_user" "$run_group" "${REALM_BIN} -c ${REALM_CONFIG_FILE}" "CAP_NET_BIND_SERVICE CAP_NET_RAW" "1048576" "always" "3" "ProtectSystem=full
 ProtectHome=read-only" "StartLimitBurst=10"
     systemctl daemon-reload || true
 }
@@ -11855,6 +11856,30 @@ realm_rebuild_all() {
         id="${id#rule-}"
         [ -f "${REALM_RULE_DIR}/${id}.env" ] || rm -f "$t"
     done
+    # 合并为单个 /etc/adam-realm/config.toml：zhboner/realm 目录模式要求每个 .toml 都含 endpoints 字段，
+    # 单独的 00-base.toml 会触发 missing field `endpoints` 崩溃；合并单文件同时避免目录读取顺序不确定。
+    local tmpcfg ep_cnt=0
+    tmpcfg="$(mktemp "${REALM_DIR}/.config.toml.XXXXXX")" || return 1
+    {
+        if [ -f "${REALM_CONF_D}/00-base.toml" ]; then
+            # 剔除可能残留的空 endpoints = []，避免与后续 [[endpoints]] 产生 TOML 重复键冲突
+            grep -vE '^[[:space:]]*endpoints[[:space:]]*=[[:space:]]*\[\][[:space:]]*$' "${REALM_CONF_D}/00-base.toml" || true
+        fi
+        for t in "${REALM_CONF_D}"/rule-*.toml; do
+            [ -f "$t" ] || continue
+            printf '
+'
+            cat "$t"
+            ep_cnt=$((ep_cnt + 1))
+        done
+        if [ "$ep_cnt" -eq 0 ]; then
+            printf '
+endpoints = []
+'
+        fi
+    } > "$tmpcfg" || { rm -f "$tmpcfg"; return 1; }
+    chmod 644 "$tmpcfg"
+    mv -f "$tmpcfg" "$REALM_CONFIG_FILE"
 }
 
 # 有启用规则时 enable+启动；无规则时 disable+停止；是否 enable 由此处决定
@@ -11872,6 +11897,10 @@ realm_reload_service() {
     if ! realm_installed; then
         info "$(L 'Realm 未安装，规则配置已保存，安装后生效')"
         return 0
+    fi
+    # 旧版服务文件若仍指向目录 -c conf.d，自动迁移为单文件 -c config.toml
+    if [ ! -f "$REALM_SERVICE" ] || grep -q -- "-c ${REALM_CONF_D}" "$REALM_SERVICE" 2>/dev/null; then
+        realm_write_service
     fi
     systemctl enable adam-realm >/dev/null 2>&1 || true
     if svc_restart_wait adam-realm 2 20; then
@@ -12761,19 +12790,17 @@ RULEEOF
 realm_show_config() {
     step "$(L '查看完整有效配置（TOML）')"
     divider
+    if [ -f "$REALM_CONFIG_FILE" ]; then
+        echo -e "${CYAN}# === ${REALM_CONFIG_FILE} ===${NC}"
+        cat "$REALM_CONFIG_FILE"
+        [ "$(realm_enabled_count)" -eq 0 ] && info "$(L '暂无转发规则')"
+        return 0
+    fi
     if [ -f "${REALM_CONF_D}/00-base.toml" ]; then
         echo -e "${CYAN}# === 00-base.toml ===${NC}"
         cat "${REALM_CONF_D}/00-base.toml"
     fi
-    local t any=0
-    for t in "${REALM_CONF_D}"/rule-*.toml; do
-        [ -f "$t" ] || continue
-        any=1
-        echo ""
-        echo -e "${CYAN}# === $(basename "$t") ===${NC}"
-        cat "$t"
-    done
-    [ "$any" -eq 0 ] && info "$(L '暂无转发规则')"
+    info "$(L '暂无转发规则')"
 }
 
 realm_tune_global() {
