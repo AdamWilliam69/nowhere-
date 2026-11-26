@@ -106,6 +106,11 @@ fw_is_allowed() {
             "ufw allow "*) rest="${line#ufw allow }" ;;
             *) continue ;;
         esac
+        # 跳过出站规则，剥离显式入站前缀 "in "
+        case "$rest" in
+            "out "*) continue ;;
+            "in "*)  rest="${rest#in }" ;;
+        esac
         # 带来源/接口的规则：ufw allow from 1.2.3.4 to any port 22,2222 proto tcp
         if [[ "$rest" == *" port "* ]]; then
             local p pr
@@ -136,8 +141,10 @@ fw_is_allowed() {
                     openssh|ssh)
                         if [ "$port" = "22" ] && [ "$proto" = "tcp" ]; then return 0; fi ;;
                     *)
-                        sp="$(getent services "$tok" 2>/dev/null | awk '{print $2}' | cut -d/ -f1 | head -1 || true)"
-                        if [ -n "$sp" ] && [ "$sp" = "$port" ]; then return 0; fi ;;
+                        if [ -z "$rp" ] || [ "$rp" = "$proto" ]; then
+                            sp="$(getent services "${tok}/${proto}" 2>/dev/null | awk '{print $2}' | cut -d/ -f1 | head -1 || true)"
+                            if [ -n "$sp" ] && [ "$sp" = "$port" ]; then return 0; fi
+                        fi ;;
                 esac
             fi
         done

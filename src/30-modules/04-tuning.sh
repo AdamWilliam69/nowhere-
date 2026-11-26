@@ -27,11 +27,13 @@ tcpfit_fetch() {
     want="$(secure_curl -fsSL --max-time 20 "${TCPFIT_RAW}/SHA256SUMS?t=${ts}" 2>/dev/null | awk '$2 == "tcpfit.sh" || $2 == "*tcpfit.sh" {print tolower($1); exit}' || true)"
     if [ -z "$want" ]; then
         warn "$(L '取不到仓库里的 SHA256SUMS，无法核对校验值（SHA256:') ${got}$(L '）')"
-        confirm "$(L '仍要继续？')" n || return 1
+        if [ ! -t 0 ] || [ "${ADAM_ASSUME_YES:-0}" = "1" ] || ! confirm "$(L '仍要继续？')" n; then
+            return 1
+        fi
     elif [ "$want" != "$got" ]; then
         warn "$(L 'SHA256 与仓库 SHA256SUMS 不一致（仓库') ${want}$(L '，实际') ${got}$(L '）')"
         warn "$(L '可能是作者刚更新、两个文件的缓存不同步，也可能是下载被篡改')"
-        confirm "$(L '仍要继续？')" n || return 1
+        return 1
     else
         success "$(L 'SHA256 与仓库 SHA256SUMS 一致')"
     fi
@@ -378,9 +380,11 @@ dns_menu() {
 # ── IPv4 / IPv6 优先级（getaddrinfo 的地址选择顺序，不关闭任何协议栈） ──
 
 ip_priority_current() {
-    local p4
+    local p4 p6
     p4="$(awk '$1 == "precedence" && $2 == "::ffff:0:0/96" {print $3}' /etc/gai.conf 2>/dev/null | tail -n 1 || true)"
-    if [[ "$p4" =~ ^[0-9]+$ ]] && [ "$p4" -ge 50 ]; then printf "$(L 'IPv4 优先')"; else printf "$(L 'IPv6 优先（系统默认）')"; fi
+    p6="$(awk '$1 == "precedence" && $2 == "::/0" {print $3}' /etc/gai.conf 2>/dev/null | tail -n 1 || true)"
+    [[ "$p6" =~ ^[0-9]+$ ]] || p6=40
+    if [[ "$p4" =~ ^[0-9]+$ ]] && [ "$p4" -gt "$p6" ]; then printf "$(L 'IPv4 优先')"; else printf "$(L 'IPv6 优先（系统默认）')"; fi
 }
 
 ip_priority_set() {   # ip_priority_set ipv4|ipv6
@@ -392,15 +396,18 @@ ip_priority_set() {   # ip_priority_set ipv4|ipv6
         if [ -f /etc/gai.conf ]; then cp -p /etc/gai.conf "$GAI_BACKUP"; else : > "${GAI_BACKUP}.absent"; fi
     fi
     # 原地只改两条 precedence 行，保留文件里其他 label/scopev4/reload 等条目
-    #（旧版整文件重写会丢掉发行版或用户原有的条目；注释掉的默认行不影响追加）
+    #（旧版整文件重写会丢掉发行版或用户原有的条目；兼容多空格/制表符及末尾无换行）
     [ -f /etc/gai.conf ] || : > /etc/gai.conf
-    if grep -q '^precedence ::ffff:0:0/96' /etc/gai.conf; then
-        sed -i "s/^precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  ${p4}/" /etc/gai.conf
+    if [ -s /etc/gai.conf ] && [ -n "$(tail -c 1 /etc/gai.conf 2>/dev/null)" ]; then
+        printf '\n' >> /etc/gai.conf
+    fi
+    if grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96([[:space:]]|$)' /etc/gai.conf; then
+        sed -i -E "s|^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96([[:space:]].*)?$|precedence ::ffff:0:0/96  ${p4}|" /etc/gai.conf
     else
         echo "precedence ::ffff:0:0/96  ${p4}" >> /etc/gai.conf
     fi
-    if grep -q '^precedence ::/0' /etc/gai.conf; then
-        sed -i "s/^precedence ::\/0.*/precedence ::\/0           ${p6}/" /etc/gai.conf
+    if grep -qE '^[[:space:]]*precedence[[:space:]]+::/0([[:space:]]|$)' /etc/gai.conf; then
+        sed -i -E "s|^[[:space:]]*precedence[[:space:]]+::/0([[:space:]].*)?$|precedence ::/0           ${p6}|" /etc/gai.conf
     else
         echo "precedence ::/0           ${p6}" >> /etc/gai.conf
     fi
@@ -533,10 +540,10 @@ services_adapt_ipv6() {
                     sed -i 's/^RULE_LIP="0.0.0.0"$/RULE_LIP="[::]"/' "$_rf"; _rchg=1
                 fi
             else
-                if grep -q '^RULE_LIP="\[::\]"$' "$_rf"; then
+                if grep -qE '^RULE_LIP="(\[::\]|::)"$' "$_rf"; then
                     [ -n "$_rbak" ] || { make_workdir || return 1; _rbak="$WORKDIR/realm_rules"; mkdir -p "$_rbak"; }
                     cp -a "$_rf" "$_rbak/" 2>/dev/null || true
-                    sed -i 's/^RULE_LIP="\[::\]"$/RULE_LIP="0.0.0.0"/' "$_rf"; _rchg=1
+                    sed -i -E 's/^RULE_LIP="(\[::\]|::)"$/RULE_LIP="0.0.0.0"/' "$_rf"; _rchg=1
                 fi
             fi
         done < <(realm_rule_files)
@@ -714,6 +721,7 @@ tune_cli() {
 do_update_script() {
     step "$(L '更新管理脚本')"
     divider
+    maint_load
     local tmp remote_ver
     make_workdir || return 1
     tmp="$WORKDIR/manager.sh"

@@ -12,15 +12,16 @@
 # state_load file "VAR=default ..." [whitelist_var "v1 v2 ..."]：读状态文件（不存在则用默认值）；
 # 白名单变量取值非法时重置为默认值。state_save file dir dir_mode VAR...：写状态文件（文件 600）。
 state_load() {
-    local file="$1" defs="$2" wl_var="${3:-}" wl_vals="${4:-}" kv k v cur ok x wl_def=""
+    local file="$1" defs="$2" wl_var="${3:-}" wl_vals="${4:-}" kv k v cur ok x wl_def="" allowed=" "
     while IFS= read -r kv; do
         [ -n "$kv" ] || continue
         k="${kv%%=*}"; v="${kv#*=}"
         printf -v "$k" '%s' "$v"
+        allowed="${allowed}${k} "
         [ "$k" = "$wl_var" ] && wl_def="$v"
     done < <(printf '%s\n' "$defs" | tr ' ' '\n' | grep -v '^$')
     if [ -f "$file" ] && [ ! -L "$file" ]; then
-        # v8.6：逐行安全校验后再 source，拒绝任意命令注入或逃逸引号
+        # v8.6：逐行安全校验后再 source，仅允许 $defs 中声明的键，拒绝任意变量或命令注入
         local _sl_ok=1 _sl_line _sl_k _sl_r _sl_v
         while IFS= read -r _sl_line || [ -n "$_sl_line" ]; do
             case "$_sl_line" in
@@ -29,6 +30,7 @@ state_load() {
                 *) _sl_ok=0; break ;;
             esac
             [[ "$_sl_k" =~ ^[A-Z][A-Z0-9_]+$ ]] || { _sl_ok=0; break; }
+            [[ "$allowed" == *" ${_sl_k} "* ]] || { _sl_ok=0; break; }
             case "$_sl_r" in
                 \"*\") _sl_v="${_sl_r:1:${#_sl_r}-2}" ;;
                 *) _sl_ok=0; break ;;
@@ -388,7 +390,7 @@ script_fetch_remote() {
     sha_url="${SCRIPT_SHA256_URL:-${SCRIPT_URL}.sha256}"
     sha_txt="$(secure_curl -fsSL --max-time 20 "${sha_url}?t=${ts}" 2>/dev/null \
         || secure_curl -fsSL --max-time 20 "$sha_url" 2>/dev/null || true)"
-    expected="$(printf '%s\n' "$sha_txt" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9a-fA-F]{64}$/){print tolower($i); exit}}' || true)"
+    expected="$(printf '%s\n' "$sha_txt" | awk '{for(i=1;i<=NF;i++) if(length($i)==64 && $i ~ /^[0-9a-fA-F]+$/){print tolower($i); exit}}' || true)"
     if [ -n "$expected" ]; then
         actual="$(sha256sum "$dst" 2>/dev/null | awk '{print tolower($1)}' || true)"
         if [ "$actual" != "$expected" ]; then
@@ -469,7 +471,8 @@ maint_daily() {
     maint_lock 300 || return 0
     if [ "$MAINT_SCRIPT_AUTO" = "1" ] && [ "${ADAM_REEXEC:-0}" != "1" ]; then
         if script_self_update_auto; then
-            # 换成新脚本继续跑后面的步骤，让新逻辑当天就生效
+            # 换成新脚本继续跑后面的步骤，让新逻辑当天就生效（exec 前显式清理临时目录）
+            _cleanup
             exec 9>&- || true
             ADAM_REEXEC=1 exec "$MANAGER_PATH" maintain
         fi
@@ -616,7 +619,7 @@ do_backup() {
         # 展示明文清单前先读取，再删除明文临时文件
         tar -tzf "$tmp_tgz" 2>/dev/null | awk 'NR<=20' || true
         rm -f "$tmp_tgz"
-        ls -1t "${bdir}"/adam-backup-*.tgz "${bdir}"/adam-backup-*.tgz.enc 2>/dev/null | tail -n +6 | tr '\n' '\0' | xargs -r -0 rm -f
+        { ls -1t "${bdir}"/adam-backup-*.tgz "${bdir}"/adam-backup-*.tgz.enc 2>/dev/null || true; } | tail -n +6 | tr '\n' '\0' | xargs -r -0 rm -f
         success "$(L '加密备份已保存：')${dest}$(L '（AES-256-CBC PBKDF2，只留最近 5 份）')"
         info "$(L '注意：请妥善牢记加密口令，遗忘后无法恢复；定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 11）')"
         return 0
@@ -625,7 +628,7 @@ do_backup() {
     # v8.6（BUG-10）：创建即 umask 077，消除 tar 写入与 chmod 600 之间的世界可读窗口
     ( umask 077; tar -czf "$dest" "${dirs[@]}" 2>/dev/null ) || error "$(L '打包失败')"
     chmod 600 "$dest"
-    ls -1t "${bdir}"/adam-backup-*.tgz "${bdir}"/adam-backup-*.tgz.enc 2>/dev/null | tail -n +6 | tr '\n' '\0' | xargs -r -0 rm -f
+    { ls -1t "${bdir}"/adam-backup-*.tgz "${bdir}"/adam-backup-*.tgz.enc 2>/dev/null || true; } | tail -n +6 | tr '\n' '\0' | xargs -r -0 rm -f
     success "$(L '备份已保存：')${dest}$(L '（只留最近 5 份）')"
     warn "$(L '备份含共享密钥与证书私钥，只能放本机，勿外发、勿传网盘')"
     info "$(L '注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 11）')"
@@ -640,8 +643,8 @@ do_restore() {
         read -rp "$(L '备份文件路径（/root/adam-backup-')*$(L '.tgz 或 .tgz.enc）:') " file || { [ -n "$file" ] || return 1; }
     fi
     [ -f "$file" ] || error "$(L '找不到备份文件：')${file}"
-    magic="$(head -c 8 "$file" 2>/dev/null || true)"
-    if [[ "$file" == *.enc ]] || [ "$magic" = "Salted__" ]; then
+    magic="$(od -An -tx1 -N 8 "$file" 2>/dev/null | tr -d ' \t\r\n' || true)"
+    if [[ "$file" == *.enc ]] || [ "$magic" = "53616c7465645f5f" ]; then
         is_enc=1
     fi
     if [ "$is_enc" = "1" ]; then
@@ -779,7 +782,8 @@ _doctor_json() {
     disk_mb="$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
     [[ "$disk_mb" =~ ^[0-9]+$ ]] || disk_mb=0
     if command -v ufw >/dev/null 2>&1; then
-        fw_st="$(ufw status 2>/dev/null | awk 'NR==1 {print $2}' || echo 'unknown')"
+        fw_st="$(LC_ALL=C ufw status 2>/dev/null | awk 'NR==1 {print $2}' || true)"
+        [ -n "$fw_st" ] || fw_st="unknown"
     fi
     for _pf in "$CONFIG_FILE" "$EGRESS_CONFIG_FILE" "$TLS_PIN_FILE" "$SNELL_STATE_FILE" "$XRAY_NODE_DIR" "$XRAY_FWD_DIR" "$XRAY_STATE_FILE" "$CADDY_DATA_DIR" "$CF_TUNNEL_DIR" "$CF_TUNNEL_ENV" "$MAINT_ENV" "$NOTIFY_ENV" /etc/cloudflare/credentials.ini; do
         _doctor_check_perm "$_pf" strict quiet || perm_list+=("$_pf")
@@ -836,9 +840,9 @@ do_doctor() {
     step "$(L '一键诊断（只读，不改任何配置）')"
     divider
     echo "  $(L '管理脚本 :') ${SCRIPT_VERSION}$(L '（适配 Nowhere') ${TARGET_NW_VERSION}$(L '） 语言：')${ADAM_LANG}"
-    echo "  Nowhere  : $([ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>&1 | head -1 || echo "$(L '未安装')") $(L '· 角色') $(current_role) · $(svc_state nowhere)"
+    echo "  Nowhere  : $(if [ -x "$BIN_PATH" ]; then "$BIN_PATH" --version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) $(L '· 角色') $(current_role) · $(svc_state nowhere)"
     echo "  Snell    : $([ -x "$SNELL_BIN" ] && { snell_installed_version; } || echo "$(L '未安装')") · $(svc_state snell)"
-    echo "  Xray     : $([ -x "$XRAY_BIN" ] && "$XRAY_BIN" version 2>&1 | head -1 || echo "$(L '未安装')") · $(svc_state adam-xray)"
+    echo "  Xray     : $(if [ -x "$XRAY_BIN" ]; then "$XRAY_BIN" version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) · $(svc_state adam-xray)"
     echo "  Realm    : $(realm_state_text)"
     echo "  $(L '域名反代') : $(proxy_state_text)"
     if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
@@ -1000,8 +1004,9 @@ do_repair_all() {
             fail=$((fail + 1))
         fi
     fi
-    [ -f "$MAINT_ENV" ] && chmod 600 "$MAINT_ENV" 2>/dev/null || true
-    [ -f "$NOTIFY_ENV" ] && chmod 600 "$NOTIFY_ENV" 2>/dev/null || true
+    [ -f "$MAINT_ENV" ] && [ ! -L "$MAINT_ENV" ] && chmod 600 "$MAINT_ENV" 2>/dev/null || true
+    [ -f "$NOTIFY_ENV" ] && [ ! -L "$NOTIFY_ENV" ] && chmod 600 "$NOTIFY_ENV" 2>/dev/null || true
+    [ -f /etc/cloudflare/credentials.ini ] && [ ! -L /etc/cloudflare/credentials.ini ] && chmod 600 /etc/cloudflare/credentials.ini 2>/dev/null || true
     reserved_ports_sync || true
     if ufw_active; then fw_sync_managed >/dev/null 2>&1 || true; fi
     maint_install_timers || true
@@ -1145,7 +1150,8 @@ do_export_clients() {
         esac
     fi
     xray_load_state 2>/dev/null || true
-    host="${XRAY_PUBLIC_HOST:-$(detect_public_host 2>/dev/null || echo 'YOUR_SERVER_IP')}"
+    host="${XRAY_PUBLIC_HOST:-$(detect_public_host 2>/dev/null || true)}"
+    [ -n "$host" ] || host="YOUR_SERVER_IP"
     case "$fmt" in
         mihomo|clash)
             printf '# Generated by Adam Manager v%s (Mihomo / Clash Meta)\n' "$SCRIPT_VERSION"
@@ -1163,8 +1169,8 @@ do_export_clients() {
                                     mfp="chrome"
                                 fi
                                 printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: "%s"\n    network: tcp\n    tls: true\n    udp: true\n    flow: xtls-rprx-vision\n    servername: "%s"\n    client-fingerprint: %s\n    reality-opts:\n      public-key: "%s"\n      short-id: "%s"\n' \
-                                    "${N_NAME:-$tag}" "$host" "$N_PORT" "$N_UUID" "$N_SNI" "$mfp" "$N_PBK" "$N_SID"
-                                [ -n "${N_PQV:-}" ] && printf '      # ML-DSA-65 pqv: %s\n' "$N_PQV"
+                                    "$(_json_escape "${N_NAME:-$tag}")" "$(_json_escape "$host")" "$N_PORT" "$(_json_escape "$N_UUID")" "$(_json_escape "$N_SNI")" "$mfp" "$(_json_escape "$N_PBK")" "$(_json_escape "$N_SID")"
+                                if [ -n "${N_PQV:-}" ]; then printf '      # ML-DSA-65 pqv: %s\n' "$N_PQV"; fi
                                 ;;
                             xhttp-reality)
                                 if [ "$mfp" = "randomized" ] || [ "$mfp" = "edge" ] || [ "$mfp" = "ios" ]; then
@@ -1172,37 +1178,42 @@ do_export_clients() {
                                     mfp="chrome"
                                 fi
                                 printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: "%s"\n    network: xhttp\n    tls: true\n    udp: true\n    servername: "%s"\n    client-fingerprint: %s\n    reality-opts:\n      public-key: "%s"\n      short-id: "%s"\n    xhttp-opts:\n      path: "%s"\n      mode: auto\n' \
-                                    "${N_NAME:-$tag}" "$host" "$N_PORT" "$N_UUID" "$N_SNI" "$mfp" "$N_PBK" "$N_SID" "$N_PATH"
-                                [ -n "${N_XPAD:-}" ] && printf '      # xPaddingBytes: %s\n' "$N_XPAD"
-                                [ -n "${N_PQV:-}" ] && printf '    # ML-DSA-65 pqv: %s\n' "$N_PQV"
+                                    "$(_json_escape "${N_NAME:-$tag}")" "$(_json_escape "$host")" "$N_PORT" "$(_json_escape "$N_UUID")" "$(_json_escape "$N_SNI")" "$mfp" "$(_json_escape "$N_PBK")" "$(_json_escape "$N_SID")" "$(_json_escape "$N_PATH")"
+                                if [ -n "${N_XPAD:-}" ]; then printf '      # xPaddingBytes: %s\n' "$N_XPAD"; fi
+                                if [ -n "${N_PQV:-}" ]; then printf '    # ML-DSA-65 pqv: %s\n' "$N_PQV"; fi
                                 ;;
                             xhttp-tls|xhttp-cdn)
                                 local srv="$host" prt="$N_PORT" mode="auto"
                                 if [ "$N_TYPE" = "xhttp-cdn" ]; then srv="$N_DOMAIN"; prt="$N_CPORT"; mode="packet-up"; fi
                                 printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: "%s"\n    network: xhttp\n    tls: true\n    udp: true\n    servername: "%s"\n    client-fingerprint: %s\n    xhttp-opts:\n      host: "%s"\n      path: "%s"\n      mode: %s\n' \
-                                    "${N_NAME:-$tag}" "$srv" "$prt" "$N_UUID" "$N_DOMAIN" "$mfp" "$N_DOMAIN" "$N_PATH" "$mode"
-                                [ -n "${N_XPAD:-}" ] && printf '      # xPaddingBytes: %s\n' "$N_XPAD"
+                                    "$(_json_escape "${N_NAME:-$tag}")" "$(_json_escape "$srv")" "$prt" "$(_json_escape "$N_UUID")" "$(_json_escape "$N_DOMAIN")" "$mfp" "$(_json_escape "$N_DOMAIN")" "$(_json_escape "$N_PATH")" "$mode"
+                                if [ -n "${N_XPAD:-}" ]; then printf '      # xPaddingBytes: %s\n' "$N_XPAD"; fi
                                 ;;
                             ss2022)
                                 printf '  - name: "%s"\n    type: ss\n    server: "%s"\n    port: %s\n    cipher: "%s"\n    password: "%s"\n    udp: true\n' \
-                                    "${N_NAME:-$tag}" "$host" "$N_PORT" "$N_METHOD" "$N_PASS"
+                                    "$(_json_escape "${N_NAME:-$tag}")" "$(_json_escape "$host")" "$N_PORT" "$(_json_escape "$N_METHOD")" "$(_json_escape "$N_PASS")"
                                 ;;
                         esac
+                        exit 0
                     )
                 done < <(xray_node_tags)
             fi
             if [ -f "$SNELL_CONF" ]; then
+                snell_load_state 2>/dev/null || true
+                local shost="${SNELL_PUBLIC_HOST:-$host}"
                 port="$(snell_port 2>/dev/null || true)"
                 psk="$(snell_conf_get psk "$SNELL_CONF" 2>/dev/null || true)"
                 if [ -n "$port" ] && [ -n "$psk" ]; then
                     printf '  - name: "Snell-%s"\n    type: snell\n    server: "%s"\n    port: %s\n    psk: "%s"\n    version: %s\n' \
-                        "$port" "$host" "$port" "$psk" "$SNELL_MAJOR"
+                        "$port" "$(_json_escape "$shost")" "$port" "$(_json_escape "$psk")" "$SNELL_MAJOR"
                 fi
                 while IFS= read -r port; do
                     [ -n "$port" ] || continue
                     psk="$(snell_conf_get psk "${SNELL_PORTS_DIR}/${port}.conf" 2>/dev/null || true)"
-                    [ -n "$psk" ] && printf '  - name: "Snell-%s"\n    type: snell\n    server: "%s"\n    port: %s\n    psk: "%s"\n    version: %s\n' \
-                        "$port" "$host" "$port" "$psk" "$SNELL_MAJOR"
+                    if [ -n "$psk" ]; then
+                        printf '  - name: "Snell-%s"\n    type: snell\n    server: "%s"\n    port: %s\n    psk: "%s"\n    version: %s\n' \
+                            "$port" "$(_json_escape "$shost")" "$port" "$(_json_escape "$psk")" "$SNELL_MAJOR"
+                    fi
                 done < <(snell_extra_ports)
             fi
             if [ -f "$CONFIG_FILE" ] && [ "$(current_role)" = "portal" ]; then
@@ -1239,11 +1250,16 @@ do_export_clients() {
         surge)
             printf '# Generated by Adam Manager v%s (Surge [Proxy])\n[Proxy]\n' "$SCRIPT_VERSION"
             if [ -f "$SNELL_CONF" ]; then
+                local _sline=""
                 port="$(snell_port 2>/dev/null || true)"
-                [ -n "$port" ] && printf '%s\n' "$(snell_client_line "$port" 2>/dev/null || true)"
+                if [ -n "$port" ] && _sline="$(snell_client_line "$port" 2>/dev/null)" && [ -n "$_sline" ]; then
+                    printf '%s\n' "$_sline"
+                fi
                 while IFS= read -r port; do
                     [ -n "$port" ] || continue
-                    printf '%s\n' "$(snell_client_line "$port" 2>/dev/null || true)"
+                    if _sline="$(snell_client_line "$port" 2>/dev/null)" && [ -n "$_sline" ]; then
+                        printf '%s\n' "$_sline"
+                    fi
                 done < <(snell_extra_ports)
             fi
             if [ -x "$XRAY_BIN" ] || [ -d "$XRAY_NODE_DIR" ]; then
@@ -1255,6 +1271,7 @@ do_export_clients() {
                             printf '%s = ss, %s, %s, encrypt-method=%s, password=%s, udp-relay=true\n' \
                                 "${N_NAME:-$tag}" "$host" "$N_PORT" "$N_METHOD" "$N_PASS"
                         fi
+                        exit 0
                     )
                 done < <(xray_node_tags)
             fi

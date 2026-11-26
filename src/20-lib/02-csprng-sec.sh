@@ -172,8 +172,44 @@ verify_elf_binary() {
     [ "$em" = "$want_em" ]
 }
 
+# github_extract_tag_names：从 stdin 的 GitHub Release API JSON（兼容多行与单行压缩格式）安全提取 tag_name 列表
+github_extract_tag_names() {
+    local json
+    json="$(cat)"
+    [ -n "$json" ] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c 'import json,sys
+try: data = json.load(sys.stdin)
+except Exception: sys.exit(0)
+items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+for r in items:
+    if isinstance(r, dict) and not r.get("draft"):
+        t = (r.get("tag_name") or "").strip()
+        if t and "/" not in t and "://" not in t:
+            print(t)' 2>/dev/null || true
+        return 0
+    fi
+    printf '%s\n' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | sed -E 's/^"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)"$/\1/' \
+        | awk 'index($0, "/") == 0 && index($0, "://") == 0 && length($0) > 0' || true
+}
+
+# github_latest_tag REPO：获取 GitHub 仓库最新正式版 tag（兼容压缩 JSON；失败自动回退 releases/latest 跳转）
+github_latest_tag() {
+    local repo="$1" tag=""
+    tag="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+        | github_extract_tag_names | head -n 1 || true)"
+    if [ -z "$tag" ] || [[ "$tag" == */* ]] || [[ "$tag" == *://* ]]; then
+        tag="$(secure_curl -fsSI --max-time 20 "https://github.com/${repo}/releases/latest" 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -n 1 || true)"
+    fi
+    if [ -n "$tag" ] && [[ "$tag" != */* ]] && [[ "$tag" != *://* ]]; then
+        printf '%s' "$tag"
+    fi
+}
+
 # github_asset_sha256 REPO TAG ASSET：提取 GitHub Release 官方资产 SHA256（64 位小写 hex）
-# 1) GitHub API releases/tags（Python 优先，无 Python 用纯 awk 状态机解析）
+# 1) GitHub API releases/tags（Python 优先，无 Python 用纯 awk 状态机解析，兼容嵌套 uploader 与旧版 mawk）
 # 2) API 被限流时自动回退抓取 github.com/.../releases/expanded_assets/<tag> 页面
 github_asset_sha256() {
     local repo="$1" tag="$2" asset="$3" json="" html="" digest=""
@@ -191,30 +227,30 @@ for a in data.get("assets", []):
         break' 2>/dev/null || true)"
     fi
     if [ -z "$digest" ] && [ -n "$json" ]; then
-        # 纯 awk 兜底：兼容多行与压缩 JSON，精确匹配资产对象内的 name 与 digest
+        # 纯 awk 兜底：兼容多行、压缩 JSON 及资产内的嵌套 uploader 对象，不使用 {64} 以兼容旧版 mawk
         digest="$(printf '%s\n' "$json" | awk -v want="$asset" '
-            BEGIN { RS="\\{"; FS="\"" }
+            BEGIN { RS="\\{"; FS="\""; cur_nm="" }
             {
-                nm=""; dg=""
+                dg=""
                 for (i = 2; i <= NF; i += 2) {
-                    if ($i == "name" && $(i+1) ~ /^[[:space:]]*:[[:space:]]*$/ && nm == "") nm = $(i+2)
-                    if ($i == "digest" && $(i+1) ~ /^[[:space:]]*:[[:space:]]*$/ && dg == "") dg = $(i+2)
+                    if ($i == "name" && $(i+1) ~ /^[[:space:]]*:[[:space:]]*$/) cur_nm = $(i+2)
+                    if ($i == "digest" && $(i+1) ~ /^[[:space:]]*:[[:space:]]*$/) dg = $(i+2)
                 }
-                if (nm == want && dg != "") {
+                if (cur_nm == want && dg != "") {
                     sub(/^sha256:/, "", dg)
                     dg = tolower(dg)
-                    if (dg ~ /^[0-9a-f]{64}$/) { print dg; exit }
+                    if (length(dg) == 64 && dg ~ /^[0-9a-f]+$/) { print dg; exit }
                 }
             }' 2>/dev/null || true)"
     fi
     if [ -z "$digest" ]; then
         html="$(secure_curl -fsSL --max-time 20 "https://github.com/${repo}/releases/expanded_assets/${tag}" 2>/dev/null || true)"
         if [ -n "$html" ]; then
-            digest="$(printf '%s\n' "$html" | awk -v want="/${asset}" '
+            digest="$(printf '%s\n' "$html" | awk -v want="/${asset}\"" '
                 index($0, want) > 0 { hit = 1; n = 0 }
                 hit {
                     n++
-                    if (match($0, /sha256:[0-9a-fA-F]{64}/)) {
+                    if (match($0, /sha256:[0-9a-fA-F]+/) && RLENGTH == 71) {
                         print tolower(substr($0, RSTART + 7, 64))
                         exit
                     }

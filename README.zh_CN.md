@@ -130,7 +130,7 @@ adam help                    # 查看全部子命令
 ```bash
 ./scripts/build.sh                             # 从 src/ 构建 nowhere-install.sh 与 .sha256
 ./scripts/lint.sh                              # 校验构建同步、I18N、安全不变量与 0 警告 ShellCheck
-for t in tests/test_*.sh; do bash "$t"; done   # 运行全部 4 套自动化测试
+for t in tests/test_*.sh; do bash "$t"; done   # 运行全部 5 套自动化测试
 ```
 
 ---

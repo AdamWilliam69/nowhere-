@@ -46,14 +46,7 @@ current_role() {
 # 最新 Release tag：先问 GitHub API；被限流（共享出口 IP 很常见，未认证 60 次/小时）
 # 时改为解析 releases/latest 的跳转地址，不依赖 API。
 get_latest_tag() {
-    local tag=""
-    tag="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
-    if [ -z "$tag" ]; then
-        tag="$(secure_curl -fsSI --max-time 20 "https://github.com/${REPO}/releases/latest" 2>/dev/null \
-            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
-    fi
-    printf '%s' "$tag"
+    github_latest_tag "$REPO"
 }
 
 # 下载 + 校验 + 解压 + 试运行指定 tag 的二进制；成功后路径写入全局 DL_BINARY。
@@ -375,6 +368,8 @@ is_public_ip() {
     ip="${ip#[}"; ip="${ip%]}"
     if [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
         a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+        local c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+        [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
         case "$a" in
             0|127) return 1 ;;
             10) return 1 ;;
@@ -382,25 +377,31 @@ is_public_ip() {
             169) [ "$b" = "254" ] && return 1 ;;
             172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1 ;;
             192)
-                case "$b" in 0|168) return 1 ;; esac
+                case "$b" in
+                    0)   [ "$c" = "0" ] || [ "$c" = "2" ] && return 1 ;;
+                    168) return 1 ;;
+                esac
                 ;;
             198)
-                case "$b" in 18|19|51) return 1 ;; esac
+                case "$b" in
+                    18|19) return 1 ;;
+                    51)    [ "$c" = "100" ] && return 1 ;;
+                esac
                 ;;
-            203) [ "$b" = "0" ] && return 1 ;;
+            203) [ "$b" = "0" ] && [ "$c" = "113" ] && return 1 ;;
             224|225|226|227|228|229|230|231|232|233|234|235|236|237|238|239) return 1 ;;
             24[0-9]|25[0-9]) return 1 ;;
         esac
         return 0
     fi
     local low="${ip,,}"
+    [[ "$low" == *:* ]] && [[ "$low" =~ ^[0-9a-f:]+$ ]] || return 1
     case "$low" in
-        ::1|::) return 1 ;;
-        fe8*|fe9*|fea*|feb*|fc*|fd*) return 1 ;;
+        ::1|::|::ffff:*) return 1 ;;
+        fe8*|fe9*|fea*|feb*|fc*|fd*|ff*) return 1 ;;
         2001:db8*) return 1 ;;
     esac
-    [[ "$low" == *:* ]] && return 0
-    return 1
+    return 0
 }
 
 detect_public_host() {
@@ -586,6 +587,7 @@ validate_socks() {
         host="${endpoint#\[}"; host="${host%%\]:*}"
         port="${endpoint##*\]:}"
     else
+        [[ "$endpoint" == *:* ]] || return 1
         [[ "$endpoint" != *:*:* ]] || return 1
         host="${endpoint%:*}"; port="${endpoint##*:}"
     fi
@@ -730,13 +732,16 @@ build_vector_info() {
         return 0
     fi
     host_part="$(format_host_for_url "$host")"
-    carrier="$VECTOR_CARRIER"
-    if [[ "$carrier" == "udp" ]]; then
+    carrier="${VECTOR_CARRIER:-tcp}"
+    if [[ "$carrier" == "udp" ]] && has_udp; then
         port="$(udp_port)"
         carrier="udp${UDP_FAMILY:-}"
-    else
+    elif has_tcp; then
         port="$(tcp_port)"
         carrier="tcp${TCP_FAMILY:-}"
+    else
+        port="$(udp_port)"
+        carrier="udp${UDP_FAMILY:-}"
     fi
 
     query="in=$(encode_socks "$VECTOR_SOCKS")&morph=${MORPH}"
@@ -807,9 +812,12 @@ build_probe_vector_url() {
     if [[ "$carrier" == "udp" ]] && has_udp; then
         port="$(udp_port)"
         carrier="udp${UDP_FAMILY:-}"
-    else
+    elif has_tcp; then
         carrier="tcp${TCP_FAMILY:-}"
         port="$(tcp_port)"
+    else
+        port="$(udp_port)"
+        carrier="udp${UDP_FAMILY:-}"
     fi
     query="morph=${MORPH}"
     local trust_query
@@ -820,26 +828,17 @@ build_probe_vector_url() {
 }
 
 # 从当前 nowhere 服务的启动日志提取指纹（供纯 UDP / TCP 探测失败时兜底）。
-# 关键点：优先用 systemctl 的 MainPID 过滤，只取当前进程的日志，避免取到上一次重启
-# （tls=1 指纹每次重启都会变）的过期指纹；MainPID 取不到时才用 -u 取最后一条。
+# 关键点：严格按 systemctl MainPID 过滤当前运行进程的日志；服务未运行（MainPID=0）或当前 PID 无记录时
+# 绝不回退读历史 -n 500（避免返回上一次重启已过期的 tls=1 内存自签指纹）。
 # 日志里指纹可能是不带冒号的 64 位 hex，也可能是 AA:BB:... 冒号分隔形，两种都兼容，
 # 统一输出为不带冒号的小写 hex。取不到返回 1，不输出、不伪造。
 get_fingerprint_from_journal() {
-    local log fp
-    local main_pid
+    local log fp main_pid
     main_pid="$(systemctl show -p MainPID --value nowhere 2>/dev/null | tr -d ' \r\n' || true)"
-    if [[ "$main_pid" =~ ^[0-9]+$ ]] && [ "$main_pid" != "0" ]; then
-        log="$(journalctl -u nowhere _PID="$main_pid" --no-pager 2>/dev/null || true)"
-        fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '[0-9a-fA-F]{64}' | tail -1 | tr 'A-F' 'a-f' || true)"
-        if [ -z "$fp" ]; then
-            fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}' | tail -1 | tr -d ':' | tr 'A-F' 'a-f' || true)"
-        fi
-        if [ -n "$fp" ]; then
-            printf '%s' "$fp"
-            return 0
-        fi
+    if [[ ! "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+        return 1
     fi
-    log="$(journalctl -u nowhere -n 500 --no-pager 2>/dev/null || true)"
+    log="$(journalctl -u nowhere _PID="$main_pid" --no-pager 2>/dev/null || true)"
     fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '[0-9a-fA-F]{64}' | tail -1 | tr 'A-F' 'a-f' || true)"
     if [ -z "$fp" ]; then
         fp="$(printf '%s' "$log" | grep -i 'fingerprint' | grep -oE '([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}' | tail -1 | tr -d ':' | tr 'A-F' 'a-f' || true)"
@@ -868,11 +867,16 @@ get_tls_fingerprint() {
         fi
         return 1
     fi
-    local port
+    local port probe_host="127.0.0.1"
     port="$(tcp_port)"
+    if [ -n "${LISTEN_HOST:-}" ] && [ "$LISTEN_HOST" != "*" ] && [ "$LISTEN_HOST" != "0.0.0.0" ] && [ "$LISTEN_HOST" != "::" ] && [ "$LISTEN_HOST" != "[::]" ]; then
+        probe_host="$(format_host_for_url "$LISTEN_HOST")"
+    elif [ "${TCP_FAMILY:-}" = "6" ]; then
+        probe_host="[::1]"
+    fi
     if [ -x "$BIN_PATH" ]; then
         local out fp
-        out="$(timeout 8 "$BIN_PATH" fingerprint "nowhere://${SHARED_KEY}@127.0.0.1:${port}?morph=${MORPH}" 2>/dev/null || true)"
+        out="$(timeout 8 "$BIN_PATH" fingerprint "nowhere://${SHARED_KEY}@${probe_host}:${port}?morph=${MORPH}" 2>/dev/null || true)"
         fp="$(echo "$out" | grep -oE '[0-9a-f]{64}' | head -1 || true)"
         if [ -n "$fp" ]; then
             _CACHED_TLS_FP="$fp"
@@ -892,7 +896,7 @@ get_tls_fingerprint() {
     local sni="${PUBLIC_HOST:-localhost}"
     local fingerprint output
     for _ in 1 2 3 4 5; do
-        output="$(timeout 8 openssl s_client -connect "127.0.0.1:${port}" \
+        output="$(timeout 8 openssl s_client -connect "${probe_host}:${port}" \
             -servername "$sni" -showcerts </dev/null 2>/dev/null \
             | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)"
         fingerprint="${output#*=}"
@@ -998,17 +1002,11 @@ ensure_manager_copy() {
 
     if [ -z "$self_path" ] || [ ! -f "$self_path" ] || ! grep -q "Adam Nowhere" "$self_path" 2>/dev/null; then
         # 管道/进程替换运行：$0 指向 /dev/fd/63、bash 或匿名管道，无法直接复制自身。
-        # 但这不等于装不了：从 SCRIPT_URL 重新下载一份到管理脚本路径即可。
-        # 前提：新版必须已先推送到该 raw 地址；否则下载到的是旧版，下面会打印警告。
+        # 复用 script_fetch_remote：强制 HTTPS TLS1.2、防缓存击穿、结尾截断校验、bash -n 与官方 .sha256 校验。
         info "$(L '通过管道/进程替换运行，无法直接复制自身，正在从脚本地址重新下载一份...')"
-        local dl_ok=0
-        tmp="$(mktemp /tmp/adam-manager.XXXXXX)"
-        if command -v curl >/dev/null 2>&1; then
-            secure_curl -fsSL --max-time 30 "$SCRIPT_URL" -o "$tmp" 2>/dev/null && dl_ok=1
-        elif command -v wget >/dev/null 2>&1; then
-            wget -qO "$tmp" "$SCRIPT_URL" 2>/dev/null && dl_ok=1
-        fi
-        if [ "$dl_ok" != "1" ] || [ ! -s "$tmp" ] || ! grep -q "Adam Nowhere" "$tmp" 2>/dev/null || ! bash -n "$tmp" 2>/dev/null; then
+        make_workdir || return 1
+        tmp="${WORKDIR}/adam-manager.sh"
+        if ! script_fetch_remote "$tmp"; then
             rm -f "$tmp"
             warn "$(L '重新下载脚本失败，管理脚本副本无法安装')"
             warn "$(L '请改用文件方式运行：curl -fsSL') ${SCRIPT_URL} -o ${MANAGER_PATH} && chmod +x ${MANAGER_PATH} && ${MANAGER_PATH}"
@@ -1018,7 +1016,7 @@ ensure_manager_copy() {
         rm -f "$tmp"
         self_path="$MANAGER_PATH"
         local remote_ver
-        remote_ver="$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_PATH" 2>/dev/null | cut -d'"' -f2 || true)"
+        remote_ver="${REMOTE_SCRIPT_VERSION:-$(grep -m1 '^SCRIPT_VERSION=' "$MANAGER_PATH" 2>/dev/null | cut -d'"' -f2 || true)}"
         if [ -n "${SCRIPT_VERSION:-}" ] && [ -n "$remote_ver" ] && [ "${remote_ver#v}" != "${SCRIPT_VERSION#v}" ]; then
             warn "$(L '注意：下载到的脚本版本为') ${remote_ver}$(L '，与当前运行的') ${SCRIPT_VERSION} $(L '不一致（可能新版尚未推送到') ${SCRIPT_URL}$(L '），管理命令将指向下载到的版本')"
         fi
@@ -1495,8 +1493,11 @@ cert_is_valid() {
 
 # 证书剩余有效天数（整数）；取不到返回非 0
 cert_expiry_days() {
-    local crt="$1" end_s now_s
-    end_s="$(date -d "$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null | cut -d= -f2-)" +%s 2>/dev/null)" || return 1
+    local crt="$1" end_str end_s now_s
+    [ -f "$crt" ] && [ -r "$crt" ] || return 1
+    end_str="$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null | cut -d= -f2- || true)"
+    [ -n "$end_str" ] || return 1
+    end_s="$(date -d "$end_str" +%s 2>/dev/null)" || return 1
     [ -n "$end_s" ] || return 1
     now_s="$(date +%s)"
     echo $(( (end_s - now_s) / 86400 ))
@@ -1571,7 +1572,7 @@ verify_release_checksum() {
     for sumfile in "SHA256SUMS" "sha256sums.txt" "checksums.txt"; do
         url="https://github.com/${REPO}/releases/download/${tag}/${sumfile}"
         secure_curl -fsSL --max-time 15 -o "${workdir}/${sumfile}" "$url" 2>/dev/null || continue
-        expected="$(grep "${BIN_NAME}" "${workdir}/${sumfile}" 2>/dev/null | head -1 | awk '{print tolower($1)}' || true)"
+        expected="$(awk -v f="$BIN_NAME" '{fn=$2; sub(/^\*/,"",fn); sub(/^\.\//,"",fn); if(fn==f){print tolower($1); exit}}' "${workdir}/${sumfile}" 2>/dev/null || true)"
         [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || continue
         if [ "$expected" = "$actual" ]; then
             success "$(L 'SHA256 校验通过（')${sumfile}$(L '）')"
@@ -1590,6 +1591,7 @@ verify_release_checksum() {
 # 清理时：deploy hook 文件在位时可删全部 certbot renew 行（含旧 deploy-hook 行）；
 # 否则只删无 deploy-hook 的 plain 行，保留 Portal 的 deploy-hook cron 行（v10 保护，不回归）。
 certbot_renewal_cron_ensure() {
+    command -v crontab >/dev/null 2>&1 || return 1
     if [ -x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh ]; then
         (crontab -l 2>/dev/null | grep -v 'certbot renew' || true; echo '0 3,15 * * * certbot renew --quiet') | crontab -
     else
@@ -1621,6 +1623,9 @@ obtain_portal_cert() {
     fi
     if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
         info "$(L '检测到有效证书（剩余') $(cert_expiry_days "$CRT") $(L '天，域名匹配），跳过申请')"
+        if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
+            install_nowhere_cert_sync_script
+        fi
     elif [ "$CERT_METHOD" = "letsencrypt-http" ]; then
         if has_tcp && [ "$(tcp_port)" = "80" ]; then
             warn "$(L 'HTTP-01 与 80 端口监听冲突：续期时 certbot 需独占 80 端口，服务将无法同时监听 80')"
@@ -1692,11 +1697,13 @@ setup_certbot_renewal() {
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh << HOOKEOF
 #!/bin/bash
-# Renewal hook: re-sync the service-readable cert copies (low-priv user cannot read /etc/letsencrypt), then restart
+# Renewal hook: re-sync the service-readable cert copies (root:nowhere 640 so both root and nowhere can read), then restart
 sync_ok=1
 if [ -d "${CONFIG_DIR}/certs" ] && [ -f "${CRT}" ] && [ -f "${KEY_PEM}" ] && [ "${CRT}" != "${CONFIG_DIR}/certs/fullchain.pem" ]; then
-    install -m 600 -o nowhere -g nowhere "${CRT}" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null || sync_ok=0
-    install -m 600 -o nowhere -g nowhere "${KEY_PEM}" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null || sync_ok=0
+    install -m 640 -o root -g nowhere "${CRT}" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null \
+        || install -m 600 "${CRT}" "${CONFIG_DIR}/certs/fullchain.pem" 2>/dev/null || sync_ok=0
+    install -m 640 -o root -g nowhere "${KEY_PEM}" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null \
+        || install -m 600 "${KEY_PEM}" "${CONFIG_DIR}/certs/privkey.pem" 2>/dev/null || sync_ok=0
 fi
 if [ "\$sync_ok" = "1" ]; then
     systemctl restart nowhere
@@ -1737,8 +1744,11 @@ HOOKEOF
         fi
     else
         warn "$(L '未找到 certbot.timer，改用 cron 兜底（每天 3:00 / 15:00 检查续期）')"
-        certbot_renewal_cron_ensure
-        success "$(L 'cron 续期任务已写入')"
+        if certbot_renewal_cron_ensure; then
+            success "$(L 'cron 续期任务已写入')"
+        else
+            warn "$(L 'certbot.timer 未在运行，自动续期可能不工作，请手动检查')"
+        fi
     fi
 
     echo ""
@@ -2990,7 +3000,7 @@ egress_query_param() {
 
 parse_egress_url() {
     local u="$1" rest query=""
-    local re_path='^(.+)/(tcp|udp)([46]?):([0-9]+)$' re_compact='^(.+):([0-9]+)$'
+    local re_path='^(.+)/(tcp|udp)([46]?):([0-9]+)$' re_compact='^(\[[^]]+\]|[^:]+):([0-9]+)$'
     local re_host='^[][A-Za-z0-9.:_-]+$' re_query='^[A-Za-z0-9=&%._:~-]+$'
     PE_KEY=""; PE_HOST=""; PE_PORT=""; PE_CARRIER=""; PE_FAMILY=""; PE_MORPH="1"
     PE_SNI=""; PE_PIN=""; PE_DIAL="auto"; PE_DIAL4="auto"; PE_DIAL6="auto"; PE_RATE="0"; PE_ETAR="0"
@@ -3010,6 +3020,7 @@ parse_egress_url() {
         return 1
     fi
     validate_port "$PE_PORT" || return 1
+    PE_PORT="$((10#$PE_PORT))"
     [[ "$PE_HOST" =~ $re_host ]] || return 1
     if [ -n "$query" ]; then
         [[ "$query" =~ $re_query ]] || return 1
@@ -3277,7 +3288,7 @@ ProtectHome=read-only"
         warn "$(L 'Egress 服务未能启动，日志如下：')"
         journalctl -u nowhere -n 30 --no-pager || true
         warn "$(L '安装中止：请按日志排查（常见：密钥 / pin / 端口 / Portal 未设 out=egress / 载体与 Portal 监听不对应）')"
-        return
+        return 1
     fi
     ( umask 077; cat > "$EGRESS_CONFIG_TXT" ) << EGCONFEOF
 ════════════════════════════════════════════════════════════════
@@ -3363,14 +3374,17 @@ do_uninstall() {
     rm -f "$SERVICE_FILE" "$BIN_PATH" "$BIN_BACKUP_PATH" "$ROLE_FILE" "${CONFIG_DIR}/cert-sync.sh"
     rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh           /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh           /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh           /run/nowhere-stopped-by-certbot
     cron_now="$(crontab -l 2>/dev/null || true)"
+    local _cron_changed=0
     # 卸载前若存在本脚本的 deploy hook 且无 Xray 续期依赖，则清理 certbot renew 兜底 cron
     if [ "$_had_deploy_hook" = "1" ] && ! xray_needs_port80 && ! xray_uses_cf_creds; then
         if [[ "$cron_now" == *"certbot renew"* ]]; then
-            printf '%s\n' "$cron_now" | grep -v 'certbot renew' | crontab - || true
+            cron_now="$(printf '%s\n' "$cron_now" | grep -v 'certbot renew' || true)"
+            _cron_changed=1
             info "$(L '已移除 certbot 续期的 cron 兜底任务')"
         fi
     elif [[ "$cron_now" == *"certbot renew --quiet --deploy-hook"* ]]; then
-        printf '%s\n' "$cron_now" | grep -v 'certbot renew --quiet --deploy-hook' | crontab - || true
+        cron_now="$(printf '%s\n' "$cron_now" | grep -v 'certbot renew --quiet --deploy-hook' || true)"
+        _cron_changed=1
         info "$(L '已移除 certbot 续期的 cron 兜底任务')"
     fi
     # acme.sh cron：Xray 仍在用 acme.sh 续期时保留，否则删除
@@ -3378,9 +3392,13 @@ do_uninstall() {
         if xray_uses_acmesh; then
             warn "$(L 'Xray 仍在使用 acme.sh 续期，已保留 acme.sh 的 cron 任务')"
         else
-            printf '%s\n' "$cron_now" | grep -v 'acme.sh.*--cron' | crontab - || true
+            cron_now="$(printf '%s\n' "$cron_now" | grep -v 'acme.sh.*--cron' || true)"
+            _cron_changed=1
             info "$(L '已移除 acme.sh 的 cron 续期任务')"
         fi
+    fi
+    if [ "$_cron_changed" = "1" ]; then
+        printf '%s\n' "$cron_now" | crontab - 2>/dev/null || true
     fi
     if [ -d "$ACME_HOME" ]; then
         warn "$(L 'acme.sh 目录仍保留，如确认不再需要请手动删除：rm -rf ~/.acme.sh')"
@@ -3555,7 +3573,7 @@ do_select_version() {
     local tags=() line
     while IFS= read -r line; do
         [ -n "$line" ] && tags+=("$line")
-    done < <(secure_curl -fs --max-time 20 "https://api.github.com/repos/${REPO}/releases?per_page=20" | grep '"tag_name"' | cut -d'"' -f4 || true)
+    done < <(secure_curl -fs --max-time 20 "https://api.github.com/repos/${REPO}/releases?per_page=20" 2>/dev/null | github_extract_tag_names || true)
 
     if [ "${#tags[@]}" -eq 0 ]; then
         error "$(L '未能获取版本列表，请检查网络')$(L '（可能被 GitHub 限流，请稍后重试）')"
@@ -3576,7 +3594,12 @@ do_select_version() {
     read -rp "$(L '选择要切换到的版本序号:') " VER_CHOICE || { [ -n "$VER_CHOICE" ] || return 1; }
 
     [[ "$VER_CHOICE" == "0" || -z "$VER_CHOICE" ]] && { info "$(L '已取消')"; return; }
-    if ! [[ "$VER_CHOICE" =~ ^[0-9]+$ ]] || [ "$VER_CHOICE" -lt 1 ] || [ "$VER_CHOICE" -gt "${#tags[@]}" ]; then
+    if ! [[ "$VER_CHOICE" =~ ^[0-9]+$ ]] || [ "${#VER_CHOICE}" -gt 5 ]; then
+        warn "$(L '无效选择')"
+        return
+    fi
+    VER_CHOICE=$((10#$VER_CHOICE))
+    if [ "$VER_CHOICE" -lt 1 ] || [ "$VER_CHOICE" -gt "${#tags[@]}" ]; then
         warn "$(L '无效选择')"
         return
     fi
@@ -3617,29 +3640,38 @@ do_rollback() {
         return 1
     fi
 
-    local tmp_bin rolled_to
+    local tmp_bin rolled_to had_bin=0
     make_workdir || return 1
     tmp_bin="${WORKDIR}/nowhere.swap"
-    cp "$BIN_PATH" "$tmp_bin" || { warn "$(L '备份当前二进制失败，回退中止')"; return 1; }
+    if [ -f "$BIN_PATH" ]; then
+        cp "$BIN_PATH" "$tmp_bin" || { warn "$(L '备份当前二进制失败，回退中止')"; return 1; }
+        had_bin=1
+    fi
 
     _CACHED_TLS_FP=""
     # install 直接替换运行中的二进制，随后一次 restart 完成切换（与 install_nowhere_version 一致，
     # 比旧版 stop -> 替换 -> start 少一段停机窗口）；任一步失败即中止，避免半交换状态
     install -m 755 "$BIN_BACKUP_PATH" "$BIN_PATH" || { warn "$(L '回退替换失败，当前二进制未动')"; return 1; }
-    install -m 755 "$tmp_bin" "$BIN_BACKUP_PATH" || { install -m 755 "$tmp_bin" "$BIN_PATH" 2>/dev/null || true; warn "$(L '备份交换失败，已尽力恢复原二进制')"; return 1; }
-    rm -f "$tmp_bin"
+    if [ "$had_bin" = "1" ]; then
+        install -m 755 "$tmp_bin" "$BIN_BACKUP_PATH" || { install -m 755 "$tmp_bin" "$BIN_PATH" 2>/dev/null || true; warn "$(L '备份交换失败，已尽力恢复原二进制')"; return 1; }
+        rm -f "$tmp_bin"
+    fi
 
     record_previous_version "$current"
     # 回滚后以实际安装的二进制版本为准；版本文件只写版本号，不写本地化文案
-    rolled_to="$("$BIN_PATH" --version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    rolled_to="$("$BIN_PATH" --version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9._]+)?' | head -1 || true)"
     case "$rolled_to" in v*) : ;; [0-9]*) rolled_to="v$rolled_to" ;; esac
     [ -z "$rolled_to" ] && rolled_to="$previous"
     [ -n "$rolled_to" ] && echo "$rolled_to" > "$VERSION_FILE"
 
+    nowhere_fix_perms
     systemctl restart nowhere 2>/dev/null || true
     sleep 2
     if systemctl is-active --quiet nowhere; then
         success "$(L '已回退到:') $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)"
+        if [ "$(current_role)" = "portal" ] && [ -f "$CONFIG_FILE" ]; then
+            ( load_saved_config 2>/dev/null && [ "${TLS_MODE:-}" = "1" ] && save_current_pin >/dev/null 2>&1 ) || true
+        fi
     else
         warn "$(L '回退后服务启动失败，日志如下：')"
         journalctl -u nowhere -n 20 --no-pager || true
@@ -3858,26 +3890,42 @@ do_migrate_tls2() {
     done
 
     # 同步保存的配置：域名 / TLS 模式 / 证书路径 / 重建的 Portal URL / 握手超时（整文件重写，与 do_install 一致）
-    # 低权用户运行时：先把新证书同步到服务可读的副本，再生成 URL（URL 里嵌证书路径）
+    # 低权用户运行时：先把新证书同步到服务可读的副本，再生成 URL（URL 里嵌证书路径）；同步失败自动回退 root
     if grep -q '^User=nowhere' "$SERVICE_FILE" 2>/dev/null; then
-        sync_portal_cert_copy || warn "$(L '证书副本同步失败，服务可能无法读取新证书')"
+        NOWHERE_USER="nowhere"
+        if ! sync_portal_cert_copy; then
+            warn "$(L '证书副本同步失败，服务可能无法读取新证书')"
+            NOWHERE_USER="root"
+            CRT_RUNTIME="$CRT"
+            KEY_PEM_RUNTIME="$KEY_PEM"
+        fi
+    else
+        NOWHERE_USER="root"
     fi
     NOWHERE_PORTAL="$(build_portal_url)"
     MIG_BAK="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+    local MIG_SVC_BAK
+    MIG_SVC_BAK="${SERVICE_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -f "$CONFIG_FILE" "$MIG_BAK" 2>/dev/null || warn "$(L '旧配置备份失败，迁移继续（失败时无法自动恢复）')"
+    [ -f "$SERVICE_FILE" ] && cp -p "$SERVICE_FILE" "$MIG_SVC_BAK" 2>/dev/null || MIG_SVC_BAK=""
     write_portal_env || error "$(L '配置保存失败，已中止')"
     # v8.6：统一由 nowhere_write_portal_unit 同步 unit（auto 时不写 NOW_HANDSHAKE_TIMEOUT，避免旧 unit 残留或写入字面量 auto）
-    if grep -q '^User=nowhere' "$SERVICE_FILE" 2>/dev/null; then NOWHERE_USER="nowhere"; else NOWHERE_USER="root"; fi
     nowhere_write_portal_unit
     nowhere_fix_perms
     systemctl daemon-reload
     _CACHED_TLS_FP=""
-    if svc_restart_wait nowhere 2 15; then
+    if restart_nowhere_with_fallback 1; then
+        [ -n "$MIG_BAK" ] && rm -f "$MIG_BAK"
+        [ -n "$MIG_SVC_BAK" ] && rm -f "$MIG_SVC_BAK"
         success "$(L '迁移完成：已是 tls=2，服务运行中')"
     else
         warn "$(L '迁移重启失败，已恢复旧配置并再次重启，请按日志排查')"
-        if [ -n "$MIG_BAK" ] && [ -f "$MIG_BAK" ]; then cp -f "$MIG_BAK" "$CONFIG_FILE"; fi
+        if [ -n "$MIG_BAK" ] && [ -f "$MIG_BAK" ]; then mv -f "$MIG_BAK" "$CONFIG_FILE"; fi
+        if [ -n "$MIG_SVC_BAK" ] && [ -f "$MIG_SVC_BAK" ]; then mv -f "$MIG_SVC_BAK" "$SERVICE_FILE"; systemctl daemon-reload 2>/dev/null || true; fi
+        rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh /etc/letsencrypt/renewal-hooks/pre/stop-nowhere.sh /etc/letsencrypt/renewal-hooks/post/start-nowhere.sh
+        nowhere_fix_perms
         if svc_restart_wait nowhere 2 15; then
+            ( load_saved_config 2>/dev/null && save_current_pin >/dev/null 2>&1 ) || true
             warn "$(L '已恢复旧配置，服务已恢复运行（仍为 tls=1）')"
             return 1
         fi

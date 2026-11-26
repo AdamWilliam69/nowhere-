@@ -217,7 +217,8 @@ open(sys.argv[1], 'wb').write(b)
 PY
 if bash -c '
     set -euo pipefail; source "'"$TMP/lib.sh"'"
-    verify_elf_binary /bin/true
+    REAL_ELF="$(readlink -f /bin/true)"
+    verify_elf_binary "$REAL_ELF"
     ! verify_elf_binary "'"$TMP/elf/script.sh"'"
     ! verify_elf_binary "'"$TMP/elf/link"'"
     ! verify_elf_binary "'"$TMP/elf/wrong.elf"'"

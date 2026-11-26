@@ -68,7 +68,7 @@ if isinstance(data, list):
     fi
     if [ -z "$out" ]; then
         out="$(secure_curl -fsSL --max-time 20 "https://github.com/${XRAY_REPO}/releases.atom" 2>/dev/null \
-            | grep -oE 'releases/tag/v[0-9]+(\.[0-9]+){1,3}' | sed 's#.*/##' | awk '!s[$0]++ {print $0, "?"}' || true)"
+            | grep -oE 'releases/tag/[^"<[:space:]]+' | sed 's#.*/##' | awk '!s[$0]++ {print $0, "?"}' || true)"
     fi
     if [ -n "$out" ]; then printf '%s\n' "$out"; fi
     return 0
@@ -276,12 +276,13 @@ xray_cnblock() {
 
 xray_write_base() {
     install -d -m 750 "$XRAY_CONF_D"
-    local fwd_rule="" fwd_tags="" f fid fen cn_rules=""
+    local fwd_rule="" fwd_tags="" f fid fen cn_rules="" priv_ips='"geoip:private"'
     while IFS= read -r f; do
+        env_file_safe "$f" || continue
         fen="$(xray_fwd_env_get "$f" FWD_ENABLED)"
         [ "$fen" = "1" ] || continue
         fid="$(xray_fwd_env_get "$f" FWD_ID)"
-        [ -n "$fid" ] || continue
+        [[ "$fid" =~ ^[A-Za-z0-9_-]+$ ]] || continue
         fwd_tags="${fwd_tags:+${fwd_tags}, }\"fwd-${fid}\""
     done < <(xray_fwd_rule_files)
     # 端口转发入站（dokodemo-door）最高优先级直连，避免转发到 VPC 内网 IP（geoip:private）或国内中转被黑洞拦截
@@ -289,7 +290,10 @@ xray_write_base() {
         fwd_rule="      { \"type\": \"field\", \"inboundTag\": [${fwd_tags}], \"outboundTag\": \"direct\" },
 "
     fi
-    if [ "${XRAY_CN_BLOCK:-1}" = "1" ] && [ -f "${XRAY_DIR}/geoip.dat" ] && [ -f "${XRAY_DIR}/geosite.dat" ]; then
+    if [ ! -s "${XRAY_DIR}/geoip.dat" ]; then
+        priv_ips='"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"'
+    fi
+    if [ "${XRAY_CN_BLOCK:-1}" = "1" ] && [ -s "${XRAY_DIR}/geoip.dat" ] && [ -s "${XRAY_DIR}/geosite.dat" ]; then
         cn_rules=",
       { \"type\": \"field\", \"ip\": [\"geoip:cn\"], \"outboundTag\": \"block\" },
       { \"type\": \"field\", \"domain\": [\"geosite:cn\"], \"outboundTag\": \"block\" }"
@@ -304,7 +308,7 @@ xray_write_base() {
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-${fwd_rule}      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }${cn_rules}
+${fwd_rule}      { "type": "field", "ip": [${priv_ips}], "outboundTag": "block" }${cn_rules}
     ]
   }
 }
@@ -490,6 +494,7 @@ write_service_unit() {
         [ -n "$svc_extra" ] && printf '%s\n' "$svc_extra"
         printf '\n[Install]\nWantedBy=multi-user.target\n'
     } > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 644 "$tmp"
     mv -f "$tmp" "$file"
 }
 
@@ -555,8 +560,15 @@ xray_new_node_begin() {
         warn "$(L '生成随机密钥/UUID 失败，请检查 openssl 与 Xray 二进制')"
         return 1
     fi
-    XN_TAG="${prefix}-${XN_PORT}"
-    XN_NAME="${name_prefix}-${XN_PORT}"
+    # 防止已有节点经 xray_edit_node 改端口后原端口 tag 仍存在，新增节点误覆写旧节点
+    local _base_tag="${prefix}-${XN_PORT}" _base_name="${name_prefix}-${XN_PORT}" _sfx=2
+    XN_TAG="$_base_tag"
+    XN_NAME="$_base_name"
+    while [ -f "${XRAY_NODE_DIR}/${XN_TAG}.env" ] || [ -f "${XRAY_CONF_D}/10-in-${XN_TAG}.json" ]; do
+        XN_TAG="${_base_tag}-${_sfx}"
+        XN_NAME="${_base_name}-${_sfx}"
+        _sfx=$((_sfx + 1))
+    done
     return 0
 }
 
@@ -774,6 +786,10 @@ xray_ask_vlessenc() {
 xray_commit_node() {
     local tag="$1" inbound="$2" meta="$3"
     local conf="${XRAY_CONF_D}/10-in-${tag}.json" env="${XRAY_NODE_DIR}/${tag}.env"
+    if [ -e "$conf" ] || [ -e "$env" ]; then
+        warn "$(L '新节点未能生效，已撤回本次改动')"
+        return 1
+    fi
     install -d -m 750 "$XRAY_CONF_D"
     install -d -m 700 "$XRAY_NODE_DIR"
     local _xc_tmp_conf="" _xc_tmp_env=""
@@ -1503,7 +1519,9 @@ xray_pick_node() {
     xray_list_nodes
     read -rp "$(L '输入序号（回车取消）:') " ans || { [ -n "$ans" ] || return 1; }
     [ -n "$ans" ] || return 1
-    if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#tags[@]}" ]; then warn "$(L '序号无效')"; return 1; fi
+    if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "${#ans}" -gt 5 ]; then warn "$(L '序号无效')"; return 1; fi
+    ans=$((10#$ans))
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt "${#tags[@]}" ]; then warn "$(L '序号无效')"; return 1; fi
     XRAY_PICK="${tags[$((ans - 1))]}"
     return 0
 }
@@ -1681,6 +1699,8 @@ xray_install() {
     while true; do
         read -rp "$(L '生成分享链接用的公网地址（回车使用') ${host:-$(L '未探测到，请手动输入')}$(L '）:') " ans || { [ -n "$ans" ] || return 1; }
         ans="${ans:-$host}"
+        ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
+        ans="${ans,,}"
         if [[ -z "$ans" || ! "$ans" =~ $hostre ]]; then
             warn "$(L '地址不能为空，且只能包含字母、数字和 . : - _') [ ]"
             continue
@@ -1701,6 +1721,7 @@ xray_install() {
     maint_install_timers || true
     success "Xray $(xray_installed_version) $(L '安装完成')"
     if [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; then
+        xray_sync_reality_snis || true
         if xray_reload; then
             success "$(L '现有节点已随新内核重启')"
         elif [ -f "${XRAY_BIN}.previous" ]; then
@@ -2190,9 +2211,10 @@ PY
 
     xray_node_save "$tag" || { cp -a "$bak_conf" "$conf"; cp -a "$bak_env" "$envf"; return 1; }
     if [ "$need_reload" = "1" ]; then
-        if [ "$new_port" != "$old_port" ] && ufw_active; then
-            ufw allow "${new_port}/tcp" >/dev/null 2>&1 || true
-            [ "$N_TYPE" = "ss2022" ] && ufw allow "${new_port}/udp" >/dev/null 2>&1 || true
+        if [ "$new_port" != "$old_port" ] && ufw_installed; then
+            local -a _new_specs=("${new_port}/tcp")
+            [ "$N_TYPE" = "ss2022" ] && _new_specs+=("${new_port}/udp")
+            fw_allow_for_service "${_new_specs[@]}"
         fi
         if ! xray_reload; then
             warn "$(L '重载失败，正在自动回滚节点配置...')"
@@ -2200,15 +2222,19 @@ PY
             cp -a "$bak_env" "$envf"
             xray_fix_perms
             xray_reload >/dev/null 2>&1 || true
+            if [ "$new_port" != "$old_port" ] && ufw_installed; then
+                local _rb_specs="${new_port}/tcp"
+                [ "$N_TYPE" = "ss2022" ] && _rb_specs="${_rb_specs} ${new_port}/udp"
+                fw_prune_old_specs "$_rb_specs"
+            fi
             return 1
         fi
         if [ "$new_port" != "$old_port" ]; then
             reserved_ports_sync || true
-            if ufw_active; then
-                ! port_used_by_other_services "${old_port}/tcp" "" && ufw delete allow "${old_port}/tcp" >/dev/null 2>&1 || true
-                if [ "$N_TYPE" = "ss2022" ]; then
-                    ! port_used_by_other_services "${old_port}/udp" "" && ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
-                fi
+            if ufw_installed; then
+                local _old_specs="${old_port}/tcp"
+                [ "$N_TYPE" = "ss2022" ] && _old_specs="${_old_specs} ${old_port}/udp"
+                fw_prune_old_specs "$_old_specs"
             fi
         fi
     fi
@@ -2246,6 +2272,8 @@ xray_set_host() {
     local ans hostre='^[][A-Za-z0-9.:_-]+$'
     xray_load_state
     read -rp "$(L '分享链接用的公网地址（当前') ${XRAY_PUBLIC_HOST:-$(L '未设置')}$(L '）:') " ans || { [ -n "$ans" ] || return 1; }
+    ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
+    ans="${ans,,}"
     if [[ -z "$ans" || ! "$ans" =~ $hostre ]]; then
         warn "$(L '未修改（为空或格式不合法）')"
         return 0

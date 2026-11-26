@@ -9,8 +9,10 @@ xray_fwd_rule_files() {
     local f
     [ -d "$XRAY_FWD_DIR" ] || return 0
     for f in "${XRAY_FWD_DIR}"/*.env; do
-        [ -f "$f" ] && printf '%s\n' "$f"
+        [ -f "$f" ] || continue
+        printf '%s\n' "$f"
     done
+    return 0
 }
 
 xray_fwd_tags() {
@@ -128,8 +130,10 @@ xray_fwd_rule_json() {
     printf '%s' "{\"tag\":\"fwd-${id}\",\"listen\":\"${lip}\",\"port\":${lport},\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"${rhost}\",\"port\":${rport},\"network\":\"${network}\",\"followRedirect\":${fr}}}"
 }
 
-# 重建 20-forward.json 并重载；失败时用 .bak 恢复并再次重载
+# 重建 20-forward.json 并重载；失败时用 .bak 恢复（传 --no-rollback-reload 时交由调用方先还原 .env 再重载）
 xray_fwd_rebuild() {
+    local no_rb_reload=0
+    [ "${1:-}" = "--no-rollback-reload" ] && no_rb_reload=1
     local tmpf first=1 count=0 f frag base_json="${XRAY_CONF_D}/00-base.json"
     install -d -m 750 "$XRAY_CONF_D" 2>/dev/null || true
     install -d -m 700 "$XRAY_FWD_DIR" 2>/dev/null || true
@@ -170,7 +174,9 @@ xray_fwd_rebuild() {
     if [ -f "${XRAY_FWD_JSON}.bak" ]; then mv -f "${XRAY_FWD_JSON}.bak" "$XRAY_FWD_JSON"; else rm -f "$XRAY_FWD_JSON"; fi
     if [ -f "${base_json}.bak" ]; then mv -f "${base_json}.bak" "$base_json"; fi
     xray_fix_perms
-    xray_reload >/dev/null 2>&1 || warn "$(L '恢复后重载仍失败，请检查 Xray 配置与日志')"
+    if [ "$no_rb_reload" = "0" ]; then
+        xray_reload >/dev/null 2>&1 || warn "$(L '恢复后重载仍失败，请检查 Xray 配置与日志')"
+    fi
     return 1
 }
 
@@ -208,8 +214,8 @@ xray_fwd_add() {
         fi
         if command -v ss >/dev/null 2>&1; then
             occ=""
-            [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" xray || true)"
-            [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" xray || true)"
+            [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" "__none__" || true)"
+            [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" "__none__" || true)"
             if [ -n "$occ" ]; then
                 warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
                 echo "$occ"
@@ -250,7 +256,7 @@ FWD_FOLLOW="${follow}"
 FWDEOF
     chmod 600 "$env_file"
 
-    if ! xray_fwd_rebuild; then
+    if ! xray_fwd_rebuild --no-rollback-reload; then
         rm -f "$env_file"
         xray_fwd_rebuild >/dev/null 2>&1 || true
         error "$(L '新转发规则未能生效，已自动撤回')"
@@ -320,7 +326,7 @@ xray_fwd_toggle() {
     else
         printf '%s\n' "FWD_ENABLED=\"${next}\"" >> "$f"
     fi
-    if ! xray_fwd_rebuild; then
+    if ! xray_fwd_rebuild --no-rollback-reload; then
         mv -f "$bak" "$f"
         xray_fwd_rebuild >/dev/null 2>&1 || true
         warn "$(L '规则状态切换失败')"
@@ -349,7 +355,7 @@ xray_fwd_delete() {
     frport="$(grep -m1 '^FWD_RPORT=' "$f" | cut -d'"' -f2 || true)"
     confirm "$(L '确认删除规则 [')${fid}] ${flip}:${old_port} -> ${frhost}:${frport}$(L ']？')" n || return 0
     mv -f "$f" "$bak" || return 1
-    if ! xray_fwd_rebuild; then
+    if ! xray_fwd_rebuild --no-rollback-reload; then
         mv -f "$bak" "$f"
         xray_fwd_rebuild >/dev/null 2>&1 || true
         warn "$(L '服务重载失败，删除未生效，请检查日志')"

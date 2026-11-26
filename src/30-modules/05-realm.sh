@@ -109,6 +109,7 @@ port_used_by_other_services() {
     if [ "$excl" != "xray" ] && { [ -x "$XRAY_BIN" ] || [ -f "$XRAY_SERVICE" ]; }; then
         _pu_list="$(xray_ports 2>/dev/null || true)"
         if grep -qx -- "$spec" <<< "$_pu_list"; then return 0; fi
+        if [ "$spec" = "80/tcp" ] && xray_needs_port80 2>/dev/null; then return 0; fi
     fi
     if [ "$excl" != "realm" ] && { realm_installed || [ -f "$REALM_SERVICE" ]; }; then
         _pu_list="$(realm_ports 2>/dev/null || true)"
@@ -121,10 +122,11 @@ port_used_by_other_services() {
     return 1
 }
 
-# 严格拆分 host:port（IPv6 必须带方括号 [::1]:443，拒绝把裸 IPv6 误拆成主机+端口）
+# 严格拆分 host:port（IPv6 必须带方括号 [::1]:443，拒绝裸 IPv6 或方括号包 IPv4）
 realm_split_host_port() {
     local item="$1" hvar="$2" pvar="$3" h="" p=""
     if [[ "$item" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+        [[ "${BASH_REMATCH[1]}" == *:* ]] || return 1
         h="[${BASH_REMATCH[1]}]"; p="${BASH_REMATCH[2]}"
         is_ip "${BASH_REMATCH[1]}" 0 || return 1
     elif [[ "$item" =~ ^([^:]+):([0-9]+)$ ]]; then
@@ -162,14 +164,7 @@ realm_has_toml_special() {
 }
 
 realm_latest_tag() {
-    local tag=""
-    tag="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${REALM_REPO}/releases/latest" 2>/dev/null \
-        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
-    if [ -z "$tag" ]; then
-        tag="$(secure_curl -fsSI --max-time 20 "https://github.com/${REALM_REPO}/releases/latest" 2>/dev/null \
-            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
-    fi
-    printf '%s' "$tag"
+    github_latest_tag "$REALM_REPO"
 }
 
 realm_fetch_binary() {
@@ -341,7 +336,12 @@ realm_render_rule() {
         validate_port "${RULE_RPORT:-}" || exit 1
         is_safe_host "${RULE_RHOST:-}" || exit 1
         local _lip="${RULE_LIP:-}"
-        _lip="${_lip#[}"; _lip="${_lip%]}"
+        if [[ "$_lip" == "["*"]" ]]; then
+            _lip="${_lip#[}"; _lip="${_lip%]}"
+            [[ "$_lip" == *:* ]] || exit 1
+        elif [[ "$_lip" == *"["* || "$_lip" == *"]"* ]]; then
+            exit 1
+        fi
         is_ip "$_lip" 0 || exit 1
         # 换行/回车绝不能进 TOML（导入或手改的 env 可能带换行）
         case "${RULE_REMARK:-}${RULE_LTRANS:-}${RULE_RTRANS:-}${RULE_LIP:-}${RULE_RHOST:-}${RULE_THROUGH:-}${RULE_OUT_IF:-}${RULE_IN_IF:-}${RULE_EXTRA_REMOTES:-}${RULE_BALANCE:-}" in
@@ -356,7 +356,7 @@ realm_render_rule() {
             *)   no_tcp="false"; use_udp="true" ;;
         esac
         local lport_n=$((10#$RULE_LPORT)) rport_n=$((10#$RULE_RPORT)) laddr raddr
-        laddr="$(format_host_for_url "$RULE_LIP"):${lport_n}"
+        laddr="$(format_host_for_url "$_lip"):${lport_n}"
         raddr="$(format_host_for_url "$RULE_RHOST"):${rport_n}"
 
         {
@@ -398,11 +398,20 @@ realm_render_rule() {
 
 realm_rebuild_all() {
     realm_write_base_config
-    local f id
+    local f id rc=0
     while IFS= read -r f; do
         id="$(basename "$f" .env)"
-        realm_env_file_safe "$f" || { warn "$(L '规则文件内容非法，已跳过：')${id}"; rm -f "${REALM_CONF_D}/rule-${id}.toml"; continue; }
-        realm_render_rule "$id" || warn "$(L '规则渲染失败，已跳过：')${id}"
+        if ! realm_env_file_safe "$f"; then
+            warn "$(L '规则文件内容非法，已跳过：')${id}"
+            rm -f "${REALM_CONF_D}/rule-${id}.toml"
+            rc=1
+            continue
+        fi
+        if ! realm_render_rule "$id"; then
+            warn "$(L '规则渲染失败，已跳过：')${id}"
+            rm -f "${REALM_CONF_D}/rule-${id}.toml"
+            rc=1
+        fi
     done < <(realm_rule_files)
     # 删除无对应 .env 的残留 rule-*.toml（逐个渲染后再清理，不断档）
     local t
@@ -412,11 +421,21 @@ realm_rebuild_all() {
         id="${id#rule-}"
         [ -f "${REALM_RULE_DIR}/${id}.env" ] || rm -f "$t"
     done
+    if [ "$rc" -ne 0 ]; then
+        return 1
+    fi
     # 合并为单个 /etc/adam-realm/config.toml：zhboner/realm 目录模式要求每个 .toml 都含 endpoints 字段，
     # 单独的 00-base.toml 会触发 missing field `endpoints` 崩溃；合并单文件同时避免目录读取顺序不确定。
+    # 注意：00-base.toml 末尾是 [network] 表，无启用规则时必须在表头之前（文件顶部）写根级 endpoints = []。
     local tmpcfg ep_cnt=0
+    for t in "${REALM_CONF_D}"/rule-*.toml; do
+        [ -f "$t" ] && ep_cnt=$((ep_cnt + 1))
+    done
     tmpcfg="$(mktemp "${REALM_DIR}/.config.toml.XXXXXX")" || return 1
     {
+        if [ "$ep_cnt" -eq 0 ]; then
+            printf 'endpoints = []\n\n'
+        fi
         if [ -f "${REALM_CONF_D}/00-base.toml" ]; then
             # 剔除可能残留的空 endpoints = []，避免与后续 [[endpoints]] 产生 TOML 重复键冲突
             grep -vE '^[[:space:]]*endpoints[[:space:]]*=[[:space:]]*\[\][[:space:]]*$' "${REALM_CONF_D}/00-base.toml" || true
@@ -425,11 +444,7 @@ realm_rebuild_all() {
             [ -f "$t" ] || continue
             printf '\n'
             cat "$t"
-            ep_cnt=$((ep_cnt + 1))
         done
-        if [ "$ep_cnt" -eq 0 ]; then
-            printf '\nendpoints = []\n'
-        fi
     } > "$tmpcfg" || { rm -f "$tmpcfg"; return 1; }
     # 若系统自带 Python 3.11+ tomllib，在覆盖生效配置前先做 TOML 语法与 endpoints 字段校验
     if command -v python3 >/dev/null 2>&1; then
@@ -475,16 +490,22 @@ realm_reload_service() {
     fi
     # 专用用户启动失败或端口绑定失败（如特权端口/证书权限）时改以 root 重试一次
     if grep -q '^User=' "$REALM_SERVICE" 2>/dev/null; then
+        local _svc_bak="${REALM_SERVICE}.rootbak"
         warn "$(L 'adam-realm 以专用用户启动失败，改以 root 重试')"
-        sed -i '/^User=/d; /^Group=/d' "$REALM_SERVICE" || { warn "$(L '改写服务文件失败')"; return 1; }
+        cp -p "$REALM_SERVICE" "$_svc_bak" 2>/dev/null || true
+        sed -i '/^User=/d; /^Group=/d' "$REALM_SERVICE" || { [ -f "$_svc_bak" ] && mv -f "$_svc_bak" "$REALM_SERVICE"; warn "$(L '改写服务文件失败')"; return 1; }
         systemctl daemon-reload || true
         touch "${REALM_DIR}/run-as-root" 2>/dev/null || true
         realm_fix_perms
         if svc_restart_wait adam-realm 2 20 && realm_wait_healthy; then
+            rm -f "$_svc_bak"
             info "$(L '已记录 root 运行标记，下次安装不再写入专用用户：')${REALM_DIR}/run-as-root"
             return 0
         fi
         rm -f "${REALM_DIR}/run-as-root" 2>/dev/null || true
+        if [ -f "$_svc_bak" ]; then mv -f "$_svc_bak" "$REALM_SERVICE"; fi
+        systemctl daemon-reload || true
+        realm_fix_perms
     fi
     warn "$(L 'adam-realm 启动失败，请查看日志：journalctl -u adam-realm -n 20 --no-pager')"
     return 1
@@ -706,8 +727,17 @@ realm_add_rule() {
     while true; do
         read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
         lip="${lip:-$def_lip}"
-        local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
-        is_ip "$_lip_check" 0 && break
+        local _lip_check="$lip"
+        if [[ "$_lip_check" == "["*"]" ]]; then
+            _lip_check="${_lip_check#[}"; _lip_check="${_lip_check%]}"
+            [[ "$_lip_check" == *:* ]] || { warn "$(L '监听 IP 格式不合法')"; continue; }
+        elif [[ "$_lip_check" == *"["* || "$_lip_check" == *"]"* ]]; then
+            warn "$(L '监听 IP 格式不合法')"; continue
+        fi
+        if is_ip "$_lip_check" 0; then
+            lip="$(format_host_for_url "$_lip_check")"
+            break
+        fi
         warn "$(L '监听 IP 格式不合法')"
     done
 
@@ -776,21 +806,22 @@ realm_add_rule() {
                 IFS=',' read -r -a _arr <<< "$extra_remotes"
                 for _e in "${_arr[@]}"; do [ -n "${_e//[[:space:]]/}" ] && _cnt=$((_cnt + 1)); done
                 if [ -n "$lb_w" ]; then
-                    # 权重数量须等于目标总数（主目标 + 额外目标）且全为数字
-                    local _wc=0 _wok=1 _wi
+                    # 权重数量须等于目标总数（主目标 + 额外目标）且全为正整数（拒绝空项与 0）
+                    local _wc=0 _wok=1 _wi _wclean=""
                     local -a _warr=()
+                    [[ "$lb_w" == *, ]] && _wok=0
                     IFS=',' read -r -a _warr <<< "$lb_w"
                     for _wi in "${_warr[@]}"; do
                         _wi="${_wi//[[:space:]]/}"
-                        [ -n "$_wi" ] || continue
+                        if [[ ! "$_wi" =~ ^[1-9][0-9]*$ ]]; then _wok=0; continue; fi
                         _wc=$((_wc + 1))
-                        [[ "$_wi" =~ ^[0-9]+$ ]] || _wok=0
+                        _wclean="${_wclean:+${_wclean}, }${_wi}"
                     done
                     if [ "$_wok" != "1" ] || [ "$_wc" -ne "$_cnt" ]; then
                         warn "$(L '权重数量与目标数不符或含非数字，已按等权生成')"
                         lb_w=""
                     else
-                        lb_w="$(printf '%s' "$lb_w" | tr -d ' ' | sed 's/,/, /g')"
+                        lb_w="$_wclean"
                     fi
                 fi
                 if [ -z "$lb_w" ]; then
@@ -1082,6 +1113,9 @@ realm_import_rules() {
         rm -rf "$bakdir"
         error "$(L '导入的规则文件内容非法，已恢复原配置')"
     fi
+    # 跨机导入时保留本机的二进制版本记录与 root 运行标记，避免错判版本或服务权限不匹配
+    if [ -f "$bakdir/realm/version.txt" ]; then cp -a "$bakdir/realm/version.txt" "$REALM_VERSION_FILE" 2>/dev/null || true; else rm -f "$REALM_VERSION_FILE"; fi
+    if [ -f "$bakdir/realm/run-as-root" ]; then cp -a "$bakdir/realm/run-as-root" "${REALM_DIR}/run-as-root" 2>/dev/null || true; else rm -f "${REALM_DIR}/run-as-root"; fi
     realm_fix_perms
     if realm_reload_service; then
         rm -rf "$bakdir"
@@ -1116,6 +1150,7 @@ realm_uninstall_do() {
         local _rs
         while IFS= read -r _rs; do
             [ -n "$_rs" ] || continue
+            fw_spec_has_ssh_port "$_rs" && continue
             port_used_by_other_services "$_rs" realm && continue
             fw_delete_spec "$_rs"
         done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
@@ -1217,8 +1252,15 @@ realm_add_batch_rules() {
     def_lip="$(realm_default_listen_ip)"
     read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
     lip="${lip:-$def_lip}"
-    local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
+    local _lip_check="$lip"
+    if [[ "$_lip_check" == "["*"]" ]]; then
+        _lip_check="${_lip_check#[}"; _lip_check="${_lip_check%]}"
+        [[ "$_lip_check" == *:* ]] || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+    elif [[ "$_lip_check" == *"["* || "$_lip_check" == *"]"* ]]; then
+        warn "$(L '监听 IP 格式不合法')"; return 1
+    fi
     is_ip "$_lip_check" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+    lip="$(format_host_for_url "$_lip_check")"
 
     read -rp "$(L '端口段或逗号列表（如 10000-10010 或 8080,8443,9000）: ')" spec || { [ -n "$spec" ] || return 1; }
     spec="${spec//[[:space:]]/}"
@@ -1360,9 +1402,15 @@ realm_edit_rule() {
 
     read -rp "$(L '本机监听 IP（回车默认 ')${lip}$(L '）: ')" ans || { [ -n "$ans" ] || return 1; }
     if [ -n "$ans" ]; then
-        local _lc="${ans#[}"; _lc="${_lc%]}"
+        local _lc="$ans"
+        if [[ "$_lc" == "["*"]" ]]; then
+            _lc="${_lc#[}"; _lc="${_lc%]}"
+            [[ "$_lc" == *:* ]] || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+        elif [[ "$_lc" == *"["* || "$_lc" == *"]"* ]]; then
+            warn "$(L '监听 IP 格式不合法')"; return 1
+        fi
         is_ip "$_lc" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
-        lip="$ans"
+        lip="$(format_host_for_url "$_lc")"
     fi
 
     read -rp "$(L '本机监听端口 (1-65535): ') [${lport}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
@@ -1424,20 +1472,21 @@ realm_edit_rule() {
                 [ "${lb_c:-1}" = "2" ] && lb_algo="iphash"
                 read -rp "$(L '  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ')" lb_w || { [ -n "$lb_w" ] || return 1; }
                 if [ -n "$lb_w" ]; then
-                    local _wc=0 _wok=1 _wi
+                    local _wc=0 _wok=1 _wi _wclean=""
                     local -a _warr=()
+                    [[ "$lb_w" == *, ]] && _wok=0
                     IFS=',' read -r -a _warr <<< "$lb_w"
                     for _wi in "${_warr[@]}"; do
                         _wi="${_wi//[[:space:]]/}"
-                        [ -n "$_wi" ] || continue
+                        if [[ ! "$_wi" =~ ^[1-9][0-9]*$ ]]; then _wok=0; continue; fi
                         _wc=$((_wc + 1))
-                        [[ "$_wi" =~ ^[0-9]+$ ]] || _wok=0
+                        _wclean="${_wclean:+${_wclean}, }${_wi}"
                     done
                     if [ "$_wok" != "1" ] || [ "$_wc" -ne "$_cnt" ]; then
                         warn "$(L '权重数量与目标数不符或含非数字，已按等权生成')"
                         lb_w=""
                     else
-                        lb_w="$(printf '%s' "$lb_w" | tr -d ' ' | sed 's/,/, /g')"
+                        lb_w="$_wclean"
                     fi
                 fi
                 [ -n "$lb_w" ] || lb_w="$(printf '1, %.0s' $(seq 1 "$_cnt") | sed 's/, $//')"

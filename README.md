@@ -130,7 +130,7 @@ This repository keeps modular source files under `src/` and assembles the single
 ```bash
 ./scripts/build.sh                             # rebuild nowhere-install.sh & .sha256 from src/
 ./scripts/lint.sh                              # verify build sync, I18N, security invariants, 0-warning ShellCheck
-for t in tests/test_*.sh; do bash "$t"; done   # run all 4 automated test suites
+for t in tests/test_*.sh; do bash "$t"; done   # run all 5 automated test suites
 ```
 
 ---

@@ -33,3 +33,6 @@ jobs:
 
       - name: Run 8-component E2E installation & repair flows
         run: bash ./tests/test_e2e_install_flows.sh
+
+      - name: Run Round-3 bug fix & regression suite
+        run: bash ./tests/test_r3_bugfixes.sh

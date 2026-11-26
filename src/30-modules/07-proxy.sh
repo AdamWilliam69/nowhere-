@@ -41,7 +41,8 @@ caddy_ports() {
             source "$f" 2>/dev/null || exit 0
             [ "${SITE_ENABLED:-0}" = "1" ] || exit 0
             if [ "${SITE_MODE:-https}" = "http" ]; then
-                validate_port "${SITE_PORT:-80}" && echo "${SITE_PORT:-80}/tcp"
+                validate_port "${SITE_PORT:-80}" || exit 0
+                echo "$((10#${SITE_PORT:-80}))/tcp"
             else
                 echo "80/tcp"
                 echo "443/tcp"
@@ -106,14 +107,7 @@ proxy_state_text() {
 }
 
 caddy_latest_tag() {
-    local tag=""
-    tag="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${CADDY_REPO}/releases/latest" 2>/dev/null \
-        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
-    if [ -z "$tag" ]; then
-        tag="$(secure_curl -fsSI --max-time 20 "https://github.com/${CADDY_REPO}/releases/latest" 2>/dev/null \
-            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
-    fi
-    printf '%s' "$tag"
+    github_latest_tag "$CADDY_REPO"
 }
 
 caddy_fetch_binary() {
@@ -313,10 +307,17 @@ caddy_render_site() {
             rm -f "$caddy_file"
             exit 0
         fi
+        # 渲染前纵深校验，防止被篡改或导入的 .env 向 Caddyfile 注入任意指令
+        local re_dom='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+        [[ "${SITE_DOMAIN:-}" == *.* && "${SITE_DOMAIN:-}" =~ $re_dom ]] || exit 1
+        caddy_valid_upstream "${SITE_UPSTREAM:-}" || exit 1
+        case "${SITE_REMARK:-}" in *$'\n'*|*$'\r'*) exit 1 ;; esac
         local addr="" up="${SITE_UPSTREAM}"
         case "${SITE_MODE:-https}" in
             http)
                 local sp="${SITE_PORT:-80}"
+                validate_port "$sp" || exit 1
+                sp=$((10#$sp))
                 addr="http://${SITE_DOMAIN}:${sp}"
                 ;;
             *)
@@ -364,6 +365,7 @@ caddy_rebuild_all() {
         id="$(basename "$f" .env)"
         if ! caddy_render_site "$id"; then
             warn "$(L '渲染站点配置失败:') ${id}"
+            rm -f "${CADDY_SITES_DIR}/${id}.caddy"
             rc=1
         fi
     done < <(caddy_site_files)
@@ -400,13 +402,21 @@ caddy_reload_service() {
         return 0
     fi
     if grep -q '^User=' "$CADDY_SERVICE" 2>/dev/null; then
-        sed -i '/^User=/d; /^Group=/d' "$CADDY_SERVICE" || return 1
+        local _svc_bak="${CADDY_SERVICE}.rootbak"
+        cp -p "$CADDY_SERVICE" "$_svc_bak" 2>/dev/null || true
+        sed -i '/^User=/d; /^Group=/d' "$CADDY_SERVICE" || { [ -f "$_svc_bak" ] && mv -f "$_svc_bak" "$CADDY_SERVICE"; return 1; }
         systemctl daemon-reload || true
+        # 重试前先切 root 标记并调整 CADDY_DATA_DIR 归属，否则 CapabilityBoundingSet 限制下 UID 0 仍会 EACCES
+        touch "${CADDY_DIR}/run-as-root" 2>/dev/null || true
+        caddy_fix_perms
         if svc_restart_wait adam-caddy 2 15 && caddy_wait_healthy; then
-            touch "${CADDY_DIR}/run-as-root" 2>/dev/null || true
-            caddy_fix_perms
+            rm -f "$_svc_bak"
             return 0
         fi
+        rm -f "${CADDY_DIR}/run-as-root" 2>/dev/null || true
+        if [ -f "$_svc_bak" ]; then mv -f "$_svc_bak" "$CADDY_SERVICE"; fi
+        systemctl daemon-reload || true
+        caddy_fix_perms
     fi
     return 1
 }
@@ -775,7 +785,9 @@ SITEEOF
     fi
     rm -f "$bak"
     if [ "$mode" = "http" ] && [ "$port" != "$old_port" ]; then
-        fw_allow_for_service "${port}/tcp"
+        if [ "${SITE_ENABLED:-0}" = "1" ]; then
+            fw_allow_for_service "${port}/tcp"
+        fi
         ufw_installed && validate_port "$old_port" && fw_prune_old_specs "${old_port}/tcp"
         reserved_ports_sync || true
     fi
@@ -841,6 +853,7 @@ caddy_uninstall_do() {
         local _cs
         while IFS= read -r _cs; do
             [ -n "$_cs" ] || continue
+            fw_spec_has_ssh_port "$_cs" && continue
             port_used_by_other_services "$_cs" caddy && continue
             fw_delete_spec "$_cs"
         done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
@@ -859,14 +872,7 @@ caddy_uninstall() {
 # ── Cloudflare Tunnel (cloudflared) ─────────────────────────────
 
 cf_tunnel_latest_tag() {
-    local tag=""
-    tag="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${CF_TUNNEL_REPO}/releases/latest" 2>/dev/null \
-        | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
-    if [ -z "$tag" ]; then
-        tag="$(secure_curl -fsSI --max-time 20 "https://github.com/${CF_TUNNEL_REPO}/releases/latest" 2>/dev/null \
-            | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -n 's#.*/tag/##p' | tail -1 || true)"
-    fi
-    printf '%s' "$tag"
+    github_latest_tag "$CF_TUNNEL_REPO"
 }
 
 cf_tunnel_fix_perms() {
@@ -915,7 +921,7 @@ cf_tunnel_fetch_binary() {
     if [ -z "$digest" ]; then
         api_json="$(secure_curl -fsS --max-time 20 "https://api.github.com/repos/${CF_TUNNEL_REPO}/releases/tags/${tag}" 2>/dev/null || true)"
         if [ -n "$api_json" ]; then
-            digest="$(printf '%s\n' "$api_json" | grep -oE "${asset}[[:space:]:]+([0-9a-fA-F]{64})" | grep -oE '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f' || true)"
+            digest="$(printf '%s\n' "$api_json" | grep -oE "(^|[^A-Za-z0-9._-])${asset}[[:space:]:\`|]+([0-9a-fA-F]{64})" | grep -oE '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f' || true)"
         fi
     fi
     if [[ "$digest" =~ ^[0-9a-f]{64}$ ]]; then
@@ -1023,26 +1029,45 @@ cf_tunnel_setup_token() {
         info "$(L '已自动提取 Cloudflare Tunnel Token')"
     fi
     token="${token//[[:space:]]/}"
+    token="${token#\"}"; token="${token%\"}"
+    token="${token#\'}"; token="${token%\'}"
     [ -n "$token" ] || { warn "$(L 'Token 不能为空')"; return 1; }
     install -d -m 700 "$CF_TUNNEL_DIR"
+    local _env_bak=""
+    if [ -f "$CF_TUNNEL_ENV" ]; then
+        _env_bak="${CF_TUNNEL_ENV}.bak"
+        ( umask 077; cp -f "$CF_TUNNEL_ENV" "$_env_bak" ) 2>/dev/null || _env_bak=""
+    fi
     ( umask 077; printf 'TUNNEL_TOKEN="%s"\n' "$(dq_escape "$token")" > "$CF_TUNNEL_ENV" )
     cf_tunnel_fix_perms
     cf_tunnel_write_service
     systemctl enable adam-cloudflared >/dev/null 2>&1 || true
     if svc_restart_wait adam-cloudflared 3 20; then
+        [ -n "$_env_bak" ] && rm -f "$_env_bak"
         maint_install_timers >/dev/null 2>&1 || true
         success "$(L 'Cloudflare Tunnel 持久化服务已启动')"
         return 0
     fi
     if grep -q '^User=' "$CF_TUNNEL_SERVICE" 2>/dev/null; then
-        sed -i '/^User=/d; /^Group=/d' "$CF_TUNNEL_SERVICE" || return 1
+        local _svc_bak="${CF_TUNNEL_SERVICE}.rootbak"
+        cp -p "$CF_TUNNEL_SERVICE" "$_svc_bak" 2>/dev/null || true
+        sed -i '/^User=/d; /^Group=/d' "$CF_TUNNEL_SERVICE" || { [ -f "$_svc_bak" ] && mv -f "$_svc_bak" "$CF_TUNNEL_SERVICE"; return 1; }
         systemctl daemon-reload || true
         if svc_restart_wait adam-cloudflared 3 20; then
+            rm -f "$_svc_bak"
+            [ -n "$_env_bak" ] && rm -f "$_env_bak"
             touch "${CF_TUNNEL_DIR}/run-as-root" 2>/dev/null || true
             maint_install_timers >/dev/null 2>&1 || true
             success "$(L 'Cloudflare Tunnel 持久化服务已启动')"
             return 0
         fi
+        if [ -f "$_svc_bak" ]; then mv -f "$_svc_bak" "$CF_TUNNEL_SERVICE"; fi
+        systemctl daemon-reload || true
+    fi
+    if [ -n "$_env_bak" ] && [ -f "$_env_bak" ]; then
+        mv -f "$_env_bak" "$CF_TUNNEL_ENV"
+        cf_tunnel_fix_perms
+        systemctl restart adam-cloudflared >/dev/null 2>&1 || true
     fi
     warn "$(L 'Cloudflare Tunnel 启动失败，请查看日志：journalctl -u adam-cloudflared -n 20 --no-pager')"
     return 1
@@ -1060,12 +1085,17 @@ _cf_tunnel_repair_core() {
             return 0
         fi
         if grep -q '^User=' "$CF_TUNNEL_SERVICE" 2>/dev/null; then
-            sed -i '/^User=/d; /^Group=/d' "$CF_TUNNEL_SERVICE" || return 1
+            local _svc_bak="${CF_TUNNEL_SERVICE}.rootbak"
+            cp -p "$CF_TUNNEL_SERVICE" "$_svc_bak" 2>/dev/null || true
+            sed -i '/^User=/d; /^Group=/d' "$CF_TUNNEL_SERVICE" || { [ -f "$_svc_bak" ] && mv -f "$_svc_bak" "$CF_TUNNEL_SERVICE"; return 1; }
             systemctl daemon-reload || true
             if svc_restart_wait adam-cloudflared 3 15; then
+                rm -f "$_svc_bak"
                 touch "${CF_TUNNEL_DIR}/run-as-root" 2>/dev/null || true
                 return 0
             fi
+            if [ -f "$_svc_bak" ]; then mv -f "$_svc_bak" "$CF_TUNNEL_SERVICE"; fi
+            systemctl daemon-reload || true
         fi
         return 1
     fi

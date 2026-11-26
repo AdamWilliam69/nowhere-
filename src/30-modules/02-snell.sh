@@ -147,14 +147,14 @@ snell_dl_exists() {   # snell_dl_exists ARCH VERSION
 snell_probe_batch() {
     local arch="$1" tmp c
     shift
-    make_workdir || return 1
-    tmp="$WORKDIR/snell-probe"
+    tmp="$(mktemp /tmp/adam-snell-probe.XXXXXX 2>/dev/null)" || return 1
     : > "$tmp"
     for c in "$@"; do
         ( if snell_dl_exists "$arch" "$c"; then echo "$c" >> "$tmp"; fi ) &
     done
     wait
     cat "$tmp" 2>/dev/null || true
+    rm -f "$tmp"
     return 0
 }
 
@@ -376,12 +376,13 @@ snell_restart_all() {
 snell_sync_extras_after_restore() {
     local inst p
     while IFS= read -r inst; do
+        [[ "$inst" == snell-port@*.service ]] || continue
         p="${inst#snell-port@}"; p="${p%.service}"
         if [ ! -f "${SNELL_PORTS_DIR}/${p}.conf" ]; then
             systemctl disable --now "$inst" >/dev/null 2>&1 || true
             info "$(L '已停用多余的 Snell 附加端口实例：')${p}"
         fi
-    done < <(systemctl list-units --all 'snell-port@*.service' --no-legend 2>/dev/null | awk '{print $1}')
+    done < <(systemctl list-units --all --plain 'snell-port@*.service' --no-legend 2>/dev/null | awk '{print $1}')
     snell_start_extras
 }
 
@@ -624,7 +625,9 @@ snell_delete_port() {
         snell_list_ports
         read -rp "$(L '输入要删除的序号（回车取消）:') " ans || { [ -n "$ans" ] || return 1; }
         if [ -z "$ans" ]; then info "$(L '已取消')"; return 0; fi
-        if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#all[@]}" ]; then warn "$(L '序号无效')"; return 1; fi
+        if [[ ! "$ans" =~ ^[0-9]+$ ]] || [ "${#ans}" -gt 5 ]; then warn "$(L '序号无效')"; return 1; fi
+        ans=$((10#$ans))
+        if [ "$ans" -lt 1 ] || [ "$ans" -gt "${#all[@]}" ]; then warn "$(L '序号无效')"; return 1; fi
         target="${all[$((ans - 1))]}"
     elif ! snell_port_taken "$target"; then
         warn "$(L '端口') ${target} $(L '不是本机的 Snell 端口配置（现有:') ${all[*]}$(L '）')"
@@ -974,11 +977,12 @@ snell_install() {
     systemctl restart snell 2>/dev/null || true
     sleep 2
     if snell_main_healthy; then
+        [ -n "$snell_conf_bak" ] && rm -f "$snell_conf_bak"
         success "Snell ${latest} $(L '已启动并监听 TCP') ${port}"
     else
         warn "$(L 'Snell 未能正常启动，最近日志：')"
         journalctl -u snell -n 20 --no-pager 2>/dev/null || true
-        if [ -n "$snell_conf_bak" ] && [ -f "$snell_conf_bak" ]; then cp -f "$snell_conf_bak" "$SNELL_CONF"; snell_fix_perms; info "$(L '已恢复旧配置')"; fi
+        if [ -n "$snell_conf_bak" ] && [ -f "$snell_conf_bak" ]; then cp -f "$snell_conf_bak" "$SNELL_CONF"; rm -f "$snell_conf_bak"; snell_fix_perms; info "$(L '已恢复旧配置')"; fi
         snell_rollback_binary "$current" || true
         return 1
     fi
@@ -1190,8 +1194,8 @@ snell_health_check() {
     fi
     arch="$(snell_arch 2>/dev/null || true)"
     if [ -n "$arch" ] && [ -n "$cur" ]; then
-        if snell_dl_exists "$arch" "$cur"; then
-            snell_query_latest "$arch" "$SNELL_CHANNEL" "$cur"
+        snell_query_latest "$arch" "$SNELL_CHANNEL" "$cur"
+        if [ "$SNELL_SOURCE_OK" = "1" ]; then
             if [ -n "$SNELL_LATEST" ] && snell_ver_gt "$SNELL_LATEST" "$cur"; then
                 hc_line 2 "$(L '官方有新版本') ${SNELL_LATEST}$(L '（当前') ${cur}$(L '），可用「检查并更新」升级')"
             else
@@ -1224,12 +1228,12 @@ _snell_repair_core() {
     reserved_ports_sync || true
     if [ -n "$port" ] && ufw_active; then ufw allow "${port}/tcp" >/dev/null 2>&1 || true; fi
     maint_install_timers || true
-    snell_sync_extras_after_restore
     while IFS= read -r rp; do
         [ -n "$rp" ] || continue
         systemctl reset-failed "snell-port@${rp}" >/dev/null 2>&1 || true
         if ufw_active; then ufw allow "${rp}/tcp" >/dev/null 2>&1 || true; fi
     done < <(snell_extra_ports)
+    snell_sync_extras_after_restore
     systemctl restart snell 2>/dev/null || true
     sleep 2
     snell_healthy
