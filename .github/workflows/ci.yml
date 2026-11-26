@@ -1,0 +1,35 @@
+name: CI — Build, Lint & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck gcc openssl python3 jq
+
+      - name: Verify build sync, I18N, syntax & zero-warning ShellCheck
+        run: ./scripts/lint.sh
+
+      - name: Run regression test suite
+        run: bash ./tests/test_v85_regressions.sh
+
+      - name: Run security & permission audit suite
+        run: bash ./tests/test_r2_security.sh
+
+      - name: Run v8.6 enhancement test suite
+        run: bash ./tests/test_v86_enhancements.sh
+
+      - name: Run 8-component E2E installation & repair flows
+        run: bash ./tests/test_e2e_install_flows.sh

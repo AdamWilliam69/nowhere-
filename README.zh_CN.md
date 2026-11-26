@@ -1,10 +1,12 @@
 [English](/README.md) | [简体中文](/README.zh_CN.md)
 
-# Adam VPS 一键管理脚本
+# Adam VPS 一键管理脚本（v8.6）
 
-一个面向 Debian / Ubuntu VPS 的交互式管理脚本：在同一个菜单里安装和维护 **Nowhere**、**Snell v6**、**Xray（SS / VLESS）** 三类代理协议，并附带防火墙、Fail2ban、系统网络调优和自动维护（保活、自动更新）。
+[![CI — Build, Lint & Test](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml/badge.svg)](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml)
 
-所有功能既可以在菜单里点选，也可以用 `adam <子命令>` 直接执行，方便写进自己的运维流程。
+一个面向 Linux VPS 的一体化交互式管理脚本：在同一个菜单或命令行中安装、加固并维护 **Nowhere（v3.3.0 / NW3）**、**Snell v6**、**Xray（SS2022 / VLESS REALITY / XHTTP / dokodemo-door）**、**Realm 端口转发**、**域名反代（Caddy / Cloudflare Tunnel）**，并集成 UFW 防火墙、Fail2ban、系统网络调优、加密备份恢复、告警推送、多客户端导出与两段式自愈维护。
+
+内置中英双语界面（`adam lang zh` / `adam lang en`，或 `ADAM_LANG=en adam`），自动化部署支持 `ADAM_ASSUME_YES=1`。
 
 ---
 
@@ -16,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/
 
 > 请使用上面的 `bash <(...)` 写法，不要用 `curl ... | bash`：后者会把脚本内容当作键盘输入，交互向导无法正常工作。
 
-安装完成后，脚本会把自己安装为 `/usr/local/bin/adam-nowhere-manager.sh`，之后直接输入：
+安装完成后，脚本会把自己安装为 `/usr/local/bin/adam-nowhere-manager.sh`（快捷命令 `/usr/local/bin/adam`），之后直接输入：
 
 ```bash
 adam
@@ -30,13 +32,35 @@ adam
 
 | 项目 | 要求 |
 | --- | --- |
-| 系统 | Debian 11+ / Ubuntu 20.04+（依赖 `apt` 与 `systemd`） |
-| 架构 | x86_64 / arm64（Snell、Xray 另支持 i386、armv7l） |
-| 权限 | root |
+| 系统 | Debian 11+ / Ubuntu 20.04+（`apt`）、RHEL / Rocky / Fedora（`dnf`/`yum`）、Alpine（`apk`），需 `systemd` |
+| 架构 | `x86_64` / `arm64`（Snell、Xray 另支持 `i386`、`armv7l`） |
+| 权限 | `root` |
 | 网络 | 能访问 GitHub、`dl.nssurge.com`（安装与自动更新需要） |
-| 可选 | 已托管在 Cloudflare 的域名 + API Token（Nowhere 使用 DNS 方式申请证书时需要） |
+| 可选 | Cloudflare API Token（DNS-01 证书 / Tunnel）；只读 `GITHUB_TOKEN`（将 GitHub API 限额从 60 次/时提升至 5000 次/时） |
 
-XanMod 内核仅支持 x86_64 且不能在 LXC / OpenVZ 等容器类虚拟化中使用。
+XanMod 内核仅支持 `x86_64` 且不能在 LXC / OpenVZ 等容器类虚拟化中使用。
+
+---
+
+## v8.6 核心升级亮点
+
+- **CSPRNG 随机引擎**：全量替换 `$RANDOM`，新增 `csprng_hex`、无偏拒绝采样 `csprng_int`、`csprng_alnum`（Python + 纯 awk 兜底）、`csprng_short_id`、`csprng_url_path`；`random_free_port` 避开 TCP/UDP 监听与全部已托管服务端口。
+- **协议抗指纹与后量子进阶**：
+  - **Xray**：REALITY 生成 2–3 条变长偶数位 `shortIds` + 随机 `spiderX` + `"maxTimeDiff": 60000` + **ML-DSA-65 后量子签名**（`mldsa65Seed` / `&pqv=`）+ PQ 安全 `uTLS` 指纹池（`chrome` / `firefox` / `safari`）+ 候选 SNI **TLS 1.3 + H2 握手 RTT 延迟择优**；XHTTP 随机化 `xPaddingBytes`（`&extra=`）与拟真多段路径；CDN 自签证书改用 ECDSA P-256 + 随机序列号 + 365–730 天随机有效期；新增**原地热轮换节点**（`adam xray edit`，支持换 SNI / 轮换 shortIds+spiderX / 换 fp / 换端口 / 轮换 XHTTP 路径与填充 / 生成或轮换 ML-DSA-65，重载失败自动回滚）。
+  - **Snell v6**：PSK 升级为 CSPRNG 变长 32–48 位（`A-Za-z0-9_-`）。
+  - **Nowhere v3.3.0**：`HANDSHAKE_TIMEOUT` 默认 `auto`（省略环境变量以启用官方按密钥派生 3–30s），仍兼容自定义时长。
+  - **Realm**：WS/WSS 默认路径改用拟真多段随机路径。
+- **供应链与运行期安全**：
+  - 全量下载统一走 `secure_curl`（强制 HTTPS TLS ≥ 1.2）；可选只读 `GITHUB_TOKEN` 通过 `curl -K` 私有 fd 仅对 `https://api.github.com/*` 注入（不暴露于 `ps`、绝不泄露第三方域名）。
+  - 官方 Release SHA-256/SHA-512 + 本机架构 ELF 头校验覆盖 Nowhere / Xray / Snell / Realm / Caddy / cloudflared；Xray 规则库强校验官方 `dlc.dat` + `.sha256sum`。
+  - 管理脚本自更新强制校验 **[`nowhere-install.sh.sha256`](nowhere-install.sh.sha256)**（不匹配即拒绝替换，支持 `MAINT_SCRIPT_STRICT_SHA=1` 严格模式）。
+  - 全部 6 个 systemd 服务单元统一启用沙箱加固（`NoNewPrivileges`、`PrivateDevices`、`ProtectKernelTunables`、`ProtectKernelModules`、`ProtectControlGroups`、`RestrictNamespaces`、`LockPersonality`、`RestrictSUIDSGID`）。
+  - 备份支持可选 **AES-256-CBC (PBKDF2 600k iter)** 口令加密（`adam backup --encrypt` 生成 `.tgz.enc`，口令走 `fd:3` 不进命令行），`adam restore` 自动识别并解密恢复。
+- **可观测性、自动自愈与多客户端导出**：
+  - **两段式 Watchdog 自愈**：常规重启未恢复时自动执行对应服务的权限收敛/证书同步/配置重建/保留端口同步（30 分钟冷却防风暴）。
+  - **运维告警推送（`adam notify`）**：支持 Telegram Bot / Bark / HTTPS Webhook，覆盖二段自愈、服务宕机、自动更新回滚、证书剩余 `<14` 天、Nowhere `tls=1` 指纹变动与脚本更新。
+  - **NTP 时钟同步检查**（保障 REALITY `maxTimeDiff: 60000`）+ **`adam doctor --json`** 结构化巡检输出。
+  - **多客户端配置一键导出（`adam export mihomo|singbox|surge`）**，内置 Mihomo REALITY 指纹兼容自动规范化。
 
 ---
 
@@ -44,106 +68,18 @@ XanMod 内核仅支持 x86_64 且不能在 LXC / OpenVZ 等容器类虚拟化中
 
 ```
 ── 协议安装 ──
-1) Nowhere     Portal / Egress：安装、配置、连接信息、证书、版本
-2) Snell v6    安装、多端口、跟随官方测试版自动更新、健康检查
-3) Xray        SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption
-── 系统管理 ──
-4) 脚本更新    更新本脚本 / 重装快捷命令
-5) 防火墙      ufw：安装、放行与删除端口、启停
+1) Nowhere     Portal / Egress：安装、配置、连接信息、证书、版本、一键修复
+2) Snell v6    安装、多端口、跟随官方测试版自动更新、健康检查、一键修复
+3) Xray        SS2022 / VLESS：REALITY Vision、XHTTP REALITY/TLS/CDN、VLESS Encryption、热编辑、端口转发
+── 系统与转发 ──
+4) 脚本更新    更新本脚本（SHA-256 校验）/ 重装快捷命令
+5) 防火墙      ufw：安装、放行与删除端口、同步托管端口、启停
 6) Fail2ban    SSH 防爆破：封禁时长、被封 IP、启停
 7) 系统调优    TCP 调优（tcpfit）/ XanMod 内核 / DNS / IPv4·IPv6 优先级 / 禁用 IPv6
-8) 自动维护    保活巡检 / 脚本与内核自动更新
+8) 自动维护    两段式保活 / 自动更新 / 加密备份恢复 / 诊断 / 全局修复 / 告警推送 / 客户端导出
+9) Realm       TCP/UDP/WS/WSS 端口转发、批量建规、TOML 校验、导入导出、一键修复
+10) 域名反代   Caddy 多域名自动 HTTPS 反代与 Cloudflare Tunnel
 ```
-
----
-
-## 功能详情
-
-### 1. Nowhere（适配 v3.3.0 / NW3）
-
-基于 [NodePassProject/Nowhere](https://github.com/NodePassProject/Nowhere)。
-
-- **Portal 安装向导**：自签证书、Let's Encrypt HTTP 验证、Cloudflare DNS 验证（certbot）、其他 DNS 服务商（acme.sh）多种证书方式；TCP / UDP / 混合监听，同端口或分端口
-- **出口方式**：直连、SOCKS 上游、远程 Egress
-- **Egress 出口机**：支持 QUIC 与 TLS（v3.3.0 新增）两种回连载体；可直接粘贴 Portal 生成的 `egress://` 连接串一键装成服务；同一 Portal 可接多台 Egress
-- **连接信息**：自动生成 Anywhere 导入链接、Vector / Egress 启动命令与二维码
-- **运维**：服务状态（含 `nowhere status`）、实时日志、连通性探测 `probe`、证书指纹、证书续期检查
-- **版本管理**：更新到最新版、切换任意历史版本、一键回退上一版；下载包按 GitHub Release 的 SHA256 校验，新版本启动失败自动回滚
-- **兼容提醒**：升级跨过 v3.2.0（强制认证 Prelude）、v3.3.0 时会提示对端需同步升级
-
-### 2. Snell v6（Surge 官方）
-
-- **一键安装**：从 Surge 官方发布页获取最新版本，二进制只从 `dl.nssurge.com` 下载
-- **跟随测试版**：默认 beta 通道，自动跟随最新 b / rc 版，正式版发布后自动转正式版；也可切到只跟正式版的 stable 通道
-- **自动发现新版本**：官方没有版本接口，脚本除读取发布页外，还按官方版本演进规律到下载站探测，发布页取不到时也能发现新版
-- **多端口**：可新增多个端口配置，每个端口独立 PSK 与 mode；可删除任意一个端口配置（删主端口时由附加端口自动接替）
-- **保活**：服务崩溃由 systemd 立即拉起；每 5 分钟巡检一次，进程退出或端口不在监听时自动重启；监听端口写入内核保留端口，避免被出站连接占用
-- **健康检查 / 一键修复**：检查服务、监听、保留端口、防火墙、定时器与版本状态，发现问题可一键修复
-- **安全升级**：新版本启动失败自动回滚到旧二进制
-- **客户端配置**：直接输出可粘贴到 Surge `[Proxy]` 段的配置行
-
-### 3. Xray（SS / VLESS）
-
-基于 [XTLS/Xray-core](https://github.com/XTLS/Xray-core)，节点类型参考 [3x-ui](https://github.com/MHSanaei/3x-ui) 的入站设计。
-
-| 节点类型 | 说明 |
-| --- | --- |
-| VLESS + REALITY + Vision | TCP 直连，最常用 |
-| VLESS + XHTTP + REALITY | 直连，可叠加 VLESS Encryption |
-| VLESS + XHTTP + CDN | 套 Cloudflare 等 CDN，支持 TLS 回源（自签或已有证书）与明文回源 |
-| VLESS Encryption + XHTTP | ML-KEM-768（抗量子）或 X25519，不依赖 TLS |
-| Shadowsocks 2022 | blake3-aes-128/256-gcm、chacha20-poly1305，TCP + UDP |
-
-- **多节点**：每个节点独立一份配置，可随时增删；每次改动先用 `xray run -test` 校验，校验不过自动撤回
-- **跟随官方最新版**：默认跟随最新发布（含预发布），也可只跟正式版或固定某个版本
-- **安全升级**：按官方 `.dgst` 校验 SHA256；新内核先校验现有配置，不兼容就不替换；启动失败自动回滚
-- **完全隔离**：独立目录（`/opt/adam-xray`、`/etc/adam-xray`）和独立服务（`adam-xray`），不影响官方脚本或 3x-ui 安装的 Xray
-- **分享链接**：自动生成 `vless://`、`ss://` 链接与二维码
-
-### 4. 脚本更新
-
-- 从仓库拉取最新脚本，校验完整性与语法后再替换，并保留旧版备份
-- 可开启每日自动从仓库更新（版本号不低于本地才替换，不会降级）
-- 重装快捷命令
-
-### 5. 防火墙（ufw）
-
-菜单结构参考 3x-ui 的 Firewall Management：
-
-- 安装 / 启用 / 停用，启用前自动放行 SSH 端口，防止把自己锁在外面
-- 放行或删除端口，支持 `80,443`、`400-500`、`443/tcp`、`51820/udp` 等写法
-- 按编号删除时从大到小删，避免编号前移删错规则；删除 SSH 端口前会二次确认
-- 启用前列出正在监听但尚未放行的端口
-- 一键放行本脚本管理的全部服务端口（SSH / Nowhere / Snell / Xray）
-
-### 6. Fail2ban
-
-菜单结构参考 3x-ui 的 IP Limit Management，防护对象为 SSH 爆破：
-
-- 修改封禁时长（`30`=30 分钟、`1h`、`1d`、`-1`=永久）、失败次数与统计窗口
-- 查看被封 IP 与封禁日志，手动封禁 / 解封，一键解封全部
-- 白名单管理；安装时可自动把当前登录 IP 加入白名单
-- 配置只写在 `jail.d/adam-sshd.local`，不改动系统自带的 jail 配置
-- 自动适配没有 `/var/log/auth.log` 的系统（改用 systemd journal）
-
-### 7. 系统调优
-
-- **TCP 调优**：调用 [Kylin010/tcpfit](https://github.com/Kylin010/tcpfit)，按本机实测结果推导缓冲区、BBR / fq、限速器拐点等参数，所有改动可回滚
-- **XanMod 内核**：自动识别 CPU 指令集等级（x86-64-v1 ~ v4）安装对应内核，内置 BBR v3；卸载前确认系统中还有其他可启动的内核
-- **DNS**：Cloudflare / Google / Quad9 预设或自定义，可选 DNS over TLS；自动适配 systemd-resolved
-- **IPv4 / IPv6 优先级**：通过 `/etc/gai.conf` 调整，不关闭任何协议栈
-- **禁用 IPv6**：临时（重启恢复）或永久，禁用后自动调整 Snell、Xray 的监听地址
-
-以上每一项都会备份原始配置，可一键恢复。
-
-### 8. 自动维护
-
-| 任务 | 频率 | 内容 |
-| --- | --- | --- |
-| 保活巡检 | 每 5 分钟 | Snell（含所有附加端口）、Xray、Nowhere 未运行或端口未监听时自动重启 |
-| 每日维护 | 每天凌晨 | 脚本从仓库自更新 → Snell / Xray 跟随官方更新 → 证书同步 → 可选每日重启 |
-
-每一项都可以单独开关；事件记录在 `/var/log/adam-maintain.log`。手动停用（`systemctl disable`）的服务不会被保活拉起。
 
 ---
 
@@ -156,22 +92,46 @@ adam help                    # 查看全部子命令
 
 | 分类 | 示例 |
 | --- | --- |
-| Nowhere | `adam nowhere` · `adam install` · `adam config` · `adam status` · `adam update` · `adam rollback` · `adam probe` |
-| Snell | `adam snell` · `adam snell install` · `adam snell add-port` · `adam snell del-port 30002` · `adam snell health` · `adam snell update` |
-| Xray | `adam xray` · `adam xray add` · `adam xray links` · `adam xray delete` · `adam xray health` · `adam xray update` |
-| 防火墙 | `adam fw allow 443/tcp,8000-8100` · `adam fw deny 8080` · `adam fw list` · `adam fw on` / `off` |
-| Fail2ban | `adam f2b bantime 1h` · `adam f2b banned` · `adam f2b ban 1.2.3.4` · `adam f2b unban-all` |
+| Nowhere | `adam nowhere` · `adam install` · `adam config` · `adam status` · `adam update` · `adam rollback` · `adam probe` · `adam nowhere-repair` |
+| Snell | `adam snell` · `adam snell install` · `adam snell add-port` · `adam snell del-port 30002` · `adam snell health` · `adam snell repair` |
+| Xray | `adam xray` · `adam xray add` · `adam xray edit [tag]` · `adam xray links` · `adam xray health` · `adam xray repair` · `adam xray fwd` |
+| Realm 与反代 | `adam realm` · `adam proxy` · `adam caddy` · `adam tunnel` |
+| 防火墙与 Fail2ban | `adam fw allow 443/tcp,8000-8100` · `adam fw sync` · `adam f2b bantime 1h` · `adam f2b banned` |
 | 系统调优 | `adam tune tcp` · `adam tune xanmod` · `adam tune dns set` · `adam tune prefer ipv4` · `adam tune ipv6 off` |
-| 维护 | `adam auto` · `adam maintain` · `adam watchdog` · `adam maintain-log` · `adam update-script` |
+| 运维与维护 | `adam repair` · `adam doctor [--json]` · `adam notify` · `adam export mihomo\|singbox\|surge` · `adam backup [--encrypt]` · `adam restore <文件>` · `adam lang [zh\|en]` |
 
-**Nowhere 快捷命令**
+**Nowhere 快捷命令**：`zt`（状态）· `pz`（配置）· `cxpz`（重新配置）· `cq`（重启）
 
-| 命令 | 作用 |
-| --- | --- |
-| `zt` | 查看服务状态 |
-| `pz` | 查看连接信息 |
-| `cxpz` | 重新配置 |
-| `cq` | 重启服务 |
+---
+
+## 仓库目录结构与开发协作
+
+本仓库采用**模块化源码 + 自动构建单文件发行版**结构，根目录保留构建产物 `nowhere-install.sh` 与 `nowhere-install.sh.sha256`，100% 兼容既有的一键安装与每日自动更新链接：
+
+```text
+.
+├── nowhere-install.sh             # 构建产物：单文件发行版（由 scripts/build.sh 生成，勿手工直接编辑）
+├── nowhere-install.sh.sha256      # 构建产物：官方 SHA-256 校验文件
+├── src/
+│   ├── 00-header.sh               # 版本元数据、全局变量、颜色与日志、语言加载
+│   ├── 10-i18n/en.tsv             # 中英双语词典（构建期自动查重与查漏）
+│   ├── 20-lib/                    # 核心基础、CSPRNG 与安全、UFW、Fail2ban、自动维护/备份/诊断/导出
+│   ├── 30-modules/                # Nowhere、Snell、Xray、系统调优、Realm、Xray 转发、Caddy/CF Tunnel
+│   └── 99-main.sh                 # usage()、主菜单与 CLI 分发
+├── scripts/
+│   ├── build.sh                   # 拼接 src/ -> nowhere-install.sh + .sha256（--check 供 CI 检测漂移）
+│   └── lint.sh                    # 构建同步 + bash -n + 安全不变量 + 零警告 ShellCheck
+├── tests/                         # 回归、安全权限、v8.6 增强与 8 组件全流程端到端测试套件
+└── .github/workflows/ci.yml       # GitHub Actions 自动门禁
+```
+
+### 本地构建与验证
+
+```bash
+./scripts/build.sh                             # 从 src/ 构建 nowhere-install.sh 与 .sha256
+./scripts/lint.sh                              # 校验构建同步、I18N、安全不变量与 0 警告 ShellCheck
+for t in tests/test_*.sh; do bash "$t"; done   # 运行全部 4 套自动化测试
+```
 
 ---
 
@@ -182,19 +142,19 @@ adam help                    # 查看全部子命令
 | `/usr/local/bin/adam-nowhere-manager.sh` | 管理脚本本体 |
 | `/etc/nowhere/` | Nowhere 配置、密钥、证书 |
 | `/etc/snell/` | Snell 主配置；附加端口配置在 `ports/` 下 |
-| `/opt/adam-xray/`、`/etc/adam-xray/` | Xray 二进制；节点配置与证书 |
-| `/etc/adam/` | 自动维护设置与各项调优的原始配置备份 |
-| `/var/log/adam-maintain.log` | 保活与自动更新记录 |
+| `/opt/adam-xray/`、`/etc/adam-xray/` | 独立 Xray 二进制、节点配置、转发规则与证书 |
+| `/etc/adam-realm/` | Realm 合并配置与规则元数据 |
+| `/etc/adam-caddy/`、`/etc/adam-cloudflared/` | Caddy 反代站点与 Cloudflare Tunnel 配置 |
+| `/etc/adam/` | 自动维护设置、告警推送配置（`notify.env`，`0600`）与调优原始配置备份 |
+| `/var/log/adam-maintain.log` | 保活自愈与自动更新事件日志（`0600`） |
 
 ---
 
 ## 注意事项
 
-- **REALITY 客户端兼容性**：较新的 Xray 版本要求客户端握手带 X25519MLKEM768，旧客户端会表现为超时。请使用较新的 Xray 内核客户端；客户端跟不上时，可在安装 Xray 时选择"指定版本"固定在旧版本。
-- **Snell 测试版**：beta 通道安装的是官方测试版，协议在正式版前仍可能变化，客户端需使用支持对应版本的 Surge。
-- **更换内核有风险**：安装 XanMod 前请确认服务商面板有 VNC 或救援模式。
-- **云厂商安全组**：脚本只管理本机 ufw，云厂商控制台的安全组需要自行放行端口。
-- 建议先在测试机上熟悉各项功能，再用于生产环境。
+- **REALITY 客户端兼容性**：较新的 Xray 版本要求客户端握手带 `X25519MLKEM768`（并支持可选 ML-DSA-65 `pqv` 验签），旧客户端可能超时。请使用较新的 Xray 内核客户端，或在安装 Xray 时固定旧版本。
+- **NTP 时钟同步**：REALITY 已启用 `"maxTimeDiff": 60000`（容忍 ±60 秒偏差），请保持系统 NTP 同步（`adam doctor` 与 `adam xray health` 会自动检查）。
+- **云厂商安全组**：脚本只管理本机 `ufw`，云厂商控制台的安全组需要自行放行端口。
 
 ---
 
@@ -207,6 +167,8 @@ adam help                    # 查看全部子命令
 - [chikacya/nowhere-sh](https://github.com/chikacya/nowhere-sh) — Nowhere 部署脚本
 - [Surge Snell](https://kb.nssurge.com/surge-knowledge-base/release-notes/snell) — Snell 协议
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core) — Xray 内核
+- [zhboner/realm](https://github.com/zhboner/realm) — Realm 端口转发
+- [caddyserver/caddy](https://github.com/caddyserver/caddy) & [cloudflare/cloudflared](https://github.com/cloudflare/cloudflared) — 域名反代与内网穿透
 - [MHSanaei/3x-ui](https://github.com/MHSanaei/3x-ui) — 防火墙、Fail2ban 与 VLESS 入站的设计参考
 - [Eric86777/vps-tcp-tune](https://github.com/Eric86777/vps-tcp-tune) — Snell 保活与系统调优的设计参考
 - [Kylin010/tcpfit](https://github.com/Kylin010/tcpfit) — TCP 调优
