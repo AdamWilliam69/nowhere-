@@ -316,6 +316,7 @@ BIN_PATH="/usr/local/bin/nowhere"
 BIN_BACKUP_PATH="/usr/local/bin/nowhere.previous"
 CONFIG_DIR="/etc/nowhere"
 CONFIG_FILE="${CONFIG_DIR}/nowhere.env"
+INSTALL_DRAFT_FILE="${CONFIG_DIR}/.install-draft.env"
 VERSION_FILE="${CONFIG_DIR}/version.txt"
 PREV_VERSION_FILE="${CONFIG_DIR}/version.previous.txt"
 SERVICE_FILE="/etc/systemd/system/nowhere.service"
@@ -2404,6 +2405,55 @@ init_i18n_en() {
         ['是否同时卸载域名反代（Caddy / Cloudflare Tunnel）？']='Also uninstall reverse proxy (Caddy / Cloudflare Tunnel)?'
         ['，不自动跨大版本']=', not auto-upgrading across major versions'
         ['跳过上游 TLS 证书校验（自签上游选 y）？']='Skip upstream TLS verification (choose y for self-signed upstream)?'
+        ['注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 11）']='Note: timer unit files are not in the backup; after restoring on another machine, reinstall the timers (Auto-maintenance menu 11)'
+        ['该域名与端口组合已存在反代配置，请改用「编辑反代站点」']='A reverse proxy site already exists for this domain and port; please use "Edit a reverse proxy site" instead'
+        ['已跳过被其他进程占用的端口：']='Skipped port already occupied by another process: '
+        ['规则渲染失败，已中止']='Failed to render rule; aborted'
+        ['已自动提取 Cloudflare Tunnel Token']='Automatically extracted Cloudflare Tunnel Token'
+        ['Caddy 服务恢复后重载失败，请检查日志']='Caddy failed to reload after restore; check the logs'
+        ['配置更新失败，已恢复原配置']='Config update failed; original config restored'
+        ['服务重启失败，已回滚到旧二进制']='Service restart failed; rolled back to previous binary'
+        ['同时删除防火墙中 Caddy 端口的放行规则（']='Also delete the firewall allow rules for the Caddy ports ('
+        ['检测到上次未完成的安装草稿：']='Detected an unfinished installation draft from last time:'
+        ['载入草稿，直接进入确认/局部修改并继续（推荐）']='Load draft, review/edit specific items, and resume (recommended)'
+        ['丢弃草稿，重新从头填写']='Discard draft and start over from scratch'
+        ['已载入上次安装草稿（可直接确认或局部修改）']='Loaded previous installation draft (confirm directly or edit specific sections)'
+        ['已保存安装草稿（若中途出错，下次运行可直接断点续装）']='Saved installation draft (if anything fails mid-way, re-running resumes here)'
+        ['操作选项：']='Options:'
+        ['确认并开始安装']='Confirm and start installation'
+        ['修改 证书方式 / 域名 / 邮箱 / DNS 凭证']='Edit certificate method / domain / email / DNS credentials'
+        ['修改 端口模式 / 监听端口 / 传输模式 / 监听地址']='Edit port mode / ports / transport mode / listen address'
+        ['修改 共享密钥 / Morph / Prelude / 握手超时']='Edit shared key / Morph / Prelude / handshake timeout'
+        ['修改 Portal 出口 / 出站源 IP / 限速']='Edit Portal egress / outbound source IP / rate limits'
+        ['修改 Vector / Egress 客户端连接信息选项']='Edit Vector / Egress client link generation options'
+        ['取消退出（可选择保留草稿以便下次继续）']='Cancel (optionally keep draft for next time)'
+        ['是否保留已填写的配置草稿以便下次直接继续？']='Keep the filled configuration draft to resume next time?'
+        ['草稿已保留：']='Draft kept at: '
+        ['草稿已清除']='Draft cleared'
+        ['证书申请未成功，请选择下一步（无需从头填写配置）：']='Certificate issuance failed. Choose next action (no need to restart wizard):'
+        ['重试当前证书申请']='Retry current certificate issuance'
+        ['重新输入 Cloudflare / DNS 凭证并重试']='Re-enter Cloudflare / DNS credentials and retry'
+        ['更换证书方式 / 域名（如改用 DNS-01 或自签 tls=1）']='Switch certificate method / domain (e.g. DNS-01 or self-signed tls=1)'
+        ['暂停并保留安装草稿（修好 DNS/80端口 后重新运行安装即可继续）']='Pause and keep draft (fix DNS / port 80 and re-run to resume)'
+        ['下载失败，是否立即重试？']='Download failed. Retry now?'
+        ['已暂存安装草稿，网络恢复后重新运行安装可直接继续']='Installation draft saved; re-run when network recovers to resume'
+        ['目标端口被占用，请选择处理方式（无需从头填写）：']='Target port is occupied. Choose how to proceed (no need to restart):'
+        ['立即更换监听端口并重新检测（推荐）']='Change listen port now and re-check (recommended)'
+        ['重新检测当前端口（如果你已停掉占用进程）']='Re-check current port (if you stopped the occupying process)'
+        ['忽略占用强制继续']='Ignore conflict and force continue'
+        ['暂停并保留安装草稿']='Pause and keep installation draft'
+        ['检测到已有 Cloudflare 凭证文件（/etc/cloudflare/credentials.ini），是否直接复用？']='Found existing Cloudflare credentials (/etc/cloudflare/credentials.ini). Reuse it?'
+        ['已更新安装配置，请再次核对']='Configuration updated; please review again'
+        ['服务启动失败，已保留安装草稿；排查后重新运行安装可直接续装']='Service failed to start; installation draft kept so you can resume after troubleshooting'
+        ['XanMod 官方仓库暂不提供当前系统代号（']='XanMod official repo does not currently publish for this distro codename ('
+        ['）的软件包，已跳过写入软件源（避免污染 apt）']='); skipped adding repo to keep apt clean'
+        ['已清理失败的 XanMod 软件源配置']='Cleaned up failed XanMod apt source'
+        ['输入 q 取消']='type q to cancel'
+        ['是否重新输入 SOCKS5 地址？']='Re-enter SOCKS5 address?'
+        ['当前 80 端口已被占用，HTTP-01 签发可能失败：']='Port 80 is currently occupied; HTTP-01 issuance may fail:'
+        ['证书获取失败，是否重试或更换证书方式？']='Certificate acquisition failed. Retry or switch certificate method?'
+        ['第 8 步：安装前端口占用检测']='Step 8: Pre-install port occupancy check'
+        ['第 9 步：保存配置']='Step 9: Save the config'
     )
     _I18N_INIT=1
 }
@@ -2637,7 +2687,7 @@ fetch_nowhere_release() {
     fi
     verify_release_checksum "$tag" "$workdir" || { warn "$(L '安装包 SHA256 校验失败，已中止')"; return 1; }
     tar -xzf "$workdir/nowhere.tar.gz" -C "$workdir/" || { warn "$(L '解压失败')"; return 1; }
-    DL_BINARY="$(find "$workdir" -type f -name nowhere | head -1)"
+    DL_BINARY="$(find "$workdir" -type f -name nowhere 2>/dev/null | head -1 || true)"
     if [ -z "$DL_BINARY" ]; then warn "$(L '解压后未找到 nowhere 二进制')"; return 1; fi
     chmod 755 "$DL_BINARY"
     if ! upgrade_binary_precheck "$DL_BINARY" --version; then
@@ -2786,7 +2836,7 @@ nowhere_rollback_binary() {
     systemctl restart nowhere 2>/dev/null || true
     sleep 2
     if systemctl is-active --quiet nowhere; then
-        success "$(L '已自动回滚，服务恢复运行:') $(${BIN_PATH} --version 2>&1 | head -1)"
+        success "$(L '已自动回滚，服务恢复运行:') $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)"
     else
         warn "$(L '回滚后服务仍未启动，请立即查看日志: journalctl -u nowhere -n 50 --no-pager')"
     fi
@@ -2841,7 +2891,7 @@ install_nowhere_version() {
 
     # 启动失败自动用本地备份二进制回滚，不把服务留在宕机状态
     if upgrade_binary_finish nowhere _upgrade_restart_nowhere _upgrade_healthy_nowhere nowhere_rollback_binary "$cur_tag" 2 20; then
-        success "$(L '已切换到') ${target_tag}: $(${BIN_PATH} --version 2>&1 | head -1)"
+        success "$(L '已切换到') ${target_tag}: $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)"
         print_upgrade_notes "$cur_tag" "$target_tag"
         return 0
     fi
@@ -3753,16 +3803,24 @@ prompt_cloudflare_creds() {
         esac
     done
     if [ "$CF_AUTH_TYPE" = "1" ]; then
-        read -rp "Cloudflare Email: " email || { [ -n "$email" ] || return 1; }
-        email="$(printf '%s' "$email" | tr -d ' \r\n')"
-        [ -n "$email" ] || { warn "$(L 'Cloudflare 邮箱不能为空')"; return 1; }
+        while true; do
+            read -rp "Cloudflare Email ($(L '输入 q 取消')): " email || { [ -n "$email" ] || return 1; }
+            email="$(printf '%s' "$email" | tr -d ' \r\n')"
+            [ "$email" = "q" ] && return 1
+            [ -n "$email" ] && break
+            warn "$(L 'Cloudflare 邮箱不能为空')"
+        done
         CF_EMAIL="$email"
     else
         CF_EMAIL=""
     fi
-    read -rsp "$(L 'Cloudflare API Token（建议）或 Global API Key（输入不回显）:') " key || { [ -n "$key" ] || return 1; }; echo
-    key="$(printf '%s' "$key" | tr -d ' \r\n')"
-    [ -n "$key" ] || { warn "$(L 'Cloudflare 凭证不能为空')"; return 1; }
+    while true; do
+        read -rsp "$(L 'Cloudflare API Token（建议）或 Global API Key（输入不回显）:') " key || { [ -n "$key" ] || return 1; }; echo
+        key="$(printf '%s' "$key" | tr -d ' \r\n')"
+        [ "$key" = "q" ] && return 1
+        [ -n "$key" ] && break
+        warn "$(L 'Cloudflare 凭证不能为空')"
+    done
     CF_KEY="$key"
     return 0
 }
@@ -4032,15 +4090,23 @@ certbot_renewal_cron_ensure() {
 # 调用前须设好 DOMAIN/EMAIL/CERT_METHOD/CRT/KEY_PEM（DNS-01 通用还需 DNS_API）；失败时 error 退出
 obtain_portal_cert() {
     if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
-        info "$(L '安装 acme.sh...')"
-        if ! curl -fsSL --max-time 60 https://get.acme.sh | bash -s email="${EMAIL}"; then
-            error "$(L 'acme.sh 安装失败，请检查网络后重试')"
+        if [ ! -x "${ACME_HOME}/acme.sh" ]; then
+            info "$(L '安装 acme.sh...')"
+            if ! curl -fsSL --max-time 60 https://get.acme.sh | bash -s email="${EMAIL}"; then
+                warn "$(L 'acme.sh 安装失败，请检查网络后重试')"
+                return 1
+            fi
         fi
-        [ -x "${ACME_HOME}/acme.sh" ] || error "$(L 'acme.sh 安装后仍找不到可执行文件（')${ACME_HOME}$(L '/acme.sh）')"
+        [ -x "${ACME_HOME}/acme.sh" ] || { warn "$(L 'acme.sh 安装后仍找不到可执行文件（')${ACME_HOME}$(L '/acme.sh）')"; return 1; }
         . "${ACME_HOME}/acme.sh.env" 2>/dev/null || true
     fi
     if [ "$CERT_METHOD" = "cloudflare-dns" ]; then
-        write_cloudflare_creds
+        if [ -n "${CF_KEY:-}" ]; then
+            write_cloudflare_creds
+        elif [ ! -s /etc/cloudflare/credentials.ini ]; then
+            prompt_cloudflare_creds || return 1
+            write_cloudflare_creds
+        fi
     fi
     if cert_is_valid "$DOMAIN" "$CRT" "$KEY_PEM"; then
         info "$(L '检测到有效证书（剩余') $(cert_expiry_days "$CRT") $(L '天，域名匹配），跳过申请')"
@@ -4051,54 +4117,58 @@ obtain_portal_cert() {
         if tcp_listening 80; then
             warn "$(L '80 端口已被其他进程占用，HTTP-01 签发前请先停掉该服务或改用 DNS-01')"
             systemctl stop nowhere 2>/dev/null || true
-            if tcp_listening 80; then error "$(L '80 端口仍被占用，证书签发已中止')"; fi
+            if tcp_listening 80; then warn "$(L '80 端口仍被占用，证书签发已中止')"; return 1; fi
         fi
         info "$(L '申请证书中（HTTP-01，需 80 端口）...')"
         ufw allow 80/tcp 2>/dev/null || true
-        certbot certonly \
+        if ! certbot certonly \
             --standalone \
             --preferred-challenges http \
             --non-interactive \
             --agree-tos \
             --email "${EMAIL}" \
             -d "${DOMAIN}" \
-            --http-01-port 80 --http-01-address 0.0.0.0 || {
-            error "$(L '证书申请失败，请检查：1')) $(L '域名是否正确 2')) $(L '80 端口是否对外开放 3')) $(L '域名是否已指向本 VPS（见上方 DNS 预检结果）')"
-        }
-        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "$(L '证书签发后校验未通过，请看上方告警')"
+            --http-01-port 80 --http-01-address 0.0.0.0; then
+            warn "$(L '证书申请失败，请检查：1')) $(L '域名是否正确 2')) $(L '80 端口是否对外开放 3')) $(L '域名是否已指向本 VPS（见上方 DNS 预检结果）')"
+            return 1
+        fi
+        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || { warn "$(L '证书签发后校验未通过，请看上方告警')"; return 1; }
         success "$(L '证书申请成功')"
     elif [ "$CERT_METHOD" = "cloudflare-dns" ]; then
         info "$(L '申请证书中（Cloudflare DNS-01，约需 30-60 秒）...')"
-        certbot certonly \
+        if ! certbot certonly \
             --dns-cloudflare \
             --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
             --non-interactive \
             --agree-tos \
             --email "${EMAIL}" \
             -d "${DOMAIN}" \
-            --dns-cloudflare-propagation-seconds 30 || {
-            error "$(L '证书申请失败，请检查：1')) $(L 'CF API Key/Token 是否正确 2')) $(L '域名是否在该 CF 账号下 3')) $(L 'Token 是否有 Zone:DNS:Edit 权限')"
-        }
-        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "$(L '证书签发后校验未通过，请看上方告警')"
+            --dns-cloudflare-propagation-seconds 30; then
+            warn "$(L '证书申请失败，请检查：1')) $(L 'CF API Key/Token 是否正确 2')) $(L '域名是否在该 CF 账号下 3')) $(L 'Token 是否有 Zone:DNS:Edit 权限')"
+            return 1
+        fi
+        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || { warn "$(L '证书签发后校验未通过，请看上方告警')"; return 1; }
         success "$(L '证书申请成功')"
     elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
         info "$(L '申请证书中（DNS-01:') ${DNS_API}$(L '；不加 --force，避免重复签发触发 LE 频率限制）...')"
-        # acme.sh 的默认 CA 是 ZeroSSL；菜单写的是 Let's Encrypt，这里显式指定以保持一致
-        "${ACME_HOME}/acme.sh" --issue --server letsencrypt -d "${DOMAIN}" --dns "${DNS_API}" || {
-            error "$(L '证书签发失败：请检查 DNS API 凭证是否正确、域名 DNS 是否由所选服务商托管')"
-        }
+        if ! "${ACME_HOME}/acme.sh" --issue --server letsencrypt -d "${DOMAIN}" --dns "${DNS_API}"; then
+            warn "$(L '证书签发失败：请检查 DNS API 凭证是否正确、域名 DNS 是否由所选服务商托管')"
+            return 1
+        fi
         install -d -m 700 "$(dirname "$CRT")"
         install_nowhere_cert_sync_script
-        "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
+        if ! "${ACME_HOME}/acme.sh" --install-cert -d "${DOMAIN}" \
             --key-file "${KEY_PEM}" \
             --fullchain-file "${CRT}" \
-            --reloadcmd "${CONFIG_DIR}/cert-sync.sh" || {
-            error "$(L '证书安装（install-cert）失败')"
-        }
-        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || error "$(L '证书签发后校验未通过，请看上方告警')"
+            --reloadcmd "${CONFIG_DIR}/cert-sync.sh"; then
+            warn "$(L '证书安装（install-cert）失败')"
+            return 1
+        fi
+        verify_issued_cert "$DOMAIN" "$CRT" "$KEY_PEM" || { warn "$(L '证书签发后校验未通过，请看上方告警')"; return 1; }
         success "$(L '证书申请成功')"
     else
-        error "$(L '未知证书方式')"
+        warn "$(L '未知证书方式')"
+        return 1
     fi
     case "$CERT_METHOD" in
         letsencrypt-dns) setup_acmesh_renewal ;;
@@ -4234,7 +4304,7 @@ show_menu() {
         echo -e "  ${YELLOW}$(L '提示：可直接输入')${NC} ${CYAN}adam${NC} ${YELLOW}$(L '唤出此菜单，或用')${NC} ${CYAN}zt${NC}/${CYAN}pz${NC}/${CYAN}cxpz${NC}/${CYAN}cq${NC} ${YELLOW}$(L '快捷执行；')${NC}${CYAN}adam help${NC} ${YELLOW}$(L '查看全部子命令')${NC}"
         divider
     fi
-    read -rp "$(L '请选择操作') [0-10]: " MENU_CHOICE
+    read -rp "$(L '请选择操作') [0-10]: " MENU_CHOICE || exit 0
 }
 
 nowhere_state_text() {
@@ -4284,7 +4354,7 @@ nowhere_menu() {
         echo -e "  ${GREEN}18)${NC} $(L 'Nowhere 自动更新（仅 NW3 同代安全更新）') [$(maint_onoff "${MAINT_NOWHERE_AUTO:-0}")]"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-18]: " choice
+        read -rp "$(L '请选择') [0-18]: " choice || return 0
         case "$choice" in
             1)  run_action do_install ;;
             2)  run_action do_install_egress_service ;;
@@ -4325,7 +4395,7 @@ script_menu() {
         echo -e "  ${GREEN}4)${NC} $(L '语言（中文 / English）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-4]: " choice
+        read -rp "$(L '请选择') [0-4]: " choice || return 0
         case "$choice" in
             1) run_action do_update_script ;;
             2) run_action maint_toggle MAINT_SCRIPT_AUTO ;;
@@ -4354,24 +4424,69 @@ check_port_occupied_by_other() {
         }'
 }
 
-do_install() {
-    maint_lock_manual || return
-    local OLD_NW_PORTS=""
-    OLD_NW_PORTS="$(nowhere_ports 2>/dev/null || true)"
-    if [ "$(current_role)" = "egress" ]; then
-        warn "$(L '本机当前是 Egress 角色：继续安装会把 nowhere.service 换成 Portal')"
-        read -rp "$(L '确认继续') [y/N]: " ROLE_CONFIRM || { [ -n "$ROLE_CONFIRM" ] || return 1; }
-        [[ ! "$ROLE_CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消')"; return; }
-    fi
-    ensure_prereqs
+# ── Nowhere Portal 安装草稿（断点续装）与模块化向导 ─────────────
 
-    step "$(L '第 0 步：选择语言')"
-    divider
-    echo "  1) 中文 (zh)"
-    echo "  2) English (en)"
-    read -rp "$(L '选择') [1/2, $(L '默认') ${ADAM_LANG}]: " _inst_lang || { [ -n "$_inst_lang" ] || return 1; }
-    case "$_inst_lang" in 2) set_lang en ;; 1) set_lang zh ;; *) : ;; esac
+save_install_draft() {
+    install -d -m 700 "$CONFIG_DIR" 2>/dev/null || return 0
+    local tmp
+    tmp="$(mktemp "${CONFIG_DIR}/.draft.XXXXXX" 2>/dev/null || true)"
+    [ -n "$tmp" ] || return 0
+    cat > "$tmp" << DRAFTEOF
+TLS_MODE="${TLS_MODE:-2}"
+CERT_METHOD="${CERT_METHOD:-cloudflare-dns}"
+DOMAIN="$(dq_escape "${DOMAIN:-}")"
+PUBLIC_HOST="$(dq_escape "${PUBLIC_HOST:-}")"
+EMAIL="$(dq_escape "${EMAIL:-}")"
+DNS_API="$(dq_escape "${DNS_API:-}")"
+PORT_MODE="${PORT_MODE:-same}"
+PORT="${PORT:-443}"
+TCP_PORT="${TCP_PORT:-443}"
+UDP_PORT="${UDP_PORT:-443}"
+NET="${NET:-mix}"
+TCP_FAMILY="${TCP_FAMILY:-}"
+UDP_FAMILY="${UDP_FAMILY:-}"
+LISTEN_HOST="$(dq_escape "${LISTEN_HOST:-}")"
+SHARED_KEY="${SHARED_KEY:-}"
+MORPH="${MORPH:-1}"
+MORPH_TCP_PRELUDE="${MORPH_TCP_PRELUDE:-fade}"
+MORPH_UDP_PRELUDE="${MORPH_UDP_PRELUDE:-fade}"
+HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-10s}"
+OUT_TYPE="${OUT_TYPE:-direct}"
+SOCKS="$(dq_escape "${SOCKS:-none}")"
+DIAL_MODE="${DIAL_MODE:-single}"
+DIAL="${DIAL:-auto}"
+DIAL4="${DIAL4:-auto}"
+DIAL6="${DIAL6:-auto}"
+RATE="${RATE:-0}"
+ETAR="${ETAR:-0}"
+GENERATE_VECTOR="${GENERATE_VECTOR:-1}"
+VECTOR_CARRIER="${VECTOR_CARRIER:-tcp}"
+VECTOR_SOCKS="$(dq_escape "${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}")"
+GENERATE_EGRESS="${GENERATE_EGRESS:-0}"
+EGRESS_CARRIER="${EGRESS_CARRIER:-udp}"
+EGRESS_DIAL_MODE="${EGRESS_DIAL_MODE:-single}"
+EGRESS_DIAL="${EGRESS_DIAL:-auto}"
+EGRESS_DIAL4="${EGRESS_DIAL4:-auto}"
+EGRESS_DIAL6="${EGRESS_DIAL6:-auto}"
+DRAFTEOF
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$INSTALL_DRAFT_FILE" 2>/dev/null || rm -f "$tmp"
+    return 0
+}
 
+load_install_draft() {
+    [ -f "$INSTALL_DRAFT_FILE" ] || return 1
+    # shellcheck disable=SC1090
+    source "$INSTALL_DRAFT_FILE" 2>/dev/null || return 1
+    sanitize_nowhere_params
+    return 0
+}
+
+clear_install_draft() {
+    rm -f "$INSTALL_DRAFT_FILE"
+}
+
+_nw_prompt_cert_and_net() {
     step "$(L '第 1 步：选择证书获取方式')"
     divider
     echo -e "${BOLD}$(L 'TLS 证书方式：')${NC}"
@@ -4398,7 +4513,6 @@ do_install() {
 
     step "$(L '第 2 步：基础网络信息')"
     divider
-
     if [ "$TLS_MODE" = "2" ]; then
         while true; do
             read -rp "$(L '请输入域名（如: nhk.example.com）:') " DOMAIN || { [ -n "$DOMAIN" ] || return 1; }
@@ -4424,7 +4538,6 @@ do_install() {
         DOMAIN="${DOMAIN,,}"; PUBLIC_HOST="${PUBLIC_HOST,,}"
     fi
 
-    # 邮箱只用于 ACME 账户：自签模式不申请证书，不再强制填写
     EMAIL=""
     if [ "$TLS_MODE" = "2" ]; then
         while true; do
@@ -4435,37 +4548,50 @@ do_install() {
         done
     fi
 
+    DNS_API=""
     if [ "$CERT_METHOD" = "cloudflare-dns" ]; then
-        prompt_cloudflare_creds || error "$(L 'Cloudflare 凭证未提供，已中止')"
-    elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
-        echo ""
-        echo -e "${BOLD}$(L 'DNS 服务商：')${NC}"
-        echo "  1) Cloudflare  2) DNSPod  3) $(L '阿里云  4')) $(L '其他/手动')"
-        read -rp "$(L '选择') [$(L '1-4，默认1')]: " DNS_PROVIDER || { [ -n "$DNS_PROVIDER" ] || return 1; }
-        DNS_PROVIDER=${DNS_PROVIDER:-1}
-        case $DNS_PROVIDER in
-            1) read -rp "Cloudflare Email: " CF_EMAIL || { [ -n "$CF_EMAIL" ] || return 1; }
-               read -rsp "$(L 'Cloudflare API Key（输入不回显）:') " CF_KEY || { [ -n "$CF_KEY" ] || return 1; }; echo
-               export CF_Email="${CF_EMAIL}" CF_Key="${CF_KEY}"
-               DNS_API="dns_cf" ;;
-            2) read -rp "DNSPod ID: " DNSPOD_ID || { [ -n "$DNSPOD_ID" ] || return 1; }
-               read -rsp "$(L 'DNSPod Token（输入不回显）:') " DNSPOD_TOKEN || { [ -n "$DNSPOD_TOKEN" ] || return 1; }; echo
-               export DP_Id="${DNSPOD_ID}" DP_Key="${DNSPOD_TOKEN}"
-               DNS_API="dns_dp" ;;
-            3) read -rp "$(L '阿里云 AccessKey ID:') " ALI_ID || { [ -n "$ALI_ID" ] || return 1; }
-               read -rsp "$(L '阿里云 AccessKey Secret（输入不回显）:') " ALI_SECRET || { [ -n "$ALI_SECRET" ] || return 1; }; echo
-               export Ali_Key="${ALI_ID}" Ali_Secret="${ALI_SECRET}"
-               DNS_API="dns_ali" ;;
-            *) warn "$(L '「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3')"; DNS_API="unsupported" ;;
-        esac
-        # DNSPod/阿里云凭证判空：空凭证时不进 acme.sh，改为 unsupported 走手动分支
-        if [ "${DNS_API:-}" = "dns_dp" ] && { [ -z "${DNSPOD_ID:-}" ] || [ -z "${DNSPOD_TOKEN:-}" ]; }; then warn "$(L 'DNSPod 凭证不能为空')"; DNS_API="unsupported"; fi
-        if [ "${DNS_API:-}" = "dns_ali" ] && { [ -z "${ALI_ID:-}" ] || [ -z "${ALI_SECRET:-}" ]; }; then warn "$(L '阿里云凭证不能为空')"; DNS_API="unsupported"; fi
-        if [ "${DNS_API:-}" = "unsupported" ]; then
-            error "$(L '您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云')"
+        if [ -s /etc/cloudflare/credentials.ini ] && confirm "$(L '检测到已有 Cloudflare 凭证文件（/etc/cloudflare/credentials.ini），是否直接复用？')" y; then
+            CF_KEY=""
+        else
+            prompt_cloudflare_creds || return 1
+            write_cloudflare_creds
         fi
+    elif [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
+        while true; do
+            echo ""
+            echo -e "${BOLD}$(L 'DNS 服务商：')${NC}"
+            echo "  1) Cloudflare  2) DNSPod  3) $(L '阿里云  4')) $(L '其他/手动')"
+            read -rp "$(L '选择') [$(L '1-4，默认1')]: " DNS_PROVIDER || { [ -n "$DNS_PROVIDER" ] || return 1; }
+            DNS_PROVIDER=${DNS_PROVIDER:-1}
+            case $DNS_PROVIDER in
+                1)
+                    read -rp "Cloudflare Email: " CF_EMAIL || { [ -n "$CF_EMAIL" ] || return 1; }
+                    read -rsp "$(L 'Cloudflare API Key（输入不回显）:') " CF_KEY || { [ -n "$CF_KEY" ] || return 1; }; echo
+                    if [ -z "$CF_EMAIL" ] || [ -z "$CF_KEY" ]; then warn "$(L 'Cloudflare 凭证不能为空')"; continue; fi
+                    export CF_Email="${CF_EMAIL}" CF_Key="${CF_KEY}"
+                    DNS_API="dns_cf"; break ;;
+                2)
+                    read -rp "DNSPod ID: " DNSPOD_ID || { [ -n "$DNSPOD_ID" ] || return 1; }
+                    read -rsp "$(L 'DNSPod Token（输入不回显）:') " DNSPOD_TOKEN || { [ -n "$DNSPOD_TOKEN" ] || return 1; }; echo
+                    if [ -z "$DNSPOD_ID" ] || [ -z "$DNSPOD_TOKEN" ]; then warn "$(L 'DNSPod 凭证不能为空')"; continue; fi
+                    export DP_Id="${DNSPOD_ID}" DP_Key="${DNSPOD_TOKEN}"
+                    DNS_API="dns_dp"; break ;;
+                3)
+                    read -rp "$(L '阿里云 AccessKey ID:') " ALI_ID || { [ -n "$ALI_ID" ] || return 1; }
+                    read -rsp "$(L '阿里云 AccessKey Secret（输入不回显）:') " ALI_SECRET || { [ -n "$ALI_SECRET" ] || return 1; }; echo
+                    if [ -z "$ALI_ID" ] || [ -z "$ALI_SECRET" ]; then warn "$(L '阿里云凭证不能为空')"; continue; fi
+                    export Ali_Key="${ALI_ID}" Ali_Secret="${ALI_SECRET}"
+                    DNS_API="dns_ali"; break ;;
+                *)
+                    warn "$(L '「其他/手动」需要交互式完成 DNS TXT 验证，本脚本暂不接管，请改选 1-3')"
+                    continue ;;
+            esac
+        done
     fi
+    return 0
+}
 
+_nw_prompt_listen() {
     step "$(L '第 3 步：监听参数')"
     divider
     echo -e "${BOLD}$(L '端口模式（v3 端点路径语法）：')${NC}"
@@ -4479,21 +4605,31 @@ do_install() {
 
     if [ "$PORT_MODE" = "split" ]; then
         NET="mix"
-        read -rp "$(L 'TLS/TCP 端口（回车默认2000）:') " TCP_PORT || { [ -n "$TCP_PORT" ] || return 1; }
-        TCP_PORT=${TCP_PORT:-2000}
-        validate_port "$TCP_PORT" || { warn "$(L '端口不合法，重置为2000')"; TCP_PORT=2000; }
-        read -rp "$(L 'QUIC/UDP 端口（回车默认2001）:') " UDP_PORT || { [ -n "$UDP_PORT" ] || return 1; }
-        UDP_PORT=${UDP_PORT:-2001}
-        validate_port "$UDP_PORT" || { warn "$(L '端口不合法，重置为2001')"; UDP_PORT=2001; }
-        if [ "$TCP_PORT" = "$UDP_PORT" ]; then
-            UDP_PORT="$(pick_udp_port_avoiding "$TCP_PORT" || echo 2001)"
-            warn "$(L '分端口模式下 TCP 与 UDP 端口不能相同，已将 UDP 端口改为') ${UDP_PORT}"
-        fi
+        while true; do
+            read -rp "$(L 'TLS/TCP 端口（回车默认2000）:') " TCP_PORT || { [ -n "$TCP_PORT" ] || return 1; }
+            TCP_PORT=${TCP_PORT:-2000}
+            validate_port "$TCP_PORT" && { TCP_PORT=$((10#$TCP_PORT)); break; }
+            warn "$(L '端口不合法（1-65535）')"
+        done
+        while true; do
+            read -rp "$(L 'QUIC/UDP 端口（回车默认2001）:') " UDP_PORT || { [ -n "$UDP_PORT" ] || return 1; }
+            UDP_PORT=${UDP_PORT:-2001}
+            if ! validate_port "$UDP_PORT"; then warn "$(L '端口不合法（1-65535）')"; continue; fi
+            UDP_PORT=$((10#$UDP_PORT))
+            if [ "$TCP_PORT" = "$UDP_PORT" ]; then
+                UDP_PORT="$(pick_udp_port_avoiding "$TCP_PORT" || echo 2001)"
+                warn "$(L '分端口模式下 TCP 与 UDP 端口不能相同，已将 UDP 端口改为') ${UDP_PORT}"
+            fi
+            break
+        done
         PORT="$TCP_PORT"
     else
-        read -rp "$(L '监听端口（回车默认443）:') " PORT || { [ -n "$PORT" ] || return 1; }
-        PORT=${PORT:-443}
-        validate_port "$PORT" || { warn "$(L '端口不合法，重置为443')"; PORT=443; }
+        while true; do
+            read -rp "$(L '监听端口（回车默认443）:') " PORT || { [ -n "$PORT" ] || return 1; }
+            PORT=${PORT:-443}
+            validate_port "$PORT" && { PORT=$((10#$PORT)); break; }
+            warn "$(L '端口不合法（1-65535）')"
+        done
         TCP_PORT="$PORT"
         UDP_PORT="$PORT"
 
@@ -4528,11 +4664,10 @@ do_install() {
         warn "$(L '监听地址格式不合法，已改为') * $(L '通配')"
         LISTEN_HOST=""
     fi
+    return 0
+}
 
-    step "$(L '第 4 步：协议与安全参数')"
-    divider
-
-    # v3 密钥必须是恰好 32 位小写十六进制，旧任意字符串密钥会被直接拒绝
+_nw_prompt_security() {
     while true; do
         read -rsp "$(L '共享密钥 Shared Key（输入不回显，回车自动生成 32 位十六进制）:') " SHARED_KEY || { [ -n "$SHARED_KEY" ] || return 1; }; echo
         if [ -z "$SHARED_KEY" ]; then
@@ -4568,19 +4703,20 @@ do_install() {
         MORPH_UDP_PRELUDE="$MORPH_TCP_PRELUDE"
     fi
 
-    # v3.3 新增：握手超时对 Portal/Vector/Egress 全部角色生效，未设置时 v3.3.0 从 Shared Key 派生
     HANDSHAKE_TIMEOUT="10s"
     echo ""
     echo -e "${BOLD}$(L '握手超时')${NC}$(L '（')${YELLOW}$(L 'NOW_HANDSHAKE_TIMEOUT；v3.3.0 起未设置时默认值从 Shared Key 派生（3s–30s，换密钥会变），显式设置可固定行为。持续时间格式，如 10s / 500ms / 1m / 1h，须为正数+单位；非法值会被 v3.3 启动拒绝')${NC}$(L '）：')"
     read -rp "$(L '握手超时') [$(L '回车默认') 10s]: " HANDSHAKE_TIMEOUT_IN || { [ -n "$HANDSHAKE_TIMEOUT_IN" ] || return 1; }
     HANDSHAKE_TIMEOUT=${HANDSHAKE_TIMEOUT_IN:-10s}
     validate_duration "$HANDSHAKE_TIMEOUT" || { warn "$(L '格式不合法（须为正数+单位，如 10s / 500ms / 1m / 1h），已重置为 10s')"; HANDSHAKE_TIMEOUT="10s"; }
+    return 0
+}
 
+_nw_prompt_outbound() {
     echo ""
     echo -e "${BOLD}$(L 'Portal 出口 out=（Portal 固定出口，运行期间不可变）：')${NC}"
     echo "  1) $(L 'direct - Portal 直接访问目标（默认）')"
     echo "  2) $(L 'SOCKS5 上游 - 经一层 SOCKS5 代理出站（链式代理）')"
-    # v3.3.0 起 out=egress 接受任意已启用的 TLS 或 QUIC 监听上的 Egress 注册，纯 TCP 的 Portal 也可用
     echo "  3) $(L 'egress - 远程 Egress 出口（目标解析/拨号在另一台主动回连的机器上，该机无需开放入站端口；可同时接多台）')"
     read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " OUT_CHOICE || { [ -n "$OUT_CHOICE" ] || return 1; }
     case ${OUT_CHOICE:-1} in
@@ -4591,9 +4727,13 @@ do_install() {
 
     SOCKS="none"
     if [ "$OUT_TYPE" = "socks" ]; then
-        read -rsp "$(L 'SOCKS5 地址，格式 user:pass')@$(L 'host:port（输入不回显）:') " SOCKS || { [ -n "$SOCKS" ] || return 1; }; echo
-        SOCKS=${SOCKS:-none}
-        validate_socks "$SOCKS" || { warn "$(L 'SOCKS5 格式不合法，已重置为 none 并改回 direct')"; SOCKS="none"; OUT_TYPE="direct"; }
+        while true; do
+            read -rsp "$(L 'SOCKS5 地址，格式 user:pass')@$(L 'host:port（输入不回显）:') " SOCKS || { [ -n "$SOCKS" ] || return 1; }; echo
+            if [ -z "$SOCKS" ]; then SOCKS="none"; OUT_TYPE="direct"; break; fi
+            if validate_socks "$SOCKS"; then break; fi
+            warn "$(L 'SOCKS5 格式不合法，已重置为 none 并改回 direct')"
+            if confirm "$(L '是否重新输入 SOCKS5 地址？')" y; then continue; else SOCKS="none"; OUT_TYPE="direct"; break; fi
+        done
     fi
 
     DIAL_MODE="single"; DIAL="$DEFAULT_DIAL"; DIAL4="auto"; DIAL6="auto"
@@ -4626,7 +4766,10 @@ do_install() {
     read -rp "$(L '下行限速 Mbps，目标')→$(L 'Vector（0=不限速）:') " ETAR || { [ -n "$ETAR" ] || return 1; }
     ETAR=${ETAR:-0}
     validate_rate "$ETAR" || { warn "$(L '输入不合法（须为 0..2147483647 的整数），重置为0')"; ETAR=0; }
+    return 0
+}
 
+_nw_prompt_clients() {
     echo ""
     echo -e "${BOLD}$(L '本地 Vector 客户端连接信息')${NC}$(L '（可选，在电脑/路由器上跑本地 SOCKS5 入口用 in=）：')"
     read -rp "$(L '是否生成 Vector 连接信息？')[Y/n]: " GEN_VECTOR || { [ -n "$GEN_VECTOR" ] || return 1; }
@@ -4644,8 +4787,12 @@ do_install() {
             VECTOR_CARRIER="tcp"
             info "  $(L '当前 Portal 仅 TLS/TCP，Vector 载体自动选 tcp')"
         fi
-        read -rp "  $(L '本地 SOCKS5 监听 in=（回车默认') ${DEFAULT_VECTOR_SOCKS}$(L '，可带 user:pass')@$(L '）:') " VECTOR_SOCKS || { [ -n "$VECTOR_SOCKS" ] || return 1; }
-        VECTOR_SOCKS=${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}
+        while true; do
+            read -rp "  $(L '本地 SOCKS5 监听 in=（回车默认') ${DEFAULT_VECTOR_SOCKS}$(L '，可带 user:pass')@$(L '）:') " VECTOR_SOCKS || { [ -n "$VECTOR_SOCKS" ] || return 1; }
+            VECTOR_SOCKS=${VECTOR_SOCKS:-$DEFAULT_VECTOR_SOCKS}
+            if validate_socks "$VECTOR_SOCKS"; then break; fi
+            warn "$(L '格式不合法:') ${VECTOR_SOCKS}"
+        done
     else
         GENERATE_VECTOR="0"
         VECTOR_CARRIER="tcp"; VECTOR_SOCKS="$DEFAULT_VECTOR_SOCKS"
@@ -4689,7 +4836,10 @@ do_install() {
             fi
         fi
     fi
+    return 0
+}
 
+_nw_print_install_summary() {
     echo ""
     divider
     echo -e "${BOLD}$(L '配置确认：')${NC}"
@@ -4726,24 +4876,98 @@ do_install() {
         fi
     fi
     divider
-    read -rp "$(L '确认安装') [y/N]: " CONFIRM || { [ -n "$CONFIRM" ] || return 1; }
-    [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消')"; return; }
+}
 
-    if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
-        # acme.sh 签发的证书放到本脚本自己的目录：旧版写进 certbot 的 /etc/letsencrypt/live/<域名>/，
-        # 该目录由 certbot 管理且此时并不存在，install-cert 会因目录缺失而失败
-        CRT="${CONFIG_DIR}/certs/${DOMAIN}/fullchain.pem"
-        KEY_PEM="${CONFIG_DIR}/certs/${DOMAIN}/privkey.pem"
-    else
-        CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-        KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+do_install() {
+    maint_lock_manual || return
+    local OLD_NW_PORTS="" resumed=0
+    OLD_NW_PORTS="$(nowhere_ports 2>/dev/null || true)"
+    if [ "$(current_role)" = "egress" ]; then
+        warn "$(L '本机当前是 Egress 角色：继续安装会把 nowhere.service 换成 Portal')"
+        read -rp "$(L '确认继续') [y/N]: " ROLE_CONFIRM || { [ -n "$ROLE_CONFIRM" ] || return 1; }
+        [[ ! "$ROLE_CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消')"; return; }
     fi
+    ensure_prereqs
+
+    # 断点续装：若存在上次未完成的安装草稿，可直接载入并局部修改，无需从头重填
+    if [ -f "$INSTALL_DRAFT_FILE" ]; then
+        info "$(L '检测到上次未完成的安装草稿：') ${INSTALL_DRAFT_FILE}"
+        echo "  1) $(L '载入草稿，直接进入确认/局部修改并继续（推荐）')"
+        echo "  2) $(L '丢弃草稿，重新从头填写')"
+        echo "  0) $(L '返回主菜单')"
+        local draft_c=""
+        read -rp "$(L '选择') [1/2/0, $(L '默认') 1]: " draft_c || return 0
+        case "${draft_c:-1}" in
+            1)
+                if load_install_draft; then
+                    resumed=1
+                    success "$(L '已载入上次安装草稿（可直接确认或局部修改）')"
+                else
+                    clear_install_draft
+                fi
+                ;;
+            2) clear_install_draft ;;
+            *) info "$(L '已取消')"; return 0 ;;
+        esac
+    fi
+
+    if [ "$resumed" != "1" ]; then
+        step "$(L '第 0 步：选择语言')"
+        divider
+        echo "  1) 中文 (zh)"
+        echo "  2) English (en)"
+        read -rp "$(L '选择') [1/2, $(L '默认') ${ADAM_LANG}]: " _inst_lang || { [ -n "$_inst_lang" ] || return 1; }
+        case "$_inst_lang" in 2) set_lang en ;; 1) set_lang zh ;; *) : ;; esac
+
+        _nw_prompt_cert_and_net || return 1
+        _nw_prompt_listen || return 1
+        step "$(L '第 4 步：协议与安全参数')"
+        divider
+        _nw_prompt_security || return 1
+        _nw_prompt_outbound || return 1
+        _nw_prompt_clients || return 1
+        save_install_draft
+    fi
+
+    # 交互式确认 + 局部修改循环：任何一项填错都可就地修改，无需从头开始
+    local CONFIRM=""
+    while true; do
+        _nw_print_install_summary
+        echo -e "${BOLD}$(L '操作选项：')${NC}"
+        echo "  y) $(L '确认并开始安装')"
+        echo "  1) $(L '修改 证书方式 / 域名 / 邮箱 / DNS 凭证')"
+        echo "  2) $(L '修改 端口模式 / 监听端口 / 传输模式 / 监听地址')"
+        echo "  3) $(L '修改 共享密钥 / Morph / Prelude / 握手超时')"
+        echo "  4) $(L '修改 Portal 出口 / 出站源 IP / 限速')"
+        echo "  5) $(L '修改 Vector / Egress 客户端连接信息选项')"
+        echo "  n) $(L '取消退出（可选择保留草稿以便下次继续）')"
+        read -rp "$(L '请选择') [y/1-5/n]: " CONFIRM || return 1
+        case "${CONFIRM,,}" in
+            y|yes) save_install_draft; break ;;
+            1) _nw_prompt_cert_and_net && { save_install_draft; info "$(L '已更新安装配置，请再次核对')"; } ;;
+            2) _nw_prompt_listen && { save_install_draft; info "$(L '已更新安装配置，请再次核对')"; } ;;
+            3) _nw_prompt_security && { save_install_draft; info "$(L '已更新安装配置，请再次核对')"; } ;;
+            4) _nw_prompt_outbound && { save_install_draft; info "$(L '已更新安装配置，请再次核对')"; } ;;
+            5) _nw_prompt_clients && { save_install_draft; info "$(L '已更新安装配置，请再次核对')"; } ;;
+            n|no|0|q)
+                if confirm "$(L '是否保留已填写的配置草稿以便下次直接继续？')" y; then
+                    save_install_draft
+                    info "$(L '草稿已保留：')${INSTALL_DRAFT_FILE}"
+                else
+                    clear_install_draft
+                    info "$(L '草稿已清除')"
+                fi
+                info "$(L '已取消')"
+                return 0
+                ;;
+            *) warn "$(L '无效选择')" ;;
+        esac
+    done
 
     if [ -f "$CONFIG_FILE" ]; then
         local backup_dir="${CONFIG_DIR}.bak.$(date +%Y%m%d-%H%M%S)"
         if cp -a "$CONFIG_DIR" "$backup_dir"; then
             info "$(L '检测到已有配置，已备份到') ${backup_dir}$(L '（本次安装中途失败时可手动恢复）')"
-            # 备份里有密钥，只保留最近 3 份，避免每次重新配置都多留一份
             ls -1d "${CONFIG_DIR}".bak.* 2>/dev/null | sort -r | tail -n +4 | tr '\n' '\0' | xargs -r -0 rm -rf || true
         else
             if ! confirm "$(L '配置备份失败，仍要继续吗？')" n; then info "$(L '已取消')"; return; fi
@@ -4764,52 +4988,140 @@ do_install() {
     fi
     success "$(L '依赖安装完成')"
 
+    # 第 6 步：证书签发支持失败就地重试 / 换凭证 / 切方式 / 暂存草稿
     if [ "$TLS_MODE" = "2" ]; then
         ensure_ipv4_preference
         step "$(L '第 6 步：申请 TLS 证书')"
         divider
-
-        if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
-            # HTTP-01 前先做 DNS 预检；80 端口占用检查在 obtain_portal_cert 内（已有有效证书时不误拦）
-            check_domain_dns "$DOMAIN" || true
-        fi
-        if [ "$CERT_METHOD" = "letsencrypt-dns" ] && [ "${DNS_API}" = "unsupported" ]; then
-            error "$(L '您之前选择了「其他/手动」DNS 服务商：需先手动完成 DNS TXT 验证签发证书，本脚本无法一键接管。请重新运行并改选 Cloudflare（推荐）/ DNSPod / 阿里云')"
-        fi
-        obtain_portal_cert
-
-        info "$(L '证书路径:') ${CRT}"
-        info "$(L '私钥路径:') ${KEY_PEM}"
+        while [ "$TLS_MODE" = "2" ]; do
+            if [ "$CERT_METHOD" = "letsencrypt-dns" ]; then
+                CRT="${CONFIG_DIR}/certs/${DOMAIN}/fullchain.pem"
+                KEY_PEM="${CONFIG_DIR}/certs/${DOMAIN}/privkey.pem"
+            else
+                CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+                KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+            fi
+            if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
+                check_domain_dns "$DOMAIN" || true
+            fi
+            if obtain_portal_cert; then
+                info "$(L '证书路径:') ${CRT}"
+                info "$(L '私钥路径:') ${KEY_PEM}"
+                break
+            fi
+            echo ""
+            warn "$(L '证书申请未成功，请选择下一步（无需从头填写配置）：')"
+            echo "  1) $(L '重试当前证书申请')"
+            echo "  2) $(L '重新输入 Cloudflare / DNS 凭证并重试')"
+            echo "  3) $(L '更换证书方式 / 域名（如改用 DNS-01 或自签 tls=1）')"
+            echo "  0) $(L '暂停并保留安装草稿（修好 DNS/80端口 后重新运行安装即可继续）')"
+            local cert_rec=""
+            read -rp "$(L '选择') [1/2/3/0]: " cert_rec || { save_install_draft; return 1; }
+            case "$cert_rec" in
+                1) continue ;;
+                2)
+                    if [ "$CERT_METHOD" = "cloudflare-dns" ]; then
+                        prompt_cloudflare_creds && write_cloudflare_creds
+                    else
+                        _nw_prompt_cert_and_net || true
+                    fi
+                    save_install_draft
+                    ;;
+                3)
+                    _nw_prompt_cert_and_net || true
+                    if [ "$TLS_MODE" = "2" ]; then
+                        apt_install certbot || true
+                        [ "$CERT_METHOD" = "cloudflare-dns" ] && apt_install python3-certbot-dns-cloudflare || true
+                    fi
+                    save_install_draft
+                    ;;
+                *)
+                    save_install_draft
+                    info "$(L '草稿已保留：')${INSTALL_DRAFT_FILE}"
+                    return 1
+                    ;;
+            esac
+        done
     fi
 
-
+    # 第 7 步：二进制下载支持重试，不因网络抖动丢弃全部配置
     step "$(L '第 7 步：下载 Nowhere 二进制')"
     divider
     detect_binary
-    info "$(L '正在获取最新版本号...')"
-    LATEST="$(get_latest_tag)"
-    [ -z "$LATEST" ] && error "$(L '无法获取版本号（GitHub API 与 releases/latest 跳转均失败），请检查网络')"
-    LATEST_MAJOR="$(version_major "$LATEST")"
-    if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -lt 3 ]; then
-        error "$(L '当前最新版为') ${LATEST}$(L '，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）')"
-    fi
-    if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -gt 3 ]; then
-        warn "$(L '当前最新版为') ${LATEST}$(L '，已进入新的协议代（NW')${LATEST_MAJOR}$(L '）；本脚本的向导按 NW3 生成配置，可能无法直接使用')"
-        read -rp "$(L '仍要继续安装该版本吗？')[y/N]: " NEWMAJOR_CONFIRM || { [ -n "$NEWMAJOR_CONFIRM" ] || return 1; }
-        [[ ! "$NEWMAJOR_CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消')"; return; }
-    fi
-    info "$(L '最新版本:') ${LATEST} (${ARCH_NAME}-${LIBC})"
-    fetch_nowhere_release "$LATEST" || error "$(L '下载或校验失败，已中止')"
+    while true; do
+        info "$(L '正在获取最新版本号...')"
+        LATEST="$(get_latest_tag)"
+        if [ -z "$LATEST" ]; then
+            warn "$(L '无法获取版本号（GitHub API 与 releases/latest 跳转均失败），请检查网络')"
+            if confirm "$(L '下载失败，是否立即重试？')" y; then continue; fi
+            save_install_draft
+            info "$(L '已暂存安装草稿，网络恢复后重新运行安装可直接继续')"
+            return 1
+        fi
+        LATEST_MAJOR="$(version_major "$LATEST")"
+        if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -lt 3 ]; then
+            error "$(L '当前最新版为') ${LATEST}$(L '，低于 v3.0.0，与本脚本的 NW3 配置不兼容，已中止（请检查仓库状态）')"
+        fi
+        if [ -n "$LATEST_MAJOR" ] && [ "$LATEST_MAJOR" -gt 3 ]; then
+            warn "$(L '当前最新版为') ${LATEST}$(L '，已进入新的协议代（NW')${LATEST_MAJOR}$(L '）；本脚本的向导按 NW3 生成配置，可能无法直接使用')"
+            read -rp "$(L '仍要继续安装该版本吗？')[y/N]: " NEWMAJOR_CONFIRM || { [ -n "$NEWMAJOR_CONFIRM" ] || return 1; }
+            [[ ! "$NEWMAJOR_CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消')"; return 0; }
+        fi
+        info "$(L '最新版本:') ${LATEST} (${ARCH_NAME}-${LIBC})"
+        if fetch_nowhere_release "$LATEST"; then
+            break
+        fi
+        if confirm "$(L '下载失败，是否立即重试？')" y; then continue; fi
+        save_install_draft
+        info "$(L '已暂存安装草稿，网络恢复后重新运行安装可直接继续')"
+        return 1
+    done
     install -m 755 "$DL_BINARY" "${BIN_PATH}"
     record_installed_version "$LATEST"
-    success "Nowhere $(${BIN_PATH} --version 2>&1 | head -1) $(L '安装完成')"
+    success "Nowhere $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true) $(L '安装完成')"
 
-    step "$(L '第 8 步：保存配置')"
+    # 第 8 步：端口占用检测提前到写入最终配置之前；被占用时支持就地换端口
+    step "$(L '第 8 步：安装前端口占用检测')"
+    divider
+    while true; do
+        EXISTING_PROC=""; EXISTING_TCP=""; EXISTING_UDP=""
+        if command -v ss >/dev/null 2>&1; then
+            if has_tcp; then EXISTING_TCP="$(check_port_occupied_by_other tcp "$(tcp_port)")"; fi
+            if has_udp; then EXISTING_UDP="$(check_port_occupied_by_other udp "$(udp_port)")"; fi
+        fi
+        EXISTING_PROC="${EXISTING_TCP}${EXISTING_UDP}"
+        if [ -z "$EXISTING_PROC" ]; then
+            success "$(L '目标端口空闲，可以使用')"
+            break
+        fi
+        warn "$(L '检测到目标端口已被其他进程占用：')"
+        [ -n "$EXISTING_TCP" ] && echo "$EXISTING_TCP"
+        [ -n "$EXISTING_UDP" ] && echo "$EXISTING_UDP"
+        echo ""
+        warn "$(L '目标端口被占用，请选择处理方式（无需从头填写）：')"
+        echo "  1) $(L '立即更换监听端口并重新检测（推荐）')"
+        echo "  2) $(L '重新检测当前端口（如果你已停掉占用进程）')"
+        echo "  3) $(L '忽略占用强制继续')"
+        echo "  0) $(L '暂停并保留安装草稿')"
+        local p_act=""
+        read -rp "$(L '选择') [1/2/3/0]: " p_act || { save_install_draft; return 1; }
+        case "$p_act" in
+            1) _nw_prompt_listen || true; save_install_draft ;;
+            2) continue ;;
+            3) break ;;
+            *) save_install_draft; info "$(L '草稿已保留：')${INSTALL_DRAFT_FILE}"; return 0 ;;
+        esac
+    done
+
+    step "$(L '第 9 步：保存配置')"
     divider
     install -d -m 700 "$CONFIG_DIR"
     setup_nowhere_user || true
     if [ "$NOWHERE_USER" = "nowhere" ]; then
         sync_portal_cert_copy || { warn "$(L '证书副本同步失败，回退 root 运行')"; NOWHERE_USER="root"; }
+    else
+        CRT_RUNTIME="${CRT:-}"
+        KEY_PEM_RUNTIME="${KEY_PEM:-}"
     fi
     sanitize_nowhere_params
     NOWHERE_PORTAL="$(build_portal_url)"
@@ -4817,46 +5129,18 @@ do_install() {
     echo "portal" > "$ROLE_FILE"
     success "$(L '配置已保存至') ${CONFIG_FILE}"
 
-    step "$(L '第 9 步：安装前端口占用检测')"
-    divider
-    EXISTING_PROC=""; EXISTING_TCP=""; EXISTING_UDP=""
-    if command -v ss >/dev/null 2>&1; then
-        if has_tcp; then
-            EXISTING_TCP="$(check_port_occupied_by_other tcp "$(tcp_port)")"
-        fi
-        if has_udp; then
-            EXISTING_UDP="$(check_port_occupied_by_other udp "$(udp_port)")"
-        fi
-    fi
-    EXISTING_PROC="${EXISTING_TCP}${EXISTING_UDP}"
-    if [ -n "$EXISTING_PROC" ]; then
-        warn "$(L '检测到目标端口已被其他进程占用：')"
-        [ -n "$EXISTING_TCP" ] && echo "$EXISTING_TCP"
-        [ -n "$EXISTING_UDP" ] && echo "$EXISTING_UDP"
-        warn "$(L '请先停止占用该端口的服务（旧的 Nowhere 实例已自动排除在外），否则新服务会反复崩溃重启，客户端表现为一直 timeout')"
-        read -rp "$(L '仍要继续安装吗？')[y/N]: " PORT_CONFIRM || { [ -n "$PORT_CONFIRM" ] || return 1; }
-        [[ ! "$PORT_CONFIRM" =~ ^[Yy]$ ]] && { info "$(L '已取消安装')"; return; }
-    else
-        success "$(L '目标端口空闲，可以使用')"
-    fi
-
     step "$(L '第 10 步：配置防火墙（先于服务启动，避免中间态连不通）')"
     divider
-    # 旧版在这里无条件 ufw --force enable：如果机器上还跑着别的服务（Snell、面板、其他代理），
-    # 它们没放行的端口会被一起挡掉。现在：ufw 已启用就只加规则；未启用则先列出未放行的监听端口再询问。
     local -a NW_FW_SPECS=()
     if has_tcp; then NW_FW_SPECS+=("$(tcp_port)/tcp"); fi
     if has_udp; then NW_FW_SPECS+=("$(udp_port)/udp"); fi
     if [ "$CERT_METHOD" = "letsencrypt-http" ]; then NW_FW_SPECS+=("80/tcp"); fi
     fw_allow_for_service "${NW_FW_SPECS[@]}"
     if [ -n "$OLD_NW_PORTS" ]; then fw_prune_old_specs "$OLD_NW_PORTS"; fi
+    reserved_ports_sync || true
 
     step "$(L '第 11 步：创建并启动系统服务')"
     divider
-    # 注意：PrivateTmp 必须关闭。v3 的 nowhere status 靠系统临时目录下的
-    # 受保护 IPC 注册表发现实例，PrivateTmp 会让服务与外部命令看到不同的 /tmp，
-    # 导致 status 永远发现不到本服务（实测会报 namespace identity unavailable 一类问题时更难排查）
-    # NOW_MORPH_*_PRELUDE 不再写进 Portal 的 unit：官方文档明确 Portal 不使用这两个变量（只有发起端使用）
     write_service_unit "$SERVICE_FILE" "Nowhere Portal" "https://github.com/${REPO}" "" "${NOWHERE_USER:-root}" "${NOWHERE_USER:-root}" "${BIN_PATH} \${NOWHERE_PORTAL}" "CAP_NET_BIND_SERVICE" "1048576" "on-failure" "3" "EnvironmentFile=${CONFIG_FILE}
 Environment=NOW_HANDSHAKE_TIMEOUT=${HANDSHAKE_TIMEOUT}
 PrivateTmp=false
@@ -4873,6 +5157,7 @@ ProtectHome=read-only"
     systemctl is-active --quiet nowhere && _nw_active=1
     if [ "$_nw_active" = "1" ] && [ -z "$_nw_missing" ]; then
         success "$(L '服务启动成功，且已确认端口正在监听')"
+        clear_install_draft
     elif [ "$_nw_active" = "1" ] && [ -n "$_nw_missing" ]; then
         warn "$(L 'systemd 显示服务 active，但未检测到端口实际在监听') $(L '（存在端口未监听：')${_nw_missing# }$(L '）')"
         warn "$(L '常见原因：证书路径错误、端口被抢占、密钥格式不合 v3 规范（必须 32 位小写十六进制）')"
@@ -4881,6 +5166,8 @@ ProtectHome=read-only"
     else
         warn "$(L '服务未能启动，查看日志排查：')"
         journalctl -u nowhere -n 30 --no-pager
+        save_install_draft
+        warn "$(L '服务启动失败，已保留安装草稿；排查后重新运行安装可直接续装')"
         error "$(L '安装中止')"
     fi
 
@@ -4890,6 +5177,7 @@ ProtectHome=read-only"
     build_vector_info
     build_egress_info
     print_all_info
+    save_current_pin >/dev/null 2>&1 || true
 
     step "$(L '第 13 步：安装快捷命令')"
     divider
@@ -5158,7 +5446,7 @@ install_nowhere_binary_only() {
     fi
     install -m 755 "$DL_BINARY" "$BIN_PATH"
     record_installed_version "$latest"
-    success "Nowhere $(${BIN_PATH} --version 2>&1 | head -1) $(L '安装完成')"
+    success "Nowhere $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true) $(L '安装完成')"
     return 0
 }
 
@@ -5405,7 +5693,7 @@ do_install_egress_service() {
             read -rp "$(L '已检测到 nowhere 二进制（')${have_ver:-$(L '未知版本')}$(L '），是否跳过下载直接使用？')[Y/n]: " EG_REUSE || { [ -n "$EG_REUSE" ] || return 1; }
             if [[ ! "${EG_REUSE:-y}" =~ ^[Nn]$ ]]; then
                 need_download=0
-                info "$(L '复用现有二进制:') $(${BIN_PATH} --version 2>&1 | head -1)"
+                info "$(L '复用现有二进制:') $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)"
             fi
         fi
     fi
@@ -5494,7 +5782,7 @@ xray_needs_port80() {
     [ -n "${XRAY_NODE_DIR:-}" ] && [ -d "$XRAY_NODE_DIR" ] || return 1
     for f in "${XRAY_NODE_DIR}"/*.env; do
         [ -f "$f" ] || continue
-        dom="$(sed -n 's#^N_CERT_SRC="/etc/letsencrypt/live/\([^/]*\)/.*#\1#p' "$f" | head -1)"
+        dom="$(sed -n 's#^N_CERT_SRC="/etc/letsencrypt/live/\([^/]*\)/.*#\1#p' "$f" | head -1 || true)"
         [ -n "$dom" ] || continue
         if grep -q '^authenticator *= *standalone' "/etc/letsencrypt/renewal/${dom}.conf" 2>/dev/null; then return 0; fi
     done
@@ -5548,6 +5836,7 @@ do_uninstall() {
             while IFS= read -r s; do
                 [ -n "$s" ] || continue
                 if [ "$s" = "80/tcp" ] && xray_needs_port80; then continue; fi
+                port_used_by_other_services "$s" nowhere && continue
                 fw_delete_spec "$s"
             done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
         fi
@@ -5676,7 +5965,7 @@ do_show_version() {
     previous="$(read_previous_version)"
 
     if [ -x "$BIN_PATH" ]; then
-        echo -e "  $(L '当前运行的二进制  :') ${GREEN}$(${BIN_PATH} --version 2>&1 | head -1)${NC}"
+        echo -e "  $(L '当前运行的二进制  :') ${GREEN}$(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)${NC}"
     else
         warn "$(L '未检测到已安装的 Nowhere 二进制')"
     fi
@@ -5795,7 +6084,7 @@ do_rollback() {
     systemctl restart nowhere 2>/dev/null || true
     sleep 2
     if systemctl is-active --quiet nowhere; then
-        success "$(L '已回退到:') $(${BIN_PATH} --version 2>&1 | head -1)"
+        success "$(L '已回退到:') $(${BIN_PATH} --version 2>&1 | awk "NR==1" || true)"
     else
         warn "$(L '回退后服务启动失败，日志如下：')"
         journalctl -u nowhere -n 20 --no-pager || true
@@ -5962,15 +6251,26 @@ do_migrate_tls2() {
         2) MIG_CERT_METHOD="cloudflare-dns" ;;
         *) info "$(L '已取消')"; return 0 ;;
     esac
-    read -rp "$(L '域名（须已解析到本机）:') " MIG_DOMAIN || { [ -n "$MIG_DOMAIN" ] || return 1; }
-    MIG_DOMAIN=$(echo "$MIG_DOMAIN" | tr -d ' \r\n')
-    MIG_DOMAIN="${MIG_DOMAIN,,}"
-    if [ -z "$MIG_DOMAIN" ] || ! is_safe_host "$MIG_DOMAIN"; then error "$(L '域名不合法，已中止')"; fi
-    read -rp "$(L 'ACME 邮箱（Let')'$(L 's Encrypt 账户用）:') " MIG_EMAIL || { [ -n "$MIG_EMAIL" ] || return 1; }
-    MIG_EMAIL=$(echo "$MIG_EMAIL" | tr -d ' \r\n')
-    [ -n "$MIG_EMAIL" ] || error "$(L '邮箱不能为空，已中止')"
+    while true; do
+        read -rp "$(L '域名（须已解析到本机）:') " MIG_DOMAIN || { [ -n "$MIG_DOMAIN" ] || return 1; }
+        MIG_DOMAIN=$(echo "$MIG_DOMAIN" | tr -d ' \r\n')
+        MIG_DOMAIN="${MIG_DOMAIN,,}"
+        if [ -n "$MIG_DOMAIN" ] && [[ "$MIG_DOMAIN" == *.* ]] && is_safe_host "$MIG_DOMAIN"; then break; fi
+        warn "$(L '域名格式不正确')"
+    done
+    while true; do
+        read -rp "$(L 'ACME 邮箱（Let')'$(L 's Encrypt 账户用）:') " MIG_EMAIL || { [ -n "$MIG_EMAIL" ] || return 1; }
+        MIG_EMAIL=$(echo "$MIG_EMAIL" | tr -d ' \r\n')
+        if [[ "$MIG_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then break; fi
+        warn "$(L '邮箱格式不正确')"
+    done
     if [ "$MIG_CERT_METHOD" = "cloudflare-dns" ]; then
-        prompt_cloudflare_creds || error "$(L 'Cloudflare 凭证未提供，已中止')"
+        if [ -s /etc/cloudflare/credentials.ini ] && confirm "$(L '检测到已有 Cloudflare 凭证文件（/etc/cloudflare/credentials.ini），是否直接复用？')" y; then
+            CF_KEY=""
+        else
+            prompt_cloudflare_creds || { info "$(L '已取消')"; return 0; }
+            write_cloudflare_creds
+        fi
     fi
     read -rp "$(L '确认把') ${MIG_DOMAIN} $(L '的证书装到本 Portal 并重启服务？')[y/N]: " MIG_CONFIRM || { [ -n "$MIG_CONFIRM" ] || return 1; }
     [[ "$MIG_CONFIRM" =~ ^[Yy]$ ]] || { info "$(L '已取消')"; return 0; }
@@ -5979,13 +6279,21 @@ do_migrate_tls2() {
     CERT_METHOD="$MIG_CERT_METHOD"; TLS_MODE="2"
     CRT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
     KEY_PEM="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+    CRT_RUNTIME="$CRT"
+    KEY_PEM_RUNTIME="$KEY_PEM"
     apt_install certbot || error "$(L 'certbot 安装失败')"
     [ "$CERT_METHOD" = "cloudflare-dns" ] && apt_install python3-certbot-dns-cloudflare
     ensure_ipv4_preference
-    if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
-        check_domain_dns "$DOMAIN" || true
-    fi
-    obtain_portal_cert
+    while true; do
+        if [ "$CERT_METHOD" = "letsencrypt-http" ]; then
+            check_domain_dns "$DOMAIN" || true
+        fi
+        if obtain_portal_cert; then break; fi
+        if ! confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y; then return 1; fi
+        if [ "$CERT_METHOD" = "cloudflare-dns" ]; then
+            prompt_cloudflare_creds && write_cloudflare_creds || return 1
+        fi
+    done
 
     # 同步保存的配置：域名 / TLS 模式 / 证书路径 / 重建的 Portal URL / 握手超时（整文件重写，与 do_install 一致）
     # 低权用户运行时：先把新证书同步到服务可读的副本，再生成 URL（URL 里嵌证书路径）
@@ -6078,8 +6386,13 @@ do_cert_status() {
     if [[ "$DO_RENEW" =~ ^[Yy]$ ]]; then
         case "$CERT_METHOD" in
             letsencrypt-http|cloudflare-dns)
-                certbot renew && systemctl restart nowhere && success "$(L '续期检查完成')" \
-                    || warn "$(L '续期失败，请看上方报错')"
+                if certbot renew; then
+                    nowhere_sync_cert_copy || true
+                    systemctl restart nowhere 2>/dev/null || true
+                    success "$(L '续期检查完成')"
+                else
+                    warn "$(L '续期失败，请看上方报错')"
+                fi
                 ;;
             letsencrypt-dns)
                 "${ACME_HOME}/acme.sh" --renew -d "${DOMAIN}" && success "$(L '续期检查完成（acme.sh 的 --reloadcmd 会自动重启 nowhere）')" \
@@ -6190,8 +6503,8 @@ fw_is_allowed() {
         # （或 ufw allow in on eth0 to any port 443 proto tcp）
         if [[ "$rest" == *" port "* ]]; then
             local p pr
-            p="$(printf '%s' "$rest" | grep -oE 'port [0-9]+' | awk '{print $2}' | head -1)"
-            pr="$(printf '%s' "$rest" | grep -oE 'proto [a-z]+' | awk '{print $2}' | head -1)"
+            p="$(printf '%s' "$rest" | grep -oE 'port [0-9]+' | awk '{print $2}' | head -1 || true)"
+            pr="$(printf '%s' "$rest" | grep -oE 'proto [a-z]+' | awk '{print $2}' | head -1 || true)"
             if [ -n "$p" ] && [ "$p" = "$port" ] && { [ -z "$pr" ] || [ "$pr" = "$proto" ]; }; then return 0; fi
             continue
         fi
@@ -6204,7 +6517,7 @@ fw_is_allowed() {
             if [ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ] && { [ -z "$rp" ] || [ "$rp" = "$proto" ]; }; then return 0; fi
         else
             # 服务名：ufw allow ssh / http / https（用系统服务表解析端口）
-            sp="$(getent services "$rng" 2>/dev/null | awk '{print $2}' | cut -d/ -f1 | head -1)"
+            sp="$(getent services "$rng" 2>/dev/null | awk '{print $2}' | cut -d/ -f1 | head -1 || true)"
             if [ -n "$sp" ] && [ "$sp" = "$port" ]; then return 0; fi
         fi
     done <<< "$added"
@@ -6596,7 +6909,7 @@ fw_menu() {
         echo -e "  ${GREEN}8)${NC} $(L '一键放行本脚本服务端口（SSH / Nowhere / Snell / Xray / Realm / Caddy）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-8]: " choice
+        read -rp "$(L '请选择') [0-8]: " choice || return 0
         case "$choice" in
             1) run_action fw_install ;;
             2) run_action fw_list ;;
@@ -7098,7 +7411,7 @@ f2b_menu() {
         echo -e "  ${GREEN}14)${NC} ${RED}$(L '卸载')${NC}"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-14]: " choice
+        read -rp "$(L '请选择') [0-14]: " choice || return 0
         case "$choice" in
             1)  run_action f2b_install ;;
             2)  run_action f2b_set_bantime ;;
@@ -7599,8 +7912,8 @@ do_backup() {
     ls -1t /root/adam-backup-*.tgz 2>/dev/null | tail -n +6 | tr '\n' '\0' | xargs -r -0 rm -f
     success "$(L '备份已保存：')${dest}$(L '（只留最近 5 份）')"
     warn "$(L '备份含共享密钥与证书私钥，只能放本机，勿外发、勿传网盘')"
-    info "$(L '注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 8）')"
-    tar -tzf "$dest" | head -20
+    info "$(L '注意：定时器单元文件不在备份中，异机恢复后需重装定时器（自动维护菜单 11）')"
+    tar -tzf "$dest" 2>/dev/null | awk 'NR<=20' || true
 }
 
 do_restore() {
@@ -7625,7 +7938,7 @@ do_restore() {
             *) error "$(L '备份文件包含非法路径，已中止'): $m" ;;
         esac
     done < <(tar -tzf "$file" 2>/dev/null || true)
-    tar -tzf "$file" | head -20
+    tar -tzf "$file" 2>/dev/null | awk 'NR<=20' || true
     warn "$(L '恢复会覆盖 /etc/nowhere、/etc/snell、/etc/adam-xray、/etc/adam-realm、/etc/adam-caddy、/etc/adam-cloudflared 等现有配置，并重启已启用的服务')"
     confirm "$(L '确认从') ${file} $(L '恢复？')" n || { info "$(L '已取消')"; return 0; }
     local u
@@ -7643,6 +7956,9 @@ do_restore() {
     # 异机恢复：Realm 的 unit 可能未启用；有启用规则时按规则状态拉起并补防火墙
     if [ -f "$REALM_SERVICE" ] && [ "$(realm_enabled_count)" -gt 0 ]; then
         realm_reload_service >/dev/null 2>&1 || warn "$(L 'Realm 服务恢复后重载失败，请检查日志')"
+    fi
+    if [ -f "$CADDY_SERVICE" ] && [ "$(caddy_enabled_count)" -gt 0 ]; then
+        caddy_reload_service >/dev/null 2>&1 || warn "$(L 'Caddy 服务恢复后重载失败，请检查日志')"
     fi
     fw_sync_managed >/dev/null 2>&1 || true
     if f2b_installed; then systemctl restart fail2ban 2>/dev/null || true; fi
@@ -7700,7 +8016,7 @@ do_doctor() {
         done < <(xray_node_tags)
     fi
     if command -v ufw >/dev/null 2>&1; then
-        echo "  $(L '防火墙'): $(ufw status 2>/dev/null | head -n 1)"
+        echo "  $(L '防火墙'): $(ufw status 2>/dev/null | awk 'NR==1' || true)"
     else
         echo "  $(L '防火墙'): $(L '未安装')"
     fi
@@ -7755,7 +8071,7 @@ maint_menu() {
         echo -e "  ${GREEN}16)${NC} $(L '清理日志（保留 200M）')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-16]: " choice
+        read -rp "$(L '请选择') [0-16]: " choice || return 0
         case "$choice" in
             1) run_action maint_toggle MAINT_WATCHDOG ;;
             2) run_action maint_toggle MAINT_SCRIPT_AUTO ;;
@@ -8633,11 +8949,14 @@ snell_install() {
     fi
     if [ -z "$latest" ]; then
         warn "$(L '未能从官方发布页取得 v')${SNELL_MAJOR} $(L '的版本信息（')${SNELL_KB_URLS[0]} $(L '不可达，或该架构') ${arch} $(L '没有 v')${SNELL_MAJOR} $(L '版本）')"
-        read -rp "$(L '可手动输入版本号继续（如 v6.0.0，回车取消）:') " latest || { [ -n "$latest" ] || return 1; }
-        latest="${latest//[[:space:]]/}"
-        if [ -z "$latest" ]; then info "$(L '已取消')"; return 0; fi
-        [[ "$latest" == v* ]] || latest="v${latest}"
-        if ! snell_ver_key "$latest" >/dev/null 2>&1; then warn "$(L '版本号格式不合法')"; return 1; fi
+        while true; do
+            read -rp "$(L '可手动输入版本号继续（如 v6.0.0，回车取消）:') " latest || { [ -n "$latest" ] || return 1; }
+            latest="${latest//[[:space:]]/}"
+            if [ -z "$latest" ]; then info "$(L '已取消')"; return 0; fi
+            [[ "$latest" == v* ]] || latest="v${latest}"
+            if snell_ver_key "$latest" >/dev/null 2>&1; then break; fi
+            warn "$(L '版本号格式不合法')"
+        done
     fi
     # 发布页偶尔滞后：本机已装的版本比发布页列出的还新时，重装不降级
     if [ -n "$current" ] && [ "$(snell_ver_major "$current")" = "$SNELL_MAJOR" ] && snell_ver_gt "$current" "$latest"; then
@@ -8713,8 +9032,11 @@ snell_install() {
     fi
 
     snell_ensure_user || return 1
-    info "$(L '下载') ${latest} ..."
-    snell_fetch "$latest" "$arch" || return 1
+    while true; do
+        info "$(L '下载') ${latest} ..."
+        if snell_fetch "$latest" "$arch"; then break; fi
+        confirm "$(L '下载失败，是否立即重试？')" y || return 1
+    done
     snell_apply_binary "$latest"
     local snell_conf_bak=""
     if [ -f "$SNELL_CONF" ]; then snell_conf_bak="${SNELL_CONF}.bak.$(date +%Y%m%d-%H%M%S)"; cp -f "$SNELL_CONF" "$snell_conf_bak" || snell_conf_bak=""; fi
@@ -9084,7 +9406,7 @@ snell_menu() {
         echo -e "  ${GREEN}13)${NC} ${RED}$(L '卸载')${NC} Snell"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-13]: " choice
+        read -rp "$(L '请选择') [0-13]: " choice || return 0
         case "$choice" in
             1)  run_action snell_install ;;
             2)  run_action snell_update ;;
@@ -9368,7 +9690,7 @@ xray_write_base() {
         fwd_rule="      { \"type\": \"field\", \"inboundTag\": [${fwd_tags}], \"outboundTag\": \"direct\" },
 "
     fi
-    if [ "${XRAY_CN_BLOCK:-1}" = "1" ]; then
+    if [ "${XRAY_CN_BLOCK:-1}" = "1" ] && [ -f "${XRAY_DIR}/geoip.dat" ] && [ -f "${XRAY_DIR}/geosite.dat" ]; then
         cn_rules=",
       { \"type\": \"field\", \"ip\": [\"geoip:cn\"], \"outboundTag\": \"block\" },
       { \"type\": \"field\", \"domain\": [\"geosite:cn\"], \"outboundTag\": \"block\" }"
@@ -9497,8 +9819,8 @@ xray_gen_x25519() {
     local out re='^[A-Za-z0-9_-]{43}$'
     XK_PRIV=""; XK_PUB=""
     out="$("$XRAY_BIN" x25519 2>/dev/null || true)"
-    XK_PRIV="$(printf '%s\n' "$out" | awk -F':[[:space:]]*' '{l=tolower($1); gsub(/[[:space:]]/,"",l); if (l=="privatekey") {print $NF; exit}}')"
-    XK_PUB="$(printf '%s\n' "$out" | awk -F':[[:space:]]*' '{l=tolower($1); gsub(/[[:space:]]/,"",l); if (l=="publickey" || l=="password" || l=="password(publickey)") {print $NF; exit}}')"
+    XK_PRIV="$(printf '%s\n' "$out" | awk -F':[[:space:]]*' '{l=tolower($1); gsub(/[[:space:]]/,"",l); if (l=="privatekey") {v=$NF; gsub(/[[:space:]\r]+$/,"",v); print v; exit}}')"
+    XK_PUB="$(printf '%s\n' "$out" | awk -F':[[:space:]]*' '{l=tolower($1); gsub(/[[:space:]]/,"",l); if (l=="publickey" || l=="password" || l=="password(publickey)") {v=$NF; gsub(/[[:space:]\r]+$/,"",v); print v; exit}}')"
     [[ "$XK_PRIV" =~ $re && "$XK_PUB" =~ $re ]]
 }
 
@@ -9518,7 +9840,7 @@ xray_gen_vlessenc() {
     [[ "$VE_DEC" =~ $re && "$VE_ENC" =~ $re ]]
 }
 
-xray_listen_addr() { if snell_ipv6_ok; then printf '::'; else printf '0.0.0.0'; fi; }
+xray_listen_addr() { if ipv6_dualstack_ok; then printf '::'; else printf '0.0.0.0'; fi; }
 
 # 询问端口：$1 默认值，结果写入 XP_PORT
 # write_service_unit FILE DESC DOC STARTLIMIT USER GROUP EXEC CAPS NOFILE RESTART RESTARTSEC SVC_EXTRA：
@@ -9663,6 +9985,7 @@ xray_ask_vlessenc() {
 xray_commit_node() {
     local tag="$1" inbound="$2" meta="$3"
     local conf="${XRAY_CONF_D}/10-in-${tag}.json" env="${XRAY_NODE_DIR}/${tag}.env"
+    install -d -m 750 "$XRAY_CONF_D"
     install -d -m 700 "$XRAY_NODE_DIR"
     local _xc_tmp_conf="" _xc_tmp_env=""
     _xc_tmp_conf="$(mktemp "${XRAY_CONF_D}/.10-in-${tag}.XXXXXX")" || return 1
@@ -9690,7 +10013,7 @@ xray_add_vision() {
     local port uuid sid tag listen name
     xray_new_node_begin 443 vision VLESS-Vision || return 1
     port="$XN_PORT"; uuid="$XN_UUID"; sid="$XN_SID"; listen="$XN_LISTEN"; tag="$XN_TAG"; name="$XN_NAME"
-    xray_ask_sni
+    xray_ask_sni || return 1
     xray_gen_x25519 || { warn "$(L 'REALITY 密钥生成失败')"; return 1; }
     xray_commit_node "$tag" "    {
       \"tag\": \"${tag}\", \"listen\": \"${listen}\", \"port\": ${port}, \"protocol\": \"vless\",
@@ -9715,7 +10038,7 @@ xray_add_xhttp_reality() {
     local port uuid sid tag listen name path
     xray_new_node_begin 8443 xhttp-reality VLESS-XHTTP-REALITY || return 1
     port="$XN_PORT"; uuid="$XN_UUID"; sid="$XN_SID"; listen="$XN_LISTEN"; path="$XN_PATH"; tag="$XN_TAG"; name="$XN_NAME"
-    xray_ask_sni
+    xray_ask_sni || return 1
     xray_gen_x25519 || { warn "$(L 'REALITY 密钥生成失败')"; return 1; }
     xray_ask_vlessenc ask || true
     xray_commit_node "$tag" "    {
@@ -9786,7 +10109,7 @@ xray_obtain_cert() {
     local domain="$1" tag="$2" email="$3"
     local le_crt="/etc/letsencrypt/live/${domain}/fullchain.pem"
     local le_key="/etc/letsencrypt/live/${domain}/privkey.pem"
-    local ans src_crt="" src_key="" cf_email cf_key
+    local ans src_crt="" src_key="" occ80=""
     if cert_is_valid "$domain" "$le_crt" "$le_key"; then
         info "$(L '检测到该域名已有有效证书，直接复用')"
         xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
@@ -9794,65 +10117,83 @@ xray_obtain_cert() {
         xray_ensure_certbot_timer
         return 0
     fi
-    echo "$(L '证书申请方式：')"
-    echo "  1) $(L 'HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）')"
-    echo "  2) $(L 'Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）')"
-    echo "  3) $(L '已有证书文件（fullchain.pem + privkey.pem）')"
-    read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || { [ -n "$ans" ] || return 1; }
-    case "${ans:-1}" in
-        3)
-            # 域名仍须解析到本机，客户端才能连上（仅警告，不拦截）
-            check_domain_dns "$domain" || true
-            read -rp "$(L '证书文件路径（fullchain.pem）:') " src_crt || { [ -n "$src_crt" ] || return 1; }
-            read -rp "$(L '私钥文件路径（privkey.pem）:') " src_key || { [ -n "$src_key" ] || return 1; }
-            if [ ! -f "$src_crt" ] || [ ! -f "$src_key" ]; then warn "$(L '证书或私钥文件不存在')"; return 1; fi
-            if ! cert_covers_domain "$src_crt" "$domain"; then
-                warn "$(L '该证书的域名列表里没有') ${domain}"
-                confirm "$(L '仍要使用？')" n || return 1
-            fi
-            xray_install_cert "$tag" "$src_crt" "$src_key" || { warn "$(L '证书复制失败')"; return 1; }
-            XRAY_OBT_CRT="$src_crt"; XRAY_OBT_KEY="$src_key"
-            return 0
-            ;;
-        2)
-            check_domain_dns "$domain" || true
-            apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
-            apt_install python3-certbot-dns-cloudflare || { warn "$(L 'certbot Cloudflare 插件安装失败')"; return 1; }
-            if [ -s /etc/cloudflare/credentials.ini ]; then
-                info "$(L 'Cloudflare 凭证文件已存在，直接复用')"
-            else
-                prompt_cloudflare_creds || return 1
-                write_cloudflare_creds
-            fi
-            info "$(L '证书申请中（Cloudflare DNS-01，约需 30-60 秒）...')"
-            certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
-                --non-interactive --agree-tos --email "$email" -d "$domain" \
-                --dns-cloudflare-propagation-seconds 30 || { warn "$(L '证书申请失败：检查 CF 凭证与域名归属')"; return 1; }
-            verify_issued_cert "$domain" "$le_crt" "$le_key" || { warn "$(L '证书签发后校验未通过')"; return 1; }
-            success "$(L '证书申请成功')"
-            xray_ensure_certbot_timer
-            xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
-            XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
-            return 0
-            ;;
-        *)
-            if ! check_domain_dns "$domain"; then
-                confirm "$(L '域名解析未通过，HTTP-01 很可能失败，仍要继续申请？')" n || return 1
-            fi
-            apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
-            info "$(L '证书申请中（HTTP-01，需 80 端口）...')"
-            ufw allow 80/tcp 2>/dev/null || true
-            certbot certonly --standalone --preferred-challenges http --non-interactive \
-                --agree-tos --email "$email" -d "$domain" \
-                --http-01-port 80 --http-01-address 0.0.0.0 || { warn "$(L '证书申请失败：检查域名解析与 80 端口')"; return 1; }
-            verify_issued_cert "$domain" "$le_crt" "$le_key" || { warn "$(L '证书签发后校验未通过')"; return 1; }
-            success "$(L '证书申请成功')"
-            xray_ensure_certbot_timer
-            xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
-            XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
-            return 0
-            ;;
-    esac
+    while true; do
+        echo "$(L '证书申请方式：')"
+        echo "  1) $(L 'HTTP-01（域名解析到本机 + 开放 80 端口，自动续期）')"
+        echo "  2) $(L 'Cloudflare DNS-01（需要 CF API Key/Token，自动续期，80 端口可不开）')"
+        echo "  3) $(L '已有证书文件（fullchain.pem + privkey.pem）')"
+        echo "  0) $(L '取消')"
+        read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || return 1
+        case "${ans:-1}" in
+            0|q) return 1 ;;
+            3)
+                check_domain_dns "$domain" || true
+                read -rp "$(L '证书文件路径（fullchain.pem）:') " src_crt || return 1
+                read -rp "$(L '私钥文件路径（privkey.pem）:') " src_key || return 1
+                if [ ! -f "$src_crt" ] || [ ! -f "$src_key" ]; then
+                    warn "$(L '证书或私钥文件不存在')"
+                    confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y && continue || return 1
+                fi
+                if ! cert_covers_domain "$src_crt" "$domain"; then
+                    warn "$(L '该证书的域名列表里没有') ${domain}"
+                    confirm "$(L '仍要使用？')" n || { confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y && continue || return 1; }
+                fi
+                xray_install_cert "$tag" "$src_crt" "$src_key" || { warn "$(L '证书复制失败')"; return 1; }
+                XRAY_OBT_CRT="$src_crt"; XRAY_OBT_KEY="$src_key"
+                return 0
+                ;;
+            2)
+                check_domain_dns "$domain" || true
+                apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
+                apt_install python3-certbot-dns-cloudflare || { warn "$(L 'certbot Cloudflare 插件安装失败')"; return 1; }
+                if [ -s /etc/cloudflare/credentials.ini ] && confirm "$(L '检测到已有 Cloudflare 凭证文件（/etc/cloudflare/credentials.ini），是否直接复用？')" y; then
+                    :
+                else
+                    prompt_cloudflare_creds || { confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y && continue || return 1; }
+                    write_cloudflare_creds
+                fi
+                info "$(L '证书申请中（Cloudflare DNS-01，约需 30-60 秒）...')"
+                if certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
+                    --non-interactive --agree-tos --email "$email" -d "$domain" \
+                    --dns-cloudflare-propagation-seconds 30 \
+                    && verify_issued_cert "$domain" "$le_crt" "$le_key"; then
+                    success "$(L '证书申请成功')"
+                    xray_ensure_certbot_timer
+                    xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
+                    XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
+                    return 0
+                fi
+                warn "$(L '证书申请失败：检查 CF 凭证与域名归属')"
+                confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y && continue || return 1
+                ;;
+            *)
+                if ! check_domain_dns "$domain"; then
+                    confirm "$(L '域名解析未通过，HTTP-01 很可能失败，仍要继续申请？')" n || continue
+                fi
+                occ80="$(check_port_occupied_by_other tcp 80 __none__ || true)"
+                if [ -n "$occ80" ]; then
+                    warn "$(L '当前 80 端口已被占用，HTTP-01 签发可能失败：')"
+                    echo "$occ80"
+                    confirm "$(L '仍要继续？')" n || continue
+                fi
+                apt_install certbot || { warn "$(L 'certbot 安装失败')"; return 1; }
+                info "$(L '证书申请中（HTTP-01，需 80 端口）...')"
+                ufw allow 80/tcp 2>/dev/null || true
+                if certbot certonly --standalone --preferred-challenges http --non-interactive \
+                    --agree-tos --email "$email" -d "$domain" \
+                    --http-01-port 80 --http-01-address 0.0.0.0 \
+                    && verify_issued_cert "$domain" "$le_crt" "$le_key"; then
+                    success "$(L '证书申请成功')"
+                    xray_ensure_certbot_timer
+                    xray_install_cert "$tag" "$le_crt" "$le_key" || { warn "$(L '证书复制失败')"; return 1; }
+                    XRAY_OBT_CRT="$le_crt"; XRAY_OBT_KEY="$le_key"
+                    return 0
+                fi
+                warn "$(L '证书申请失败：检查域名解析与 80 端口')"
+                confirm "$(L '证书获取失败，是否重试或更换证书方式？')" y && continue || return 1
+                ;;
+        esac
+    done
 }
 
 # VLESS + XHTTP + TLS（直连域名证书）：TLS 只验证 SNI=域名，server 地址用域名或本机 IP 均可
@@ -10333,10 +10674,13 @@ xray_choose_channel() {
     case "${ans:-1}" in
         2) XRAY_CHANNEL="stable"; XRAY_PIN_VERSION="" ;;
         3)
-            read -rp "$(L '输入版本号（如 v26.3.27）:') " ans || { [ -n "$ans" ] || return 1; }
-            ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
-            if [[ ! "$ans" =~ $re ]]; then warn "$(L '版本号格式不正确')"; return 1; fi
-            XRAY_CHANNEL="pin"; XRAY_PIN_VERSION="v${ans#v}"
+            while true; do
+                read -rp "$(L '输入版本号（如 v26.3.27）:') " ans || { [ -n "$ans" ] || return 1; }
+                ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
+                [ -z "$ans" ] || [ "$ans" = "q" ] && return 1
+                if [[ "$ans" =~ $re ]]; then XRAY_CHANNEL="pin"; XRAY_PIN_VERSION="v${ans#v}"; break; fi
+                warn "$(L '版本号格式不正确')"
+            done
             ;;
         *) XRAY_CHANNEL="prerelease"; XRAY_PIN_VERSION="" ;;
     esac
@@ -10382,7 +10726,9 @@ xray_install() {
         fi
     fi
     info "$(L '将安装:') ${XRAY_TARGET}$(L '（')$(xray_asset_name)$(L '）')"
-    xray_fetch "$XRAY_TARGET" || return 1
+    while ! xray_fetch "$XRAY_TARGET"; do
+        confirm "$(L '下载失败，是否立即重试？')" y || return 1
+    done
     # 有现成节点或转发规则时先用新内核校验现有配置（与 xray_upgrade_to 一致），不通过不替换
     if [ -x "$XRAY_BIN" ] && { [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; }; then
         if ! out="$(XRAY_LOCATION_ASSET="$XRAY_DIR" "$XRAY_DL_DIR/xray" run -test -confdir "$XRAY_CONF_D" 2>&1)"; then
@@ -10703,13 +11049,13 @@ xray_uninstall() {
                 info "$(L '已删除 Cloudflare 凭证')"
             fi
         fi
-        # 只删 Xray 的 certbot 续期 cron（无 deploy-hook 的那行）；Nowhere 自带 deploy-hook 的那行不动
-        if crontab -l 2>/dev/null | grep -q 'certbot renew --quiet$'; then
+        # 仅在 Nowhere 未依赖 certbot 续期时才移除 certbot renew --quiet 兜底 cron
+        if [ ! -x /etc/letsencrypt/renewal-hooks/deploy/restart-nowhere.sh ] && crontab -l 2>/dev/null | grep -q 'certbot renew --quiet$'; then
             (crontab -l 2>/dev/null | grep -v 'certbot renew --quiet$' || true) | crontab - 2>/dev/null || true
             info "$(L '已移除 Xray 的 certbot 续期 cron 任务')"
         fi
-        # Xray 的 HTTP-01 不再需要 80 端口时收回（Nowhere 用 HTTP-01 时保留，nowhere_ports 会列出它）
-        if ! nowhere_ports 2>/dev/null | grep -qx '80/tcp'; then
+        # Xray 的 HTTP-01 不再需要 80 端口时收回（Nowhere / Caddy 仍需 80/tcp 时保留）
+        if ! port_used_by_other_services "80/tcp" xray; then
             ufw delete allow 80/tcp 2>/dev/null || true
         fi
     else
@@ -10760,7 +11106,7 @@ xray_menu() {
         echo -e "  ${GREEN}16)${NC} $(L '端口转发（dokodemo-door）')"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-16]: " choice
+        read -rp "$(L '请选择') [0-16]: " choice || return 0
         case "$choice" in
             1)  run_action xray_install ;;
             2)  run_action xray_add_node ;;
@@ -10958,6 +11304,13 @@ xanmod_install() {
     warn "$(L '更换内核有风险：请确认服务商面板有 VNC / 救援模式，万一新内核起不来可以回到旧内核')"
     confirm "$(L '继续安装 / 更新 XanMod 内核？')" n || { info "$(L '已取消')"; return 0; }
 
+    # 先探测 deb.xanmod.org 是否真的提供当前发行版代号（如旧版 bullseye/jammy 已停止发布），
+    # 避免把 404 软件源写进 /etc/apt/sources.list.d 污染整个系统的 apt update
+    if ! curl -fsI --max-time 15 "https://deb.xanmod.org/dists/${codename}/InRelease" >/dev/null 2>&1 \
+        && ! curl -fsI --max-time 15 "https://deb.xanmod.org/dists/${codename}/Release" >/dev/null 2>&1; then
+        warn "$(L 'XanMod 官方仓库暂不提供当前系统代号（')${codename}$(L '）的软件包，已跳过写入软件源（避免污染 apt）')"
+        return 1
+    fi
     apt_install gnupg ca-certificates curl || { warn "$(L '依赖安装失败')"; return 1; }
     install -d -m 755 /etc/apt/keyrings
     make_workdir || return 1
@@ -10967,7 +11320,7 @@ xanmod_install() {
         return 1
     fi
     chmod 644 "$keyring"
-    echo "deb [signed-by=${keyring}] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
+    echo "deb [arch=amd64 signed-by=${keyring}] https://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
     info "$(L '正在更新软件包列表 ...')"
     apt-get update -qq || warn "$(L 'apt-get update 部分失败，继续尝试')"
     APT_UPDATED=1
@@ -10988,6 +11341,10 @@ xanmod_install() {
     info "$(L '将安装:') ${pkg}"
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"; then
         warn "$(L '内核包安装失败')"
+        if [ -z "$(xanmod_installed_pkgs)" ]; then
+            rm -f /etc/apt/sources.list.d/xanmod-release.list
+            info "$(L '已清理失败的 XanMod 软件源配置')"
+        fi
         return 1
     fi
     success "$(L 'XanMod 内核已安装:') ${pkg}"
@@ -11068,14 +11425,19 @@ dns_set() {
         2) v4="8.8.8.8 1.1.1.1"; v6="2001:4860:4860::8888 2606:4700:4700::1111" ;;
         3) v4="9.9.9.9 1.1.1.1"; v6="2620:fe::fe 2606:4700:4700::1111" ;;
         4)
-            read -rp "$(L '输入 DNS 服务器 IP（空格分隔，可混合 IPv4 / IPv6）:') " ans || { [ -n "$ans" ] || return 1; }
-            v4=""; v6=""
-            while IFS= read -r s; do
-                [ -n "$s" ] || continue
-                if ! is_ip "$s"; then warn "$(L '不是合法 IP:') ${s}"; return 1; fi
-                if [[ "$s" == *:* ]]; then v6="${v6:+$v6 }$s"; else v4="${v4:+$v4 }$s"; fi
-            done < <(printf '%s\n' "$ans" | tr ' ' '\n' | grep -v '^$')
-            if [ -z "$v4$v6" ]; then warn "$(L '没有输入任何服务器')"; return 1; fi
+            while true; do
+                read -rp "$(L '输入 DNS 服务器 IP（空格分隔，可混合 IPv4 / IPv6）:') " ans || { [ -n "$ans" ] || return 1; }
+                [ "$ans" = "q" ] && return 0
+                v4=""; v6=""; local _dns_bad=0
+                while IFS= read -r s; do
+                    [ -n "$s" ] || continue
+                    if ! is_ip "$s"; then warn "$(L '不是合法 IP:') ${s}"; _dns_bad=1; break; fi
+                    if [[ "$s" == *:* ]]; then v6="${v6:+$v6 }$s"; else v4="${v4:+$v4 }$s"; fi
+                done < <(printf '%s\n' "$ans" | tr ' ' '\n' | grep -v '^$')
+                [ "$_dns_bad" = "1" ] && continue
+                if [ -z "$v4$v6" ]; then warn "$(L '没有输入任何服务器')"; continue; fi
+                break
+            done
             ;;
         *) return 0 ;;
     esac
@@ -11253,7 +11615,7 @@ services_adapt_ipv6() {
     if [ -d "$XRAY_CONF_D" ]; then
         for f in "$XRAY_CONF_D"/10-in-*.json; do
             [ -f "$f" ] || continue
-            if snell_ipv6_ok; then
+            if ipv6_dualstack_ok; then
                 if grep -q '"listen": "0.0.0.0"' "$f"; then
                     [ -n "$xbak" ] || { make_workdir || return 1; xbak="$WORKDIR"; }
                     cp -a "$f" "$xbak/" 2>/dev/null || true
@@ -11282,7 +11644,7 @@ services_adapt_ipv6() {
     if [ -d "$XRAY_FWD_DIR" ]; then
         local _fchg=0 _ff
         while IFS= read -r _ff; do
-            if snell_ipv6_ok; then
+            if ipv6_dualstack_ok; then
                 if grep -q '^FWD_LIP="0.0.0.0"$' "$_ff"; then sed -i 's/^FWD_LIP="0.0.0.0"$/FWD_LIP="::"/' "$_ff"; _fchg=1; fi
             else
                 if grep -q '^FWD_LIP="::"$' "$_ff"; then sed -i 's/^FWD_LIP="::"$/FWD_LIP="0.0.0.0"/' "$_ff"; _fchg=1; fi
@@ -11294,7 +11656,7 @@ services_adapt_ipv6() {
     if [ -d "$REALM_RULE_DIR" ]; then
         local _rchg=0 _rf
         while IFS= read -r _rf; do
-            if snell_ipv6_ok; then
+            if ipv6_dualstack_ok; then
                 if grep -q '^RULE_LIP="0.0.0.0"$' "$_rf"; then sed -i 's/^RULE_LIP="0.0.0.0"$/RULE_LIP="[::]"/' "$_rf"; _rchg=1; fi
             else
                 if grep -q '^RULE_LIP="\[::\]"$' "$_rf"; then sed -i 's/^RULE_LIP="\[::\]"$/RULE_LIP="0.0.0.0"/' "$_rf"; _rchg=1; fi
@@ -11403,7 +11765,7 @@ tune_menu() {
         echo -e "  ${GREEN}8)${NC} $(L '查看当前状态')"
         echo -e "  ${GREEN}0)${NC} $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-8]: " choice
+        read -rp "$(L '请选择') [0-8]: " choice || return 0
         case "$choice" in
             1) run_action tcpfit_menu_entry ;;
             2) run_action tcpfit_sub_menu ;;
@@ -11528,7 +11890,7 @@ except Exception as e:
 
 # ══════════════════════════════════════════════════════════════
 #   Realm 端口转发（参考 zywe03/realm-xwPF · 适配 adam 脚本架构）
-#   目录模式：realm -c /etc/adam-realm/conf.d（00-base.toml + rule-<id>.toml）
+#   合并配置：由 00-base.toml + rule-<id>.toml 原子合并为 /etc/adam-realm/config.toml（realm -c /etc/adam-realm/config.toml）
 #   规则元数据：/etc/adam-realm/rules/<id>.env（600 权限）
 #   v8.4 合入时按审计逐项修正（A1–A25，见文件头修订记录）
 # ══════════════════════════════════════════════════════════════
@@ -11602,11 +11964,51 @@ realm_healthy() {
     return 0
 }
 
-realm_default_listen_ip() {
-    if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)" = "1" ]; then
-        printf '0.0.0.0'
+# IPv6 双栈监听是否真正可用（内核启用 IPv6 且未设置 bindv6only=1）
+ipv6_dualstack_ok() {
+    [ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || return 1
+    [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ] || return 1
+    [ "$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || echo 0)" = "0" ] || return 1
+    [ "$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0)" != "1" ]
+}
+
+# 检查某个 ufw 端口规格（如 443/tcp）是否仍被除 $2 以外的其他已管理服务使用
+port_used_by_other_services() {
+    local spec="$1" excl="${2:-}"
+    if [ "$excl" != "nowhere" ] && nowhere_ports 2>/dev/null | grep -qx "$spec"; then return 0; fi
+    if [ "$excl" != "snell" ] && [[ "$spec" == */tcp ]]; then
+        if snell_all_ports 2>/dev/null | grep -qx "${spec%/tcp}"; then return 0; fi
+    fi
+    if [ "$excl" != "xray" ] && xray_ports 2>/dev/null | grep -qx "$spec"; then return 0; fi
+    if [ "$excl" != "realm" ] && realm_ports 2>/dev/null | grep -qx "$spec"; then return 0; fi
+    if [ "$excl" != "caddy" ] && caddy_ports 2>/dev/null | grep -qx "$spec"; then return 0; fi
+    return 1
+}
+
+# 严格拆分 host:port（IPv6 必须带方括号 [::1]:443，拒绝把裸 IPv6 误拆成主机+端口）
+realm_split_host_port() {
+    local item="$1" hvar="$2" pvar="$3" h="" p=""
+    if [[ "$item" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+        h="[${BASH_REMATCH[1]}]"; p="${BASH_REMATCH[2]}"
+        is_ip "${BASH_REMATCH[1]}" 0 || return 1
+    elif [[ "$item" =~ ^([^:]+):([0-9]+)$ ]]; then
+        h="${BASH_REMATCH[1]}"; p="${BASH_REMATCH[2]}"
+        is_safe_host "$h" || return 1
     else
+        return 1
+    fi
+    validate_port "$p" || return 1
+    p=$((10#$p))
+    printf -v "$hvar" '%s' "$h"
+    printf -v "$pvar" '%s' "$p"
+    return 0
+}
+
+realm_default_listen_ip() {
+    if ipv6_dualstack_ok; then
         printf '[::]'
+    else
+        printf '0.0.0.0'
     fi
 }
 
@@ -11680,7 +12082,7 @@ for a in d.get("assets",[]):
         fi
 
         tar -xzf "${subdir}/realm.tar.gz" -C "$subdir" || { asset=""; continue; }
-        bin="$(find "$subdir" -maxdepth 2 -type f -name realm | head -1)"
+        bin="$(find "$subdir" -maxdepth 2 -type f -name realm 2>/dev/null | head -1 || true)"
         [ -n "$bin" ] || { asset=""; continue; }
         chmod 755 "$bin" || { asset=""; continue; }
         if ! "$bin" --version >/dev/null 2>&1; then
@@ -11796,9 +12198,9 @@ realm_render_rule() {
             udp) no_tcp="true";  use_udp="true" ;;
             *)   no_tcp="false"; use_udp="true" ;;
         esac
-        local laddr raddr
-        laddr="$(format_host_for_url "$RULE_LIP"):${RULE_LPORT}"
-        raddr="$(format_host_for_url "$RULE_RHOST"):${RULE_RPORT}"
+        local lport_n=$((10#$RULE_LPORT)) rport_n=$((10#$RULE_RPORT)) laddr raddr
+        laddr="$(format_host_for_url "$RULE_LIP"):${lport_n}"
+        raddr="$(format_host_for_url "$RULE_RHOST"):${rport_n}"
 
         {
             echo "# id=${id} remark=$(toml_escape "${RULE_REMARK:-}")"
@@ -11812,10 +12214,7 @@ realm_render_rule() {
                 for item in "${extras[@]}"; do
                     item="${item//[[:space:]]/}"
                     [ -n "$item" ] || continue
-                    ehost="${item%:*}"; eport="${item##*:}"
-                    [ "$ehost" = "$item" ] && continue
-                    is_safe_host "$ehost" || continue
-                    validate_port "$eport" || continue
+                    realm_split_host_port "$item" ehost eport || continue
                     arr="${arr:+${arr}, }\"$(toml_escape "$(format_host_for_url "$ehost"):${eport}")\""
                 done
                 [ -n "$arr" ] && echo "extra_remotes = [${arr}]"
@@ -11867,17 +12266,26 @@ realm_rebuild_all() {
         fi
         for t in "${REALM_CONF_D}"/rule-*.toml; do
             [ -f "$t" ] || continue
-            printf '
-'
+            printf '\n'
             cat "$t"
             ep_cnt=$((ep_cnt + 1))
         done
         if [ "$ep_cnt" -eq 0 ]; then
-            printf '
-endpoints = []
-'
+            printf '\nendpoints = []\n'
         fi
     } > "$tmpcfg" || { rm -f "$tmpcfg"; return 1; }
+    # 若系统自带 Python 3.11+ tomllib，在覆盖生效配置前先做 TOML 语法与 endpoints 字段校验
+    if command -v python3 >/dev/null 2>&1; then
+        if ! python3 -c 'import sys
+try: import tomllib
+except ImportError: sys.exit(0)
+with open(sys.argv[1], "rb") as fh: d = tomllib.load(fh)
+assert isinstance(d.get("endpoints"), list), "missing endpoints"' "$tmpcfg" 2>/dev/null; then
+            rm -f "$tmpcfg"
+            warn "$(L '配置校验未通过：')${REALM_CONFIG_FILE}"
+            return 1
+        fi
+    fi
     chmod 644 "$tmpcfg"
     mv -f "$tmpcfg" "$REALM_CONFIG_FILE"
 }
@@ -11903,15 +12311,15 @@ realm_reload_service() {
         realm_write_service
     fi
     systemctl enable adam-realm >/dev/null 2>&1 || true
-    if svc_restart_wait adam-realm 2 20; then
+    if svc_restart_wait adam-realm 2 20 && realm_healthy; then
         return 0
     fi
-    # 专用用户启动失败时改以 root 重试一次（参照 Nowhere 的回退模式）
+    # 专用用户启动失败或端口绑定失败（如特权端口/证书权限）时改以 root 重试一次
     if grep -q '^User=' "$REALM_SERVICE" 2>/dev/null; then
         warn "$(L 'adam-realm 以专用用户启动失败，改以 root 重试')"
         sed -i '/^User=/d; /^Group=/d' "$REALM_SERVICE" || { warn "$(L '改写服务文件失败')"; return 1; }
         systemctl daemon-reload || true
-        if svc_restart_wait adam-realm 2 20; then
+        if svc_restart_wait adam-realm 2 20 && realm_healthy; then
             touch "${REALM_DIR}/run-as-root" 2>/dev/null || true
             info "$(L '已记录 root 运行标记，下次安装不再写入专用用户：')${REALM_DIR}/run-as-root"
             return 0
@@ -11940,7 +12348,9 @@ realm_install() {
         if ! confirm "$(L '已是最新版本，仍要重新安装？')" n; then return 0; fi
     fi
 
-    realm_fetch_binary "$tag" || error "$(L 'Realm 下载或校验失败')"
+    while ! realm_fetch_binary "$tag"; do
+        confirm "$(L '下载失败，是否立即重试？')" y || error "$(L 'Realm 下载或校验失败')"
+    done
     install -d -m 755 "$REALM_DIR" "$REALM_CONF_D" "$REALM_RULE_DIR" || error "$(L '创建 Realm 配置目录失败')"
     if [ -f "$REALM_BIN" ]; then cp "$REALM_BIN" "$REALM_BIN_BACKUP" 2>/dev/null || warn "$(L '备份旧二进制失败')"; fi
     install -m 755 "$REALM_DL_BIN" "$REALM_BIN" || error "$(L '安装 Realm 二进制失败')"
@@ -11964,7 +12374,7 @@ realm_install() {
         realm_reload_service || true
     fi
     echo "$tag" > "$REALM_VERSION_FILE"
-    success "$(L 'Realm ')${tag}$(L ' 安装完成（')$(${REALM_BIN} --version 2>&1 | head -1)$(L '）')"
+    success "$(L 'Realm ')${tag}$(L ' 安装完成（')$(${REALM_BIN} --version 2>&1 | awk "NR==1" || true)$(L '）')"
 }
 
 realm_next_id() {
@@ -12069,8 +12479,11 @@ realm_add_rule() {
     local extra_remotes="" balance="" through="" out_if="" in_if=""
     local ltrans="" rtrans="" send_proxy=0 accept_proxy=0 send_mptcp=0 accept_mptcp=0
 
-    read -rp "$(L '规则备注（可选，如 香港VPC落地）: ')" remark || { [ -n "$remark" ] || return 1; }
-    if realm_has_toml_special "$remark"; then warn "$(L '备注含非法字符（\" 或 \），请去掉后重试')"; return 1; fi
+    while true; do
+        read -rp "$(L '规则备注（可选，如 香港VPC落地）: ')" remark || { [ -n "$remark" ] || return 1; }
+        if ! realm_has_toml_special "$remark"; then break; fi
+        warn "$(L '备注含非法字符（\" 或 \），请去掉后重试')"
+    done
 
     echo "$(L '转发协议：')"
     echo "  1) $(L 'TCP + UDP 双栈（默认）')"
@@ -12080,33 +12493,34 @@ realm_add_rule() {
     case "${proto_c:-1}" in 2) proto="tcp" ;; 3) proto="udp" ;; *) proto="both" ;; esac
 
     def_lip="$(realm_default_listen_ip)"
-    read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
-    lip="${lip:-$def_lip}"
-    local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
-    is_ip "$_lip_check" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+    while true; do
+        read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
+        lip="${lip:-$def_lip}"
+        local _lip_check="${lip#[}"; _lip_check="${_lip_check%]}"
+        is_ip "$_lip_check" 0 && break
+        warn "$(L '监听 IP 格式不合法')"
+    done
 
     while true; do
         read -rp "$(L '本机监听端口 (1-65535): ')" lport || { [ -n "$lport" ] || return 1; }
-        validate_port "$lport" && break
-        warn "$(L '端口不合法')"
-    done
-    lport=$((10#$lport))
-
-    # 冲突检测：先查本 Realm 模块是否已有同端口规则，再查其他进程（排除 realm）
-    if realm_port_used "$lport" "$proto"; then
-        warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
-        return 1
-    fi
-    if command -v ss >/dev/null 2>&1; then
-        occ=""
-        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" realm || true)"
-        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" realm || true)"
-        if [ -n "$occ" ]; then
-            warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
-            echo "$occ"
-            confirm "$(L '仍要继续添加？')" n || return 0
+        if ! validate_port "$lport"; then warn "$(L '端口不合法')"; continue; fi
+        lport=$((10#$lport))
+        if realm_port_used "$lport" "$proto"; then
+            warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
+            continue
         fi
-    fi
+        if command -v ss >/dev/null 2>&1; then
+            occ=""
+            [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" realm || true)"
+            [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" realm || true)"
+            if [ -n "$occ" ]; then
+                warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
+                echo "$occ"
+                confirm "$(L '仍要继续添加？')" n || continue
+            fi
+        fi
+        break
+    done
 
     while true; do
         read -rp "$(L '目标地址（域名、公网 IP 或同区免费内网 IP）: ')" rhost || { [ -n "$rhost" ] || return 1; }
@@ -12132,12 +12546,11 @@ realm_add_rule() {
             for _item in "${_eitems[@]}"; do
                 _item="${_item//[[:space:]]/}"
                 [ -n "$_item" ] || continue
-                _ih="${_item%:*}"; _ip="${_item##*:}"
-                if [ "$_ih" = "$_item" ] || ! is_safe_host "$_ih" || ! validate_port "$_ip"; then
+                if ! realm_split_host_port "$_item" _ih _ip; then
                     warn "$(L '已剔除无效目标：')${_item}"
                     continue
                 fi
-                _clean="${_clean:+${_clean},}${_item}"
+                _clean="${_clean:+${_clean},}${_ih}:${_ip}"
             done
             extra_remotes="$_clean"
             if [ -z "$extra_remotes" ]; then
@@ -12166,6 +12579,8 @@ realm_add_rule() {
                     if [ "$_wok" != "1" ] || [ "$_wc" -ne "$_cnt" ]; then
                         warn "$(L '权重数量与目标数不符或含非数字，已按等权生成')"
                         lb_w=""
+                    else
+                        lb_w="$(printf '%s' "$lb_w" | tr -d ' ' | sed 's/,/, /g')"
                     fi
                 fi
                 if [ -z "$lb_w" ]; then
@@ -12193,6 +12608,7 @@ realm_add_rule() {
     # 可选：多 IP / 多网卡 / Proxy Protocol / MPTCP
     if confirm "$(L '配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？')" n; then
         read -rp "$(L '  出站源 IP through（回车默认自动）: ')" through || { [ -n "$through" ] || return 1; }
+        through="${through#[}"; through="${through%]}"
         if [ -n "$through" ] && ! is_ip "$through" 0; then warn "$(L '非合法 IP，已忽略')"; through=""; fi
         read -rp "$(L '  出站网卡 interface（如 eth1，回车默认自动）: ')" out_if || { [ -n "$out_if" ] || return 1; }
         if [ -n "$out_if" ] && [[ ! "$out_if" =~ ^[A-Za-z0-9_.-]+$ ]]; then warn "$(L '网卡名格式不合法，已忽略')"; out_if=""; fi
@@ -12206,6 +12622,7 @@ realm_add_rule() {
         fi
     fi
 
+    install -d -m 755 "$REALM_DIR" "$REALM_CONF_D" "$REALM_RULE_DIR"
     id="$(realm_next_id)"
     local env_file="${REALM_RULE_DIR}/${id}.env"
     cat > "$env_file" << RULEEOF
@@ -12231,8 +12648,12 @@ RULE_ACCEPT_MPTCP="${accept_mptcp}"
 RULEEOF
     chmod 600 "$env_file"
 
+    if ! realm_render_rule "$id" || [ ! -f "${REALM_CONF_D}/rule-${id}.toml" ]; then
+        rm -f "$env_file" "${REALM_CONF_D}/rule-${id}.toml"
+        error "$(L '规则渲染失败，已中止')"
+    fi
     if ! realm_reload_service; then
-        rm -f "$env_file"
+        rm -f "$env_file" "${REALM_CONF_D}/rule-${id}.toml"
         realm_reload_service >/dev/null 2>&1 || true
         error "$(L '新规则未能生效，已自动撤回（原有规则不受影响）')"
     fi
@@ -12292,20 +12713,38 @@ realm_pick_rule_file() {
 
 realm_toggle_rule() {
     realm_pick_rule_file || return 0
-    local f="$PICKED_RULE_FILE" cur next
+    local f="$PICKED_RULE_FILE" bak="${PICKED_RULE_FILE}.bak" cur next lport proto
     cur="$(grep -m1 '^RULE_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    lport="$(grep -m1 '^RULE_LPORT=' "$f" | cut -d'"' -f2 || true)"
+    proto="$(grep -m1 '^RULE_PROTO=' "$f" | cut -d'"' -f2 || echo both)"
     if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
+    cp -f "$f" "$bak" || return 1
     if grep -q '^RULE_ENABLED=' "$f"; then
-        sed -i "s|^RULE_ENABLED=.*|RULE_ENABLED=\"${next}\"|" "$f" || { warn "$(L '规则状态切换失败')"; return 1; }
+        sed -i "s|^RULE_ENABLED=.*|RULE_ENABLED=\"${next}\"|" "$f" || { mv -f "$bak" "$f"; warn "$(L '规则状态切换失败')"; return 1; }
     else
         printf '%s\n' "RULE_ENABLED=\"${next}\"" >> "$f"
     fi
-    realm_reload_service && success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    if ! realm_reload_service; then
+        mv -f "$bak" "$f"
+        realm_reload_service >/dev/null 2>&1 || true
+        warn "$(L '规则状态切换失败')"
+        return 1
+    fi
+    rm -f "$bak"
+    if [ "$next" = "1" ] && validate_port "$lport"; then
+        local -a fw_specs=()
+        [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
+        [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
+        fw_allow_for_service "${fw_specs[@]}"
+    fi
+    reserved_ports_sync || true
+    success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    return 0
 }
 
 realm_delete_rule() {
     realm_pick_rule_file || return 0
-    local f="$PICKED_RULE_FILE" old_port old_proto rid rlip rrhost rrport
+    local f="$PICKED_RULE_FILE" bak="${PICKED_RULE_FILE}.bak" old_port old_proto rid rlip rrhost rrport
     rid="$(grep -m1 '^RULE_ID=' "$f" | cut -d'"' -f2 || true)"
     rlip="$(grep -m1 '^RULE_LIP=' "$f" | cut -d'"' -f2 || true)"
     old_port="$(grep -m1 '^RULE_LPORT=' "$f" | cut -d'"' -f2 || true)"
@@ -12313,18 +12752,23 @@ realm_delete_rule() {
     rrhost="$(grep -m1 '^RULE_RHOST=' "$f" | cut -d'"' -f2 || true)"
     rrport="$(grep -m1 '^RULE_RPORT=' "$f" | cut -d'"' -f2 || true)"
     confirm "$(L '确认删除规则 [')${rid}] ${rlip}:${old_port} -> ${rrhost}:${rrport}$(L ']？')" n || return 0
-    rm -f "$f"
+    mv -f "$f" "$bak" || return 1
     if ! realm_reload_service; then
+        mv -f "$bak" "$f"
+        realm_reload_service >/dev/null 2>&1 || true
         warn "$(L '服务重载失败，删除未生效，请检查日志')"
         return 1
     fi
+    rm -f "$bak"
     if ufw_installed && validate_port "$old_port"; then
         local old_specs=""
         [ "$old_proto" != "udp" ] && old_specs="${old_specs} ${old_port}/tcp"
         [ "$old_proto" != "tcp" ] && old_specs="${old_specs} ${old_port}/udp"
         fw_prune_old_specs "$old_specs"
     fi
+    reserved_ports_sync || true
     success "$(L '已删除规则 ')${rid}"
+    return 0
 }
 
 # TCP 目标连通性与延迟检测（类似 xwPF 链路检测，支持 IPv4/IPv6）
@@ -12355,8 +12799,7 @@ realm_test_rules() {
                 for _ex in "${_exarr[@]}"; do
                     _ex="${_ex//[[:space:]]/}"
                     [ -n "$_ex" ] || continue
-                    _eh="${_ex%:*}"; _ep="${_ex##*:}"
-                    [ "$_eh" = "$_ex" ] && continue
+                    realm_split_host_port "$_ex" _eh _ep || continue
                     _eres="$(probe_tcp_host_port "$_eh" "$_ep")"
                     if [[ "$_eres" == OK* ]]; then
                         echo -e "    └─ [LB] ${_eh}:${_ep}  ${GREEN}${_eres}${NC}"
@@ -12367,7 +12810,8 @@ realm_test_rules() {
             fi
         )
     done < <(realm_rule_files)
-    [ "$any" -eq 0 ] && info "$(L '暂无可测试的规则')"
+    if [ "$any" -eq 0 ]; then info "$(L '暂无可测试的规则')"; fi
+    return 0
 }
 
 realm_export_rules() {
@@ -12418,13 +12862,18 @@ realm_import_rules() {
         rm -rf "$bakdir"
         error "$(L '导入的规则文件内容非法，已恢复原配置')"
     fi
-    rm -rf "$bakdir"
     if realm_reload_service; then
+        rm -rf "$bakdir"
         fw_sync_managed
         [ -n "${old_ports// /}" ] && fw_prune_old_specs "$old_ports"
+        reserved_ports_sync || true
         success "$(L '规则导入完成')"
     else
         warn "$(L '规则已导入，但服务重载失败，请检查日志')"
+        rm -rf "$REALM_DIR"
+        [ -d "$bakdir/realm" ] && cp -a "$bakdir/realm" "$REALM_DIR"
+        rm -rf "$bakdir"
+        realm_reload_service >/dev/null 2>&1 || true
         return 1
     fi
 }
@@ -12444,6 +12893,7 @@ realm_uninstall_do() {
         local _rs
         while IFS= read -r _rs; do
             [ -n "$_rs" ] || continue
+            port_used_by_other_services "$_rs" realm && continue
             fw_delete_spec "$_rs"
         done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
     fi
@@ -12590,10 +13040,21 @@ realm_add_batch_rules() {
         done
     fi
 
-    local rp
+    install -d -m 755 "$REALM_DIR" "$REALM_CONF_D" "$REALM_RULE_DIR"
+    local rp occ
     for p in "${ports[@]}"; do
         if realm_port_used "$p" "$proto"; then
             warn "$(L '端口 ')${p} $(L '已被占用，请换一个')"
+            skip_cnt=$((skip_cnt + 1))
+            continue
+        fi
+        occ=""
+        if command -v ss >/dev/null 2>&1; then
+            [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$p" realm || true)"
+            [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$p" realm || true)"
+        fi
+        if [ -n "$occ" ]; then
+            warn "$(L '已跳过被其他进程占用的端口：')${p}"
             skip_cnt=$((skip_cnt + 1))
             continue
         fi
@@ -12647,7 +13108,7 @@ realm_edit_rule() {
     local f="$PICKED_RULE_FILE" bak ans
     realm_env_file_safe "$f" || { warn "$(L '规则文件内容非法，已跳过：')${f}"; return 1; }
     # shellcheck disable=SC1090
-    source "$f"
+    source "$f" || return 1
     local old_port="$RULE_LPORT" old_proto="$RULE_PROTO"
     local remark="$RULE_REMARK" proto="$RULE_PROTO" lip="$RULE_LIP" lport="$RULE_LPORT"
     local rhost="$RULE_RHOST" rport="$RULE_RPORT"
@@ -12711,15 +13172,37 @@ realm_edit_rule() {
             for _item in "${_eitems[@]}"; do
                 _item="${_item//[[:space:]]/}"
                 [ -n "$_item" ] || continue
-                _ih="${_item%:*}"; _ip="${_item##*:}"
-                if [ "$_ih" = "$_item" ] || ! is_safe_host "$_ih" || ! validate_port "$_ip"; then
+                if ! realm_split_host_port "$_item" _ih _ip; then
                     warn "$(L '已剔除无效目标：')${_item}"; continue
                 fi
-                _clean="${_clean:+${_clean},}${_item}"; _cnt=$((_cnt + 1))
+                _clean="${_clean:+${_clean},}${_ih}:${_ip}"; _cnt=$((_cnt + 1))
             done
             extra_remotes="$_clean"
             if [ -n "$extra_remotes" ]; then
-                balance="roundrobin: $(printf '1, %.0s' $(seq 1 "$_cnt") | sed 's/, $//')"
+                echo "$(L '  负载策略：1) roundrobin（加权轮询）  2) iphash（源 IP 哈希）')"
+                local lb_c lb_algo="roundrobin" lb_w=""
+                read -rp "$(L '  选择 [1/2，默认 1]: ')" lb_c || { [ -n "$lb_c" ] || return 1; }
+                [ "${lb_c:-1}" = "2" ] && lb_algo="iphash"
+                read -rp "$(L '  各目标权重（逗号分隔，含主目标，如 2,1；回车全部等权 1）: ')" lb_w || { [ -n "$lb_w" ] || return 1; }
+                if [ -n "$lb_w" ]; then
+                    local _wc=0 _wok=1 _wi
+                    local -a _warr=()
+                    IFS=',' read -r -a _warr <<< "$lb_w"
+                    for _wi in "${_warr[@]}"; do
+                        _wi="${_wi//[[:space:]]/}"
+                        [ -n "$_wi" ] || continue
+                        _wc=$((_wc + 1))
+                        [[ "$_wi" =~ ^[0-9]+$ ]] || _wok=0
+                    done
+                    if [ "$_wok" != "1" ] || [ "$_wc" -ne "$_cnt" ]; then
+                        warn "$(L '权重数量与目标数不符或含非数字，已按等权生成')"
+                        lb_w=""
+                    else
+                        lb_w="$(printf '%s' "$lb_w" | tr -d ' ' | sed 's/,/, /g')"
+                    fi
+                fi
+                [ -n "$lb_w" ] || lb_w="$(printf '1, %.0s' $(seq 1 "$_cnt") | sed 's/, $//')"
+                balance="${lb_algo}: ${lb_w}"
             else
                 balance=""
             fi
@@ -12739,6 +13222,30 @@ realm_edit_rule() {
         fi
     elif [ "$proto" = "udp" ]; then
         ltrans=""; rtrans=""
+    fi
+
+    if confirm "$(L '配置高级选项（指定出口 IP/网卡、Proxy Protocol、MPTCP）？')" n; then
+        read -rp "$(L '  出站源 IP through（回车默认自动）: ') [${through:-$(L '无')}]: " ans || { [ -n "$ans" ] || return 1; }
+        ans="${ans#[}"; ans="${ans%]}"
+        if [ -z "$ans" ]; then through=""
+        elif is_ip "$ans" 0; then through="$ans"
+        else warn "$(L '非合法 IP，已忽略')"; fi
+        read -rp "$(L '  出站网卡 interface（如 eth1，回车默认自动）: ') [${out_if:-$(L '无')}]: " ans || { [ -n "$ans" ] || return 1; }
+        if [ -z "$ans" ]; then out_if=""
+        elif [[ "$ans" =~ ^[A-Za-z0-9_.-]+$ ]]; then out_if="$ans"
+        else warn "$(L '网卡名格式不合法，已忽略')"; fi
+        read -rp "$(L '  入站网卡 listen_interface（如 eth0，回车默认自动）: ') [${in_if:-$(L '无')}]: " ans || { [ -n "$ans" ] || return 1; }
+        if [ -z "$ans" ]; then in_if=""
+        elif [[ "$ans" =~ ^[A-Za-z0-9_.-]+$ ]]; then in_if="$ans"
+        else warn "$(L '网卡名格式不合法，已忽略')"; fi
+        if [ "$proto" != "udp" ]; then
+            confirm "$(L '  向目标发送 Proxy Protocol v2（send_proxy）？')" "$([ "$send_proxy" = "1" ] && echo y || echo n)" && send_proxy=1 || send_proxy=0
+            confirm "$(L '  接收来源 Proxy Protocol（accept_proxy）？')" "$([ "$accept_proxy" = "1" ] && echo y || echo n)" && accept_proxy=1 || accept_proxy=0
+            confirm "$(L '  启用出站 MPTCP（send_mptcp）？')" "$([ "$send_mptcp" = "1" ] && echo y || echo n)" && send_mptcp=1 || send_mptcp=0
+            confirm "$(L '  启用入站 MPTCP（accept_mptcp）？')" "$([ "$accept_mptcp" = "1" ] && echo y || echo n)" && accept_mptcp=1 || accept_mptcp=0
+        else
+            send_proxy=0; accept_proxy=0; send_mptcp=0; accept_mptcp=0
+        fi
     fi
 
     bak="${f}.bak"
@@ -12824,6 +13331,8 @@ realm_tune_global() {
     read -rp "  tcp_keepalive (s, default 15): " ans || { [ -n "$ans" ] || return 1; }
     [[ "${ans:-15}" =~ ^[1-9][0-9]*$ ]] && ka="${ans:-15}"
 
+    local base_bak="${REALM_CONF_D}/00-base.toml.bak"
+    [ -f "${REALM_CONF_D}/00-base.toml" ] && cp -f "${REALM_CONF_D}/00-base.toml" "$base_bak" || true
     cat > "${REALM_CONF_D}/00-base.toml" << BASEEOF
 [log]
 level = "warn"
@@ -12845,7 +13354,14 @@ tcp_keepalive = ${ka}
 tcp_keepalive_probe = 3
 BASEEOF
     chmod 644 "${REALM_CONF_D}/00-base.toml"
-    realm_reload_service && success "$(L '配置已更新并重启')"
+    if ! realm_reload_service; then
+        [ -f "$base_bak" ] && mv -f "$base_bak" "${REALM_CONF_D}/00-base.toml"
+        realm_reload_service >/dev/null 2>&1 || true
+        error "$(L '配置更新失败，已恢复原配置')"
+    fi
+    rm -f "$base_bak"
+    success "$(L '配置已更新并重启')"
+    return 0
 }
 
 realm_menu() {
@@ -12873,7 +13389,7 @@ realm_menu() {
         echo -e "  ${GREEN}15)${NC} ${RED}$(L '卸载')${NC} Realm"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-15]: " choice
+        read -rp "$(L '请选择') [0-15]: " choice || return 0
         case "$choice" in
             1)  run_action realm_install ;;
             2)  run_action realm_add_rule ;;
@@ -13006,10 +13522,10 @@ xray_fwd_ports() {
 }
 
 xray_fwd_default_listen_ip() {
-    if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)" = "1" ]; then
-        printf '0.0.0.0'
-    else
+    if ipv6_dualstack_ok; then
         printf '::'
+    else
+        printf '0.0.0.0'
     fi
 }
 
@@ -13052,8 +13568,8 @@ xray_fwd_rule_json() {
 
 # 重建 20-forward.json 并重载；失败时用 .bak 恢复并再次重载
 xray_fwd_rebuild() {
-    local tmpf first=1 count=0 f frag
-    install -d -m 750 "$XRAY_FWD_DIR" 2>/dev/null || true
+    local tmpf first=1 count=0 f frag base_json="${XRAY_CONF_D}/00-base.json"
+    install -d -m 750 "$XRAY_CONF_D" "$XRAY_FWD_DIR" 2>/dev/null || true
     tmpf="$(mktemp "${XRAY_CONF_D}/.20-forward.XXXXXX")" || { warn "$(L '创建临时文件失败')"; return 1; }
     {
         printf '%s\n' '{' '  "inbounds": ['
@@ -13066,10 +13582,11 @@ xray_fwd_rebuild() {
         done < <(xray_fwd_rule_files)
         printf '\n%s\n' '  ]' '}'
     } > "$tmpf" || { rm -f "$tmpf"; return 1; }
+    [ -f "$XRAY_FWD_JSON" ] && cp -f "$XRAY_FWD_JSON" "${XRAY_FWD_JSON}.bak" || rm -f "${XRAY_FWD_JSON}.bak"
+    [ -f "$base_json" ] && cp -f "$base_json" "${base_json}.bak" || rm -f "${base_json}.bak"
     if [ "$count" -eq 0 ]; then
-        rm -f "$tmpf" "$XRAY_FWD_JSON" "${XRAY_FWD_JSON}.bak"
+        rm -f "$tmpf" "$XRAY_FWD_JSON"
     else
-        [ -f "$XRAY_FWD_JSON" ] && cp -f "$XRAY_FWD_JSON" "${XRAY_FWD_JSON}.bak" || true
         mv -f "$tmpf" "$XRAY_FWD_JSON" || { rm -f "$tmpf"; warn "$(L '转发配置文件写入失败')"; return 1; }
         chmod 644 "$XRAY_FWD_JSON" || true
     fi
@@ -13077,18 +13594,17 @@ xray_fwd_rebuild() {
     xray_load_state
     xray_write_base
     if [ ! -x "$XRAY_BIN" ]; then
+        rm -f "${XRAY_FWD_JSON}.bak" "${base_json}.bak"
         info "$(L 'Xray 未安装，转发配置已保存，重装 Xray 后生效')"
         return 0
     fi
     if xray_reload; then
+        rm -f "${XRAY_FWD_JSON}.bak" "${base_json}.bak"
         return 0
-    fi
-    if [ "$count" -eq 0 ]; then
-        warn "$(L '转发配置已移除，但 Xray 重载失败，请检查日志')"
-        return 1
     fi
     warn "$(L '转发配置重载失败，恢复上一版本')"
     if [ -f "${XRAY_FWD_JSON}.bak" ]; then mv -f "${XRAY_FWD_JSON}.bak" "$XRAY_FWD_JSON"; else rm -f "$XRAY_FWD_JSON"; fi
+    if [ -f "${base_json}.bak" ]; then mv -f "${base_json}.bak" "$base_json"; fi
     xray_reload >/dev/null 2>&1 || warn "$(L '恢复后重载仍失败，请检查 Xray 配置与日志')"
     return 1
 }
@@ -13109,32 +13625,34 @@ xray_fwd_add() {
     case "${proto_c:-1}" in 2) proto="tcp" ;; 3) proto="udp" ;; *) proto="both" ;; esac
 
     def_lip="$(xray_fwd_default_listen_ip)"
-    read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
-    lip="${lip:-$def_lip}"
-    is_ip "$lip" 0 || { warn "$(L '监听 IP 格式不合法')"; return 1; }
+    while true; do
+        read -rp "$(L '本机监听 IP（回车默认 ')${def_lip}$(L '）: ')" lip || { [ -n "$lip" ] || return 1; }
+        lip="${lip:-$def_lip}"
+        lip="${lip#[}"; lip="${lip%]}"
+        is_ip "$lip" 0 && break
+        warn "$(L '监听 IP 格式不合法')"
+    done
 
     while true; do
         read -rp "$(L '本机监听端口 (1-65535): ')" lport || { [ -n "$lport" ] || return 1; }
-        validate_port "$lport" && break
-        warn "$(L '端口不合法')"
-    done
-    lport=$((10#$lport))
-
-    # 冲突检测：先查本 Xray 模块是否已用该端口，再查系统监听（排除 xray 自身）
-    if xray_port_used "$lport"; then
-        warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
-        return 1
-    fi
-    if command -v ss >/dev/null 2>&1; then
-        occ=""
-        [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" xray || true)"
-        [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" xray || true)"
-        if [ -n "$occ" ]; then
-            warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
-            echo "$occ"
-            confirm "$(L '仍要继续添加？')" n || return 0
+        if ! validate_port "$lport"; then warn "$(L '端口不合法')"; continue; fi
+        lport=$((10#$lport))
+        if xray_port_used "$lport"; then
+            warn "$(L '该端口已被本模块其他规则占用，请换一个') (${lport})"
+            continue
         fi
-    fi
+        if command -v ss >/dev/null 2>&1; then
+            occ=""
+            [ "$proto" != "udp" ] && occ="$(check_port_occupied_by_other tcp "$lport" xray || true)"
+            [ -z "$occ" ] && [ "$proto" != "tcp" ] && occ="$(check_port_occupied_by_other udp "$lport" xray || true)"
+            if [ -n "$occ" ]; then
+                warn "$(L '端口 ')${lport}$(L ' 已被其他进程占用：')"
+                echo "$occ"
+                confirm "$(L '仍要继续添加？')" n || continue
+            fi
+        fi
+        break
+    done
 
     while true; do
         read -rp "$(L '目标地址（域名或 IP）: ')" rhost || { [ -n "$rhost" ] || return 1; }
@@ -13224,20 +13742,38 @@ xray_fwd_pick() {
 
 xray_fwd_toggle() {
     xray_fwd_pick || return 0
-    local f="$PICKED_FWD_FILE" cur next
+    local f="$PICKED_FWD_FILE" cur next bak="${PICKED_FWD_FILE}.bak" lport proto
     cur="$(grep -m1 '^FWD_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    lport="$(grep -m1 '^FWD_LPORT=' "$f" | cut -d'"' -f2 || true)"
+    proto="$(grep -m1 '^FWD_PROTO=' "$f" | cut -d'"' -f2 || echo both)"
     if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
+    cp -f "$f" "$bak" || return 1
     if grep -q '^FWD_ENABLED=' "$f"; then
-        sed -i "s|^FWD_ENABLED=.*|FWD_ENABLED=\"${next}\"|" "$f" || { warn "$(L '规则状态切换失败')"; return 1; }
+        sed -i "s|^FWD_ENABLED=.*|FWD_ENABLED=\"${next}\"|" "$f" || { mv -f "$bak" "$f"; warn "$(L '规则状态切换失败')"; return 1; }
     else
         printf '%s\n' "FWD_ENABLED=\"${next}\"" >> "$f"
     fi
-    xray_fwd_rebuild && success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    if ! xray_fwd_rebuild; then
+        mv -f "$bak" "$f"
+        xray_fwd_rebuild >/dev/null 2>&1 || true
+        warn "$(L '规则状态切换失败')"
+        return 1
+    fi
+    rm -f "$bak"
+    if [ "$next" = "1" ] && validate_port "$lport"; then
+        local -a fw_specs=()
+        [ "$proto" != "udp" ] && fw_specs+=("${lport}/tcp")
+        [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
+        fw_allow_for_service "${fw_specs[@]}"
+    fi
+    reserved_ports_sync || true
+    success "$(L '规则状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    return 0
 }
 
 xray_fwd_delete() {
     xray_fwd_pick || return 0
-    local f="$PICKED_FWD_FILE" old_port old_proto fid flip frhost frport
+    local f="$PICKED_FWD_FILE" bak="${PICKED_FWD_FILE}.bak" old_port old_proto fid flip frhost frport
     fid="$(grep -m1 '^FWD_ID=' "$f" | cut -d'"' -f2 || true)"
     flip="$(grep -m1 '^FWD_LIP=' "$f" | cut -d'"' -f2 || true)"
     old_port="$(grep -m1 '^FWD_LPORT=' "$f" | cut -d'"' -f2 || true)"
@@ -13245,18 +13781,23 @@ xray_fwd_delete() {
     frhost="$(grep -m1 '^FWD_RHOST=' "$f" | cut -d'"' -f2 || true)"
     frport="$(grep -m1 '^FWD_RPORT=' "$f" | cut -d'"' -f2 || true)"
     confirm "$(L '确认删除规则 [')${fid}] ${flip}:${old_port} -> ${frhost}:${frport}$(L ']？')" n || return 0
-    rm -f "$f"
+    mv -f "$f" "$bak" || return 1
     if ! xray_fwd_rebuild; then
+        mv -f "$bak" "$f"
+        xray_fwd_rebuild >/dev/null 2>&1 || true
         warn "$(L '服务重载失败，删除未生效，请检查日志')"
         return 1
     fi
+    rm -f "$bak"
     if ufw_installed && validate_port "$old_port"; then
         local old_specs=""
         [ "$old_proto" != "udp" ] && old_specs="${old_specs} ${old_port}/tcp"
         [ "$old_proto" != "tcp" ] && old_specs="${old_specs} ${old_port}/udp"
         fw_prune_old_specs "$old_specs"
     fi
+    reserved_ports_sync || true
     success "$(L '已删除规则 ')${fid}"
+    return 0
 }
 
 # TCP 目标连通性与延迟检测（与 realm_test_rules 共用 probe_tcp_host_port）
@@ -13282,7 +13823,8 @@ xray_fwd_test() {
             fi
         )
     done < <(xray_fwd_rule_files)
-    [ "$any" -eq 0 ] && info "$(L '暂无可测试的规则')"
+    if [ "$any" -eq 0 ]; then info "$(L '暂无可测试的规则')"; fi
+    return 0
 }
 
 xray_fwd_menu() {
@@ -13300,7 +13842,7 @@ xray_fwd_menu() {
         echo -e "  ${GREEN}6)${NC}  $(L '重启服务 / 查看状态与日志')"
         echo -e "  ${GREEN}0)${NC}  $(L '返回 Xray 菜单')"
         divider
-        read -rp "$(L '请选择') [0-6]: " choice
+        read -rp "$(L '请选择') [0-6]: " choice || return 0
         case "$choice" in
             1) run_action xray_fwd_add ;;
             2) run_action xray_fwd_list ;;
@@ -13474,7 +14016,7 @@ caddy_fetch_binary() {
         warn "$(L '未取到官方 SHA256 摘要，跳过校验（')${asset}$(L '）')"
     fi
     tar -xzf "${wd}/${asset}" -C "$wd" || { warn "$(L '解压失败')"; return 1; }
-    bin="$(find "$wd" -maxdepth 2 -type f -name caddy | head -1)"
+    bin="$(find "$wd" -maxdepth 2 -type f -name caddy 2>/dev/null | head -1 || true)"
     [ -n "$bin" ] || { warn "$(L '解压失败')"; return 1; }
     chmod 755 "$bin"
     "$bin" version >/dev/null 2>&1 || { warn "$(L '下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动')"; return 1; }
@@ -13482,19 +14024,51 @@ caddy_fetch_binary() {
     return 0
 }
 
+# 校验 Caddy reverse_proxy 上游地址（拒绝带路径后缀，避免 Caddy 报 upstream address cannot contain a path）
+caddy_valid_upstream() {
+    local u="$1"
+    [ -n "$u" ] || return 1
+    if [[ "$u" =~ ^https?://(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?$ ]]; then
+        return 0
+    fi
+    if [[ "$u" =~ ^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+):([0-9]{1,5})$ ]]; then
+        validate_port "${BASH_REMATCH[2]}" && return 0
+    fi
+    return 1
+}
+
+# 检查 domain+mode+port 是否与已有站点冲突（可选 $4 排除自身 SITE_ID）
+caddy_site_conflict() {
+    local domain="$1" mode="$2" port="$3" skip_id="${4:-}" _sf
+    while IFS= read -r _sf; do
+        if (
+            # shellcheck disable=SC1090
+            source "$_sf" 2>/dev/null || exit 1
+            [ -n "$skip_id" ] && [ "${SITE_ID:-}" = "$skip_id" ] && exit 1
+            [ "${SITE_DOMAIN:-}" = "$domain" ] || exit 1
+            if [ "$mode" = "http" ] && [ "${SITE_MODE:-https}" = "http" ]; then
+                [ "${SITE_PORT:-80}" = "$port" ] && exit 0
+            elif [ "$mode" != "http" ] && [ "${SITE_MODE:-https}" != "http" ]; then
+                exit 0
+            fi
+            exit 1
+        ); then
+            return 0
+        fi
+    done < <(caddy_site_files)
+    return 1
+}
+
 caddy_write_main_config() {
     install -d -m 755 "$CADDY_DIR" "$CADDY_SITES_DIR" "$CADDY_DATA_DIR"
     caddy_load_state
-    local email_line=""
-    [ -n "${CADDY_EMAIL:-}" ] && email_line="    email ${CADDY_EMAIL}"
-    cat > "$CADDY_FILE" << CADEOF
-{
-    admin off
-${email_line}
-}
-
-import ${CADDY_SITES_DIR}/*.caddy
-CADEOF
+    {
+        printf '{\n'
+        printf '    admin off\n'
+        [ -n "${CADDY_EMAIL:-}" ] && printf '    email %s\n' "$CADDY_EMAIL"
+        printf '}\n\n'
+        printf 'import %s/*.caddy\n' "$CADDY_SITES_DIR"
+    } > "$CADDY_FILE"
     chmod 644 "$CADDY_FILE"
 }
 
@@ -13506,6 +14080,7 @@ caddy_write_service() {
         run_user=""; run_group=""
     else
         install -d -m 750 -o adam-caddy -g adam-caddy "$CADDY_DATA_DIR" 2>/dev/null || true
+        chown -R adam-caddy:adam-caddy "$CADDY_DATA_DIR" 2>/dev/null || true
     fi
     write_service_unit "$CADDY_SERVICE" "Adam Caddy Reverse Proxy" "https://caddyserver.com/docs/" "60" "$run_user" "$run_group" \
         "${CADDY_BIN} run --environ --config ${CADDY_FILE} --adapter caddyfile" \
@@ -13596,11 +14171,18 @@ caddy_reload_service() {
         return 0
     fi
     caddy_installed || return 0
-    local out
-    if ! out="$("$CADDY_BIN" validate --config "$CADDY_FILE" --adapter caddyfile 2>&1)"; then
+    local out vtmp
+    vtmp="$(mktemp -d /tmp/adam-caddy-val.XXXXXX 2>/dev/null || echo /tmp)"
+    if ! out="$(XDG_DATA_HOME="$vtmp" XDG_CONFIG_HOME="$vtmp" "$CADDY_BIN" validate --config "$CADDY_FILE" --adapter caddyfile 2>&1)"; then
+        [ "$vtmp" != "/tmp" ] && rm -rf "$vtmp"
         warn "$(L '配置校验未通过：')"
         printf '%s\n' "$out" | tail -n 8
         return 1
+    fi
+    [ "$vtmp" != "/tmp" ] && rm -rf "$vtmp"
+    [ -f "$CADDY_SERVICE" ] || caddy_write_service
+    if grep -q '^User=adam-caddy' "$CADDY_SERVICE" 2>/dev/null && id adam-caddy >/dev/null 2>&1; then
+        chown -R adam-caddy:adam-caddy "$CADDY_DATA_DIR" 2>/dev/null || true
     fi
     systemctl enable adam-caddy >/dev/null 2>&1 || true
     if svc_restart_wait adam-caddy 2 15; then
@@ -13631,7 +14213,9 @@ caddy_install() {
     if [ -n "$cur" ] && [ "${cur#v}" = "${tag#v}" ]; then
         confirm "$(L '已是最新版本，仍要重新安装？')" n || return 0
     fi
-    caddy_fetch_binary "$tag" || error "$(L '下载或校验失败，已中止')"
+    while ! caddy_fetch_binary "$tag"; do
+        confirm "$(L '下载失败，是否立即重试？')" y || error "$(L '下载或校验失败，已中止')"
+    done
     install -d -m 755 "$CADDY_DIR" "$CADDY_SITES_DIR" "$CADDY_DATA_DIR"
     if [ -f "$CADDY_BIN" ]; then cp -f "$CADDY_BIN" "$CADDY_BIN_BACKUP" 2>/dev/null || true; fi
     install -m 755 "$CADDY_DL_BIN" "$CADDY_BIN"
@@ -13721,20 +14305,35 @@ caddy_add_site() {
         2) mode="remote" ;;
         3)
             mode="http"
-            read -rp "$(L '本机监听端口 (1-65535): ') [default 80]: " port || { [ -n "$port" ] || return 1; }
-            port="${port:-80}"
-            validate_port "$port" || { warn "$(L '端口不合法')"; return 1; }
-            port=$((10#$port))
+            while true; do
+                read -rp "$(L '本机监听端口 (1-65535): ') [default 80]: " port || { [ -n "$port" ] || return 1; }
+                port="${port:-80}"
+                validate_port "$port" && { port=$((10#$port)); break; }
+                warn "$(L '端口不合法')"
+            done
             ;;
         *) mode="https" ;;
     esac
 
+    # 防重复域名+端口冲突（会导致 Caddy ambiguous site definition 校验失败）
+    if caddy_site_conflict "$domain" "$mode" "$port"; then
+        warn "$(L '该域名与端口组合已存在反代配置，请改用「编辑反代站点」')"
+        return 1
+    fi
+
+    local occ=""
     if [ "$mode" != "http" ]; then
         check_domain_dns "$domain" || true
-        local occ=""
         occ="$(check_port_occupied_by_other tcp 443 caddy || true)"
         if [ -n "$occ" ]; then
             warn "$(L '端口 ')443$(L ' 已被其他进程占用：')"
+            echo "$occ"
+            confirm "$(L '仍要继续添加？')" n || return 0
+        fi
+    else
+        occ="$(check_port_occupied_by_other tcp "$port" caddy || true)"
+        if [ -n "$occ" ]; then
+            warn "$(L '端口 ')${port}$(L ' 已被其他进程占用：')"
             echo "$occ"
             confirm "$(L '仍要继续添加？')" n || return 0
         fi
@@ -13743,7 +14342,8 @@ caddy_add_site() {
     while true; do
         read -rp "$(L '上游目标地址（如 127.0.0.1:8080 或 https://example.com）: ')" upstream || { [ -n "$upstream" ] || return 1; }
         upstream="$(printf '%s' "$upstream" | tr -d ' \r\n')"
-        if [[ "$upstream" =~ ^[A-Za-z0-9._:/\[\]-]+$ ]] && [[ "$upstream" == *:* ]]; then break; fi
+        upstream="${upstream%/}"
+        if caddy_valid_upstream "$upstream"; then break; fi
         warn "$(L '目标地址格式不合法')"
     done
     if [[ "$upstream" == https://* ]]; then
@@ -13798,7 +14398,8 @@ caddy_list_sites() {
             echo -e "  ${BOLD}${idx})${NC} [${SITE_ID}] ${st}  ${CYAN}${SITE_DOMAIN}${pinfo}${NC} -> ${GREEN}${SITE_UPSTREAM}${NC}${SITE_REMARK:+  # ${SITE_REMARK}}"
         )
     done < <(caddy_site_files)
-    [ "$idx" -eq 0 ] && info "$(L '暂无反代站点')"
+    if [ "$idx" -eq 0 ]; then info "$(L '暂无反代站点')"; fi
+    return 0
 }
 
 caddy_pick_site() {
@@ -13818,23 +14419,66 @@ caddy_pick_site() {
 
 caddy_toggle_site() {
     caddy_pick_site || return 0
-    local f="$PICKED_SITE_FILE" cur next
+    local f="$PICKED_SITE_FILE" bak="${PICKED_SITE_FILE}.bak" cur next mode port
     cur="$(grep -m1 '^SITE_ENABLED=' "$f" | cut -d'"' -f2 || echo 0)"
+    mode="$(grep -m1 '^SITE_MODE=' "$f" | cut -d'"' -f2 || echo https)"
+    port="$(grep -m1 '^SITE_PORT=' "$f" | cut -d'"' -f2 || echo 443)"
     if [ "$cur" = "1" ]; then next="0"; else next="1"; fi
-    sed -i "s|^SITE_ENABLED=.*|SITE_ENABLED=\"${next}\"|" "$f"
-    caddy_reload_service && success "$(L '站点状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    cp -f "$f" "$bak" || return 1
+    sed -i "s|^SITE_ENABLED=.*|SITE_ENABLED=\"${next}\"|" "$f" || { mv -f "$bak" "$f"; return 1; }
+    if ! caddy_reload_service; then
+        mv -f "$bak" "$f"
+        caddy_reload_service >/dev/null 2>&1 || true
+        error "$(L 'Caddy 配置校验失败，已自动撤回改动')"
+    fi
+    rm -f "$bak"
+    if [ "$next" = "1" ]; then
+        if [ "$mode" = "http" ] && validate_port "$port"; then
+            fw_allow_for_service "${port}/tcp"
+        else
+            fw_allow_for_service "80/tcp" "443/tcp" "443/udp"
+        fi
+    fi
+    reserved_ports_sync || true
+    success "$(L '站点状态已切换为：')$([ "$next" = "1" ] && echo "$(L '启用')" || echo "$(L '停用')")"
+    return 0
 }
 
 caddy_edit_site() {
     caddy_pick_site || return 0
-    local f="$PICKED_SITE_FILE" bak ans
+    local f="$PICKED_SITE_FILE" bak ans re_dom='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
     # shellcheck disable=SC1090
-    source "$f"
+    source "$f" || return 1
+    local old_port="${SITE_PORT:-443}"
     local domain="$SITE_DOMAIN" upstream="$SITE_UPSTREAM" mode="$SITE_MODE" port="${SITE_PORT:-443}" insecure="${SITE_INSECURE:-0}" remark="${SITE_REMARK:-}"
     read -rp "$(L '请输入域名（如: nhk.example.com）:') [${domain}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
-    [ -n "$ans" ] && domain="${ans,,}"
+    if [ -n "$ans" ]; then
+        ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
+        ans="${ans,,}"
+        if [[ "$ans" == *.* && "$ans" =~ $re_dom ]]; then domain="$ans"; else warn "$(L '域名格式不正确')"; return 1; fi
+    fi
+    if [ "$mode" = "http" ]; then
+        read -rp "$(L '本机监听端口 (1-65535): ') [${port}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
+        if [ -n "$ans" ]; then
+            validate_port "$ans" || { warn "$(L '端口不合法')"; return 1; }
+            port=$((10#$ans))
+        fi
+    fi
+    if caddy_site_conflict "$domain" "$mode" "$port" "$SITE_ID"; then
+        warn "$(L '该域名与端口组合已存在反代配置，请改用「编辑反代站点」')"
+        return 1
+    fi
     read -rp "$(L '上游目标地址（如 127.0.0.1:8080 或 https://example.com）: ') [${upstream}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
-    [ -n "$ans" ] && upstream="${ans//[[:space:]]/}"
+    if [ -n "$ans" ]; then
+        ans="$(printf '%s' "$ans" | tr -d ' \r\n')"
+        ans="${ans%/}"
+        if caddy_valid_upstream "$ans"; then upstream="$ans"; else warn "$(L '目标地址格式不合法')"; return 1; fi
+    fi
+    if [[ "$upstream" == https://* ]]; then
+        if confirm "$(L '跳过上游 TLS 证书校验（自签上游选 y）？')" "$([ "$insecure" = "1" ] && echo y || echo n)"; then insecure=1; else insecure=0; fi
+    else
+        insecure=0
+    fi
     read -rp "$(L '规则备注（可选）: ') [${remark}] ($(L '回车保持')): " ans || { [ -n "$ans" ] || return 1; }
     [ -n "$ans" ] && remark="${ans//\"/}"
     bak="${f}.bak"
@@ -13856,19 +14500,42 @@ SITEEOF
         error "$(L 'Caddy 配置校验失败，已自动撤回改动')"
     fi
     rm -f "$bak"
+    if [ "$mode" = "http" ] && [ "$port" != "$old_port" ]; then
+        fw_allow_for_service "${port}/tcp"
+        ufw_installed && validate_port "$old_port" && fw_prune_old_specs "${old_port}/tcp"
+        reserved_ports_sync || true
+    fi
     success "$(L '反代站点已生效：')${domain} -> ${upstream}"
+    return 0
 }
 
 caddy_delete_site() {
     caddy_pick_site || return 0
-    local f="$PICKED_SITE_FILE"
+    local f="$PICKED_SITE_FILE" bak="${PICKED_SITE_FILE}.bak" old_mode old_port
     # shellcheck disable=SC1090
-    source "$f"
+    source "$f" || return 1
+    old_mode="${SITE_MODE:-https}"
+    old_port="${SITE_PORT:-443}"
     confirm "$(L '确认删除反代站点 ')${SITE_DOMAIN}$(L '？')" n || return 0
-    rm -f "$f" "${CADDY_SITES_DIR}/${SITE_ID}.caddy"
-    caddy_reload_service || true
+    mv -f "$f" "$bak" || return 1
+    rm -f "${CADDY_SITES_DIR}/${SITE_ID}.caddy"
+    if ! caddy_reload_service; then
+        mv -f "$bak" "$f"
+        caddy_reload_service >/dev/null 2>&1 || true
+        warn "$(L '服务重载失败，删除未生效，请检查日志')"
+        return 1
+    fi
+    rm -f "$bak"
+    if ufw_installed; then
+        if [ "$old_mode" = "http" ] && validate_port "$old_port"; then
+            fw_prune_old_specs "${old_port}/tcp"
+        else
+            fw_prune_old_specs "80/tcp 443/tcp 443/udp"
+        fi
+    fi
     reserved_ports_sync || true
     success "$(L '已删除反代站点 ')${SITE_DOMAIN}"
+    return 0
 }
 
 caddy_show_config() {
@@ -13886,12 +14553,22 @@ caddy_show_config() {
 
 caddy_uninstall_do() {
     if ! caddy_installed && [ ! -d "$CADDY_DIR" ] && [ ! -f "$CADDY_SERVICE" ]; then return 0; fi
+    local old_specs
+    old_specs="$(caddy_ports 2>/dev/null | tr '\n' ' ' || true)"
     systemctl disable --now adam-caddy 2>/dev/null || true
     rm -f "$CADDY_SERVICE" "$CADDY_BIN" "$CADDY_BIN_BACKUP"
     systemctl daemon-reload || true
     if confirm "$(L '同时删除配置目录') ${CADDY_DIR}$(L '？')" n; then
         rm -rf "$CADDY_DIR" "$CADDY_DATA_DIR"
         userdel adam-caddy >/dev/null 2>&1 || true
+    fi
+    if [ -n "${old_specs// /}" ] && ufw_installed && confirm "$(L '同时删除防火墙中 Caddy 端口的放行规则（')${old_specs}$(L '）？')" y; then
+        local _cs
+        while IFS= read -r _cs; do
+            [ -n "$_cs" ] || continue
+            port_used_by_other_services "$_cs" caddy && continue
+            fw_delete_spec "$_cs"
+        done < <(printf '%s\n' "$old_specs" | tr ' ' '\n' | grep -v '^$')
     fi
     reserved_ports_sync || true
     success "$(L 'Caddy 已卸载')"
@@ -13940,15 +14617,27 @@ for a in d.get("assets",[]):
         print((a.get("digest") or "").replace("sha256:",""))
         break' 2>/dev/null || true)"
     fi
-    if [ -n "$digest" ] && [ "$digest" != "$actual" ]; then
-        error "$(L 'SHA256 校验失败（官方') ${digest}$(L '，实际') ${actual}$(L '），已中止')"
+    if [ -n "$digest" ]; then
+        if [ "$digest" != "$actual" ]; then
+            error "$(L 'SHA256 校验失败（官方') ${digest}$(L '，实际') ${actual}$(L '），已中止')"
+        fi
+        success "$(L 'SHA256 校验通过（')${asset}$(L '）')"
+    else
+        warn "$(L '未取到官方 SHA256 摘要，跳过校验（')${asset}$(L '）')"
     fi
     chmod 755 "${wd}/cloudflared"
     "${wd}/cloudflared" --version >/dev/null 2>&1 || error "$(L '下载到的二进制无法在本机运行（架构或 libc 不匹配），已中止，现有安装未被改动')"
     [ -f "$CF_TUNNEL_BIN" ] && cp -f "$CF_TUNNEL_BIN" "$CF_TUNNEL_BIN_BACKUP" 2>/dev/null || true
     install -m 755 "${wd}/cloudflared" "$CF_TUNNEL_BIN"
     if [ -f "$CF_TUNNEL_SERVICE" ] && systemctl is-enabled --quiet adam-cloudflared 2>/dev/null; then
-        systemctl restart adam-cloudflared 2>/dev/null || true
+        if ! svc_restart_wait adam-cloudflared 3 15; then
+            if [ -f "$CF_TUNNEL_BIN_BACKUP" ]; then
+                install -m 755 "$CF_TUNNEL_BIN_BACKUP" "$CF_TUNNEL_BIN"
+                systemctl restart adam-cloudflared 2>/dev/null || true
+                warn "$(L '服务重启失败，已回滚到旧二进制')"
+            fi
+            error "$(L '更新失败')"
+        fi
     fi
     success "$(L 'cloudflared 安装完成') (${tag})"
 }
@@ -13959,7 +14648,13 @@ cf_tunnel_setup_token() {
     divider
     local token=""
     read -rsp "$(L '粘贴 Cloudflare Zero Trust Tunnel Token（输入不回显）: ')" token || { [ -n "$token" ] || return 1; }; echo
-    token="$(printf '%s' "$token" | tr -d ' \r\n')"
+    token="$(printf '%s' "$token" | tr -d '\r\n')"
+    # 兼容直接粘贴 Zero Trust 面板复制的整条命令（如 sudo cloudflared service install eyJ...）
+    if [[ "$token" == *" "* ]]; then
+        token="${token##* }"
+        info "$(L '已自动提取 Cloudflare Tunnel Token')"
+    fi
+    token="${token//[[:space:]]/}"
     [ -n "$token" ] || { warn "$(L 'Token 不能为空')"; return 1; }
     install -d -m 700 "$CF_TUNNEL_DIR"
     printf 'TUNNEL_TOKEN="%s"\n' "$(dq_escape "$token")" > "$CF_TUNNEL_ENV"
@@ -14016,7 +14711,7 @@ cf_tunnel_menu() {
         echo -e "  ${GREEN}6)${NC} ${RED}$(L '停用 / 卸载 cloudflared')${NC}"
         echo -e "  ${GREEN}0)${NC} $(L '返回')"
         divider
-        read -rp "$(L '请选择') [0-6]: " choice
+        read -rp "$(L '请选择') [0-6]: " choice || return 0
         case "$choice" in
             1) run_action cf_tunnel_install ;;
             2) run_action cf_tunnel_setup_token ;;
@@ -14054,7 +14749,7 @@ proxy_menu() {
         echo -e "  ${GREEN}11)${NC} $(L 'Cloudflare Tunnel 管理（Zero Trust / 临时隧道）')"
         echo -e "  ${GREEN}0)${NC}  $(L '返回主菜单')"
         divider
-        read -rp "$(L '请选择') [0-11]: " choice
+        read -rp "$(L '请选择') [0-11]: " choice || return 0
         case "$choice" in
             1)  run_action caddy_install ;;
             2)  run_action caddy_add_site ;;
