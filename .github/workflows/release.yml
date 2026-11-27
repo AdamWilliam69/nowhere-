@@ -1,0 +1,83 @@
+name: Release — Auto-Upload Assets
+
+on:
+  push:
+    tags:
+      - 'nowhereV*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Target tag to upload assets for (e.g. nowhereV8.7; leave blank for current SCRIPT_VERSION)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target ref
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG="$REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=""
+          fi
+          if [ -n "$TAG" ] && [[ ! "$TAG" =~ ^nowhereV[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "Invalid tag format: $TAG" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag || github.ref }}
+
+      - name: Verify build sync and checksum
+        run: |
+          ./scripts/build.sh --check
+          sha256sum -c nowhere-install.sh.sha256
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          VER="$(grep -m1 '^SCRIPT_VERSION=' nowhere-install.sh | cut -d'"' -f2)"
+          if [[ ! "$VER" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "Invalid SCRIPT_VERSION: $VER" >&2
+            exit 1
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="nowhereV${VER}"
+          fi
+          VERSIONED="nowhere-install-v${VER}.sh"
+          cp nowhere-install.sh "$VERSIONED"
+          sha256sum nowhere-install.sh "$VERSIONED"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Updating existing release: $TAG"
+            gh release upload "$TAG" \
+              nowhere-install.sh \
+              nowhere-install.sh.sha256 \
+              "$VERSIONED" \
+              --clobber
+          else
+            echo "Creating new release: $TAG (title: nowhere${VER})"
+            gh release create "$TAG" \
+              nowhere-install.sh \
+              nowhere-install.sh.sha256 \
+              "$VERSIONED" \
+              --title "nowhere${VER}" \
+              --generate-notes
+          fi
