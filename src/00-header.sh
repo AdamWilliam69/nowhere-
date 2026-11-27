@@ -336,6 +336,19 @@ set -o pipefail
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
 #       安装与配置 / 运行与排查 / 证书 / 版本分组；「重装快捷命令」移到脚本更新。上面修订说明里的
 #       "菜单 17/18/19…" 是当时的编号。命令行子命令与 zt / pz / cxpz / cq 不变。
+#   ── 脚本 v8.7 修订（2026-11-26：实网安装全流程验证与运维体验打磨）──
+#     - 快捷命令自动就绪：新增 ensure_adam_shortcut，首次进入交互主菜单或通过任意组件（Snell / Xray /
+#       Realm / Caddy / CF-Tunnel / Nowhere）安装后均自动安装 /usr/local/bin/adam，不再因未装 Nowhere
+#       而出现 adam: command not found。
+#     - Nowhere 探针与指纹优化：do_probe 支持命令行传参（adam probe [target] [--local]）与非交互默认目标，
+#       在公网探测遇 NAT 无回流超时时自动回环自测 127.0.0.1 定位故障边界；get_tls_fingerprint 改为优先
+#       按当前 PID 读 journalctl（零 tls connection failed 报错污染）并在父 shell 缓存指纹。
+#     - 诊断与容器兼容优化：do_doctor 在容器 / hidepid 环境下自动按托管端口回退识别监听状态、精简 Xray/Nowhere
+#       版本展示、修复 ufw 不可用时空白输出；_doctor_json 区分已装二进制但未配置单元为 unconfigured；
+#       fw_status 在容器无 netfilter 时明确提示；xray/snell 健康检查对只读 ip_local_reserved_ports 容器降级为提示。
+#     - 交互与展示细节：xray_add_ss 加密方式严格循环校验；xray_show_node 对 ~2600B ML-DSA-65 pqv 改为摘要展示并
+#       为超长链接跳过不可扫二维码；修复主菜单中英文 Banner 框线错位并展示脚本版本号；修正英文界面空格与 Caddy
+#       端口提示；xray fwd 统一 [::]:PORT 格式；Caddyfile 改用 Tab 缩进消除未格式化告警；手动 watchdog 给出健康反馈。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -364,7 +377,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="8.6"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="8.7"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6

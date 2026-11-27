@@ -36,3 +36,6 @@ jobs:
 
       - name: Run Round-3 bug fix & regression suite
         run: bash ./tests/test_r3_bugfixes.sh
+
+      - name: Run v8.7 UX, diagnostics & runtime polish suite
+        run: bash ./tests/test_v87_ux_fixes.sh

@@ -484,8 +484,14 @@ fw_list() {
 
 fw_status() {
     fw_require || return 1
-    ufw status verbose 2>/dev/null || true
-    return 0
+    local out
+    if out="$(ufw status verbose 2>&1)" && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    warn "$(L '无法读取 ufw 状态（容器或受限内核可能不支持 netfilter/iptables）')"
+    [ -n "${out:-}" ] && printf '%s\n' "$out" >&2
+    return 1
 }
 
 # 供安装流程调用：放行指定端口。ufw 已启用时只加规则；未启用时先问再启用，

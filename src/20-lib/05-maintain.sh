@@ -117,6 +117,10 @@ reserved_port_ok() {
         END { exit !f }'
 }
 
+reserved_ports_writable() {
+    [ -w /proc/sys/net/ipv4/ip_local_reserved_ports ]
+}
+
 # ss_port_lines proto port：输出 ss 里第 4 列端口精确等于 port 的监听行（proto=tcp|udp）
 ss_port_lines() {
     local proto="$1" p="$2" flag
@@ -307,7 +311,7 @@ maint_lock_manual() {
 #   第 1 段：reset-failed + 常规重启
 #   第 2 段：若第 1 段未恢复（且距上次同类自愈 ≥ 30 分钟冷却），触发对应服务的权限收敛/证书同步/配置重建/保留端口同步，再复验
 maint_watchdog() {
-    local unit stamp now last heal_ok old_pin new_pin
+    local unit stamp now last heal_ok old_pin new_pin checked=0 unhealthy=0
     maint_load
     [ "$MAINT_WATCHDOG" = "1" ] || return 0
     # 正在更新 / 安装时不插手，下一轮再看（maint_lock 内部已记日志）
@@ -319,7 +323,9 @@ maint_watchdog() {
         maint_unit_installed "$unit" || continue
         # 只管"设为开机自启"的服务：手动 disable 掉的不会被拉起
         systemctl is-enabled --quiet "$unit" 2>/dev/null || continue
+        checked=$((checked + 1))
         if maint_unit_healthy "$unit"; then continue; fi
+        unhealthy=$((unhealthy + 1))
         maint_log "[$(L '保活')] ${unit} $(L '状态异常（未运行或端口未监听），正在重启')"
         old_pin=""
         [ "$unit" = "nowhere" ] && [ -f "$TLS_PIN_FILE" ] && old_pin="$(cat "$TLS_PIN_FILE" 2>/dev/null || true)"
@@ -372,6 +378,13 @@ maint_watchdog() {
             notify_send "Service Down Alert: ${unit}" "${unit} is still unhealthy after stage-2 auto-repair. Run: journalctl -u ${unit} -n 50 --no-pager" || true
         fi
     done
+    if [ -t 1 ] && [ "$unhealthy" -eq 0 ]; then
+        if [ "$checked" -gt 0 ]; then
+            info "$(L '保活巡检通过：全部') ${checked} $(L '个已启用服务运行正常')"
+        else
+            info "$(L '暂无已启用的受管服务需要巡检')"
+        fi
+    fi
     return 0
 }
 
@@ -768,8 +781,10 @@ _doctor_check_perm() {
 }
 
 _svc_state_plain() {
-    if systemctl is-active --quiet "$1" 2>/dev/null; then printf 'active';
-    elif [ -f "/etc/systemd/system/$1.service" ]; then printf 'inactive';
+    local u="$1" inst="${2:-0}"
+    if systemctl is-active --quiet "$u" 2>/dev/null; then printf 'active';
+    elif [ -f "/etc/systemd/system/${u}.service" ]; then printf 'inactive';
+    elif [ "$inst" = "1" ]; then printf 'unconfigured';
     else printf 'not-installed'; fi
 }
 
@@ -805,6 +820,13 @@ _doctor_json() {
     local wd_st="inactive" mt_st="inactive"
     systemctl is-active --quiet adam-watchdog.timer 2>/dev/null && wd_st="active"
     systemctl is-active --quiet adam-maintain.timer 2>/dev/null && mt_st="active"
+    local nw_i=0 sn_i=0 xr_i=0 rm_i=0 cd_i=0 cf_i=0
+    [ -x "$BIN_PATH" ] && nw_i=1
+    [ -x "$SNELL_BIN" ] && sn_i=1
+    [ -x "$XRAY_BIN" ] && xr_i=1
+    realm_installed && rm_i=1
+    caddy_installed && cd_i=1
+    cf_tunnel_installed && cf_i=1
     cat << JEOF
 {
   "script_version": "$(_json_escape "$SCRIPT_VERSION")",
@@ -819,17 +841,41 @@ _doctor_json() {
     "maintain": "${mt_st}"
   },
   "services": {
-    "nowhere": { "installed": $([ -x "$BIN_PATH" ] && echo true || echo false), "role": "$(_json_escape "$(current_role)")", "state": "$(_svc_state_plain nowhere)" },
-    "snell": { "installed": $([ -x "$SNELL_BIN" ] && echo true || echo false), "state": "$(_svc_state_plain snell)" },
-    "xray": { "installed": $([ -x "$XRAY_BIN" ] && echo true || echo false), "nodes": $(xray_node_count), "state": "$(_svc_state_plain adam-xray)" },
-    "realm": { "installed": $(realm_installed && echo true || echo false), "state": "$(_svc_state_plain adam-realm)" },
-    "caddy": { "installed": $(caddy_installed && echo true || echo false), "state": "$(_svc_state_plain adam-caddy)" },
-    "cloudflared": { "installed": $(cf_tunnel_installed && echo true || echo false), "state": "$(_svc_state_plain adam-cloudflared)" }
+    "nowhere": { "installed": $([ "$nw_i" = "1" ] && echo true || echo false), "role": "$(_json_escape "$(current_role)")", "state": "$(_svc_state_plain nowhere "$nw_i")" },
+    "snell": { "installed": $([ "$sn_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain snell "$sn_i")" },
+    "xray": { "installed": $([ "$xr_i" = "1" ] && echo true || echo false), "nodes": $(xray_node_count), "state": "$(_svc_state_plain adam-xray "$xr_i")" },
+    "realm": { "installed": $([ "$rm_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-realm "$rm_i")" },
+    "caddy": { "installed": $([ "$cd_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-caddy "$cd_i")" },
+    "cloudflared": { "installed": $([ "$cf_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-cloudflared "$cf_i")" }
   },
   "perm_issue_count": ${#perm_list[@]},
   "perm_issues": [${perm_json}]
 }
 JEOF
+}
+
+_doctor_ss_managed() {
+    local proto="$1" flag out mports p lines=""
+    case "$proto" in tcp) flag="-tlnp" ;; udp) flag="-ulnp" ;; *) return 1 ;; esac
+    out="$(ss "$flag" 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || true)"
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # 容器或 hidepid=2 环境下 ss -p 不显示进程名，回退按已配置托管端口精确匹配
+    mports="$(managed_ports 2>/dev/null | awk -F/ -v pr="$proto" '$2 == pr && $1 ~ /^[0-9]+$/ {print $1}' | sort -un || true)"
+    if [ -n "$mports" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            out="$(ss_port_lines "$proto" "$p" || true)"
+            [ -n "$out" ] && lines="${lines:+${lines}$'\n'}${out}"
+        done <<< "$mports"
+        if [ -n "$lines" ]; then
+            printf '%s\n' "$lines" | awk '!seen[$0]++'
+            return 0
+        fi
+    fi
+    return 1
 }
 
 do_doctor() {
@@ -840,9 +886,22 @@ do_doctor() {
     step "$(L '一键诊断（只读，不改任何配置）')"
     divider
     echo "  $(L '管理脚本 :') ${SCRIPT_VERSION}$(L '（适配 Nowhere') ${TARGET_NW_VERSION}$(L '） 语言：')${ADAM_LANG}"
-    echo "  Nowhere  : $(if [ -x "$BIN_PATH" ]; then "$BIN_PATH" --version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) $(L '· 角色') $(current_role) · $(svc_state nowhere)"
+    local nw_v xr_v
+    if [ -x "$BIN_PATH" ]; then
+        nw_v="$(read_installed_version)"
+        [ -n "$nw_v" ] || nw_v="$("$BIN_PATH" --version 2>&1 | awk 'NR==1 {print $1}' || true)"
+    else
+        nw_v="$(L '未安装')"
+    fi
+    if [ -x "$XRAY_BIN" ]; then
+        xr_v="$(xray_installed_version)"
+        [ -n "$xr_v" ] || xr_v="$("$XRAY_BIN" version 2>&1 | awk 'NR==1 {print $2}' || true)"
+    else
+        xr_v="$(L '未安装')"
+    fi
+    echo "  Nowhere  : ${nw_v} $(L '· 角色') $(current_role) · $(svc_state nowhere)"
     echo "  Snell    : $([ -x "$SNELL_BIN" ] && { snell_installed_version; } || echo "$(L '未安装')") · $(svc_state snell)"
-    echo "  Xray     : $(if [ -x "$XRAY_BIN" ]; then "$XRAY_BIN" version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) · $(svc_state adam-xray)"
+    echo "  Xray     : ${xr_v} · $(svc_state adam-xray)"
     echo "  Realm    : $(realm_state_text)"
     echo "  $(L '域名反代') : $(proxy_state_text)"
     if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
@@ -857,8 +916,8 @@ do_doctor() {
     echo ""
     info "$(L '监听端口（ss）：')"
     if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）')"
-        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）')"
+        _doctor_ss_managed tcp || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）')"
+        _doctor_ss_managed udp || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）')"
     else
         warn "$(L 'ss 工具缺失，无法列出监听端口（请安装 iproute2）')"
     fi
@@ -923,7 +982,9 @@ do_doctor() {
         fi
     fi
     if command -v ufw >/dev/null 2>&1; then
-        echo "  $(L '防火墙'): $(ufw status 2>/dev/null | awk 'NR==1' || true)"
+        local _ufw_line
+        _ufw_line="$(ufw status 2>/dev/null | awk 'NR==1' || true)"
+        echo "  $(L '防火墙'): ${_ufw_line:-$(L '不可用（容器/内核受限）')}"
     else
         echo "  $(L '防火墙'): $(L '未安装')"
     fi

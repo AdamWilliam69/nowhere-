@@ -68,6 +68,7 @@ USAGEEOF
 
 run_interactive_menu() {
     ask_lang_first_time
+    ensure_adam_shortcut || true
     while true; do
         show_menu
         case "$MENU_CHOICE" in
@@ -104,7 +105,7 @@ case "$ACTION" in
     select-version) do_select_version ;;
     rollback)   do_rollback ;;
     generate-key) do_genkey ;;
-    probe)      do_probe ;;
+    probe)      do_probe "${ACTION_ARGS[@]}" ;;
     cert-status) do_cert_status ;;
     install-egress) do_install_egress_service ;;
     snell)      snell_cli "${ACTION_ARGS[@]}" ;;

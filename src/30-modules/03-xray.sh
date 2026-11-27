@@ -1336,12 +1336,15 @@ xray_add_ss() {
     local port tag listen name method="2022-blake3-aes-128-gcm" bytes=16 pass ans
     echo "$(L 'Shadowsocks 2022 加密方式：')"
     echo "  1) $(L '2022-blake3-aes-128-gcm（默认）  2')) 2022-blake3-aes-256-gcm  3) 2022-blake3-chacha20-poly1305"
-    read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || { [ -n "$ans" ] || return 1; }
-    case "${ans:-1}" in
-        2) method="2022-blake3-aes-256-gcm"; bytes=32 ;;
-        3) method="2022-blake3-chacha20-poly1305"; bytes=32 ;;
-        *) : ;;
-    esac
+    while true; do
+        read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || { [ -n "$ans" ] || return 1; }
+        case "${ans:-1}" in
+            1) method="2022-blake3-aes-128-gcm"; bytes=16; break ;;
+            2) method="2022-blake3-aes-256-gcm"; bytes=32; break ;;
+            3) method="2022-blake3-chacha20-poly1305"; bytes=32; break ;;
+            *) warn "$(L '无效选择')" ;;
+        esac
+    done
     while true; do
         xray_new_node_begin "$(random_free_port)" ss SS2022 || return 1
         if udp_listening "$XN_PORT"; then
@@ -1441,8 +1444,16 @@ xray_show_node() {
         echo "  $(L '端口:') ${N_PORT}"
         case "$N_TYPE" in
             vision|xhttp-reality)
+                local _pqv_disp=""
+                if [ -n "${N_PQV:-}" ]; then
+                    if [ "${#N_PQV}" -gt 32 ]; then
+                        _pqv_disp="    ML-DSA-65(pqv): ${N_PQV:0:12}...${N_PQV: -8} (${#N_PQV}B)"
+                    else
+                        _pqv_disp="    ML-DSA-65(pqv): ${N_PQV}"
+                    fi
+                fi
                 echo "  $(L '伪装站点:') ${N_SNI}    uTLS(fp): ${N_FP:-chrome}    $(L '公钥')(pbk): ${N_PBK}"
-                echo "  shortIds: ${N_SIDS:-$N_SID}${N_SPX:+    spiderX: ${N_SPX}}${N_PQV:+    ML-DSA-65(pqv): ${N_PQV}}"
+                echo "  shortIds: ${N_SIDS:-$N_SID}${N_SPX:+    spiderX: ${N_SPX}}${_pqv_disp}"
                 ;;
             xhttp-cdn|xhttp-tls)
                 echo "  uTLS(fp): ${N_FP:-chrome}"
@@ -1477,7 +1488,11 @@ xray_show_node() {
         fi
     fi
     if command -v qrencode >/dev/null 2>&1 && [ -n "$link" ] && [ -t 1 ]; then
-        qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null || true
+        if [ "${#link}" -gt 1200 ]; then
+            info "$(L '分享链接较长（含后量子参数，共') ${#link} $(L '字符），已跳过二维码展示，请直接复制上方文本链接导入')"
+        else
+            qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null || true
+        fi
     fi
     return 0
 }
@@ -1719,6 +1734,7 @@ xray_install() {
     xray_save_state
     maint_ask_script_auto
     maint_install_timers || true
+    ensure_adam_shortcut || true
     success "Xray $(xray_installed_version) $(L '安装完成')"
     if [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; then
         xray_sync_reality_snis || true
@@ -1847,6 +1863,7 @@ xray_health_check() {
     health_check_common adam-xray
     if out="$(xray_test_conf)"; then hc_line 0 "$(L '配置校验通过')"; else hc_line 1 "$(L '配置校验失败:') $(printf '%s\n' "$out" | tail -n 1)"; fi
     local -a _ntags=()
+    local _rsv_ro_warned=0
     while IFS= read -r tag; do [ -n "$tag" ] && _ntags+=("$tag"); done < <(xray_node_tags)
     for tag in "${_ntags[@]}"; do
         xray_node_load "$tag" || continue
@@ -1856,7 +1873,14 @@ xray_health_check() {
             if udp_listening "$N_PORT"; then hc_line 0 "[${tag}] UDP ${N_PORT} $(L '正在监听')"; else hc_line 1 "[${tag}] UDP ${N_PORT} $(L '没有在监听')"; fi
             if ufw_active && ! fw_is_allowed "$N_PORT" udp; then hc_line 1 "[${tag}] $(L '防火墙未放行') ${N_PORT}/udp"; fi
         fi
-        if [[ "$N_PORT" =~ ^[0-9]+$ ]] && [ "$N_PORT" -ge 1024 ] && ! reserved_port_ok "$N_PORT"; then hc_line 1 "[${tag}] $(L '端口') ${N_PORT} $(L '未加入内核保留端口')"; fi
+        if [[ "$N_PORT" =~ ^[0-9]+$ ]] && [ "$N_PORT" -ge 1024 ] && ! reserved_port_ok "$N_PORT"; then
+            if reserved_ports_writable; then
+                hc_line 1 "[${tag}] $(L '端口') ${N_PORT} $(L '未加入内核保留端口')"
+            elif [ "$_rsv_ro_warned" = "0" ]; then
+                hc_line 2 "$(L '内核保留端口在当前容器/受限内核中只读，已跳过检查')"
+                _rsv_ro_warned=1
+            fi
+        fi
         if ufw_active && ! fw_is_allowed "$N_PORT" tcp; then hc_line 1 "[${tag}] $(L '防火墙未放行') ${N_PORT}/tcp"; fi
         cert_lbl=""
         if [ "$N_TYPE" = "xhttp-tls" ]; then cert_lbl="$(L '证书剩余')";

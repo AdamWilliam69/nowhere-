@@ -1007,7 +1007,7 @@ snell_install() {
     if snell_is_prerelease "$latest"; then
         warn "$(L '当前安装的是测试版') ${latest}$(L '：客户端需使用支持该版本的 Surge 测试渠道，协议在正式版前仍可能变动，两端要同步')"
     fi
-    ensure_manager_copy >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     snell_show_config
     return 0
 }
@@ -1151,7 +1151,13 @@ snell_health_check() {
     if [ -n "$port" ]; then
         if tcp_listening "$port"; then hc_line 0 "TCP ${port} $(L '正在监听')"; else hc_line 1 "TCP ${port} $(L '没有在监听')"; fi
         if [ "$port" -ge 1024 ]; then
-            if reserved_port_ok "$port"; then hc_line 0 "$(L '端口') ${port} $(L '已加入内核保留端口')"; else hc_line 1 "$(L '端口') ${port} $(L '未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）')"; fi
+            if reserved_port_ok "$port"; then
+                hc_line 0 "$(L '端口') ${port} $(L '已加入内核保留端口')"
+            elif ! reserved_ports_writable; then
+                hc_line 2 "$(L '内核保留端口在当前容器/受限内核中只读，已跳过检查')"
+            else
+                hc_line 1 "$(L '端口') ${port} $(L '未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）')"
+            fi
         fi
         if ufw_active; then
             if fw_is_allowed "$port" tcp; then hc_line 0 "$(L '防火墙已放行') ${port}/tcp"; else hc_line 1 "$(L '防火墙未放行') ${port}/tcp"; fi
@@ -1170,7 +1176,7 @@ snell_health_check() {
     local xp
     while IFS= read -r xp; do
         if snell_extra_healthy "$xp"; then hc_line 0 "$(L '附加端口') ${xp} $(L '运行并监听中')"; else hc_line 1 "$(L '附加端口') ${xp} $(L '未运行或没有在监听')"; fi
-        if [ "$xp" -ge 1024 ] && ! reserved_port_ok "$xp"; then hc_line 1 "$(L '附加端口') ${xp} $(L '未加入内核保留端口')"; fi
+        if [ "$xp" -ge 1024 ] && ! reserved_port_ok "$xp" && reserved_ports_writable; then hc_line 1 "$(L '附加端口') ${xp} $(L '未加入内核保留端口')"; fi
         if ufw_active && ! fw_is_allowed "$xp" tcp; then hc_line 1 "$(L '防火墙未放行附加端口') ${xp}/tcp"; fi
     done < <(snell_extra_ports)
     if grep -q '^Restart=always' "$SNELL_SERVICE" 2>/dev/null; then hc_line 0 "$(L '服务单元已启用崩溃自动拉起')"; else hc_line 1 "$(L '服务单元未启用 Restart=always（旧版单元）')"; fi

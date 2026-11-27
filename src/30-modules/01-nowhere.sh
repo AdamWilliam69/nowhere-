@@ -798,14 +798,25 @@ build_egress_info() {
     EGRESS_URL="egress://${SHARED_KEY}@${host_part}/${carrier}:${port}?${query}"
 }
 
-# 供 probe 使用的 Vector URL（不需要 in=）
+# 供 probe 使用的 Vector URL（不需要 in=）；传入 --local 时优先走本机回环地址（绕过云 VPS NAT 无回流）
 build_probe_vector_url() {
-    local host host_part port carrier query
-    host="${PUBLIC_HOST:-}"
-    [[ -z "$host" ]] && host="$(detect_public_host)"
-    if [[ -z "$host" ]]; then
-        warn "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
-        return 1
+    local local_mode=0 host host_part port carrier query
+    [ "${1:-}" = "--local" ] && local_mode=1
+    if [ "$local_mode" = "1" ]; then
+        if [ -n "${LISTEN_HOST:-}" ] && [ "$LISTEN_HOST" != "*" ] && [ "$LISTEN_HOST" != "0.0.0.0" ] && [ "$LISTEN_HOST" != "::" ] && [ "$LISTEN_HOST" != "[::]" ]; then
+            host="$LISTEN_HOST"
+        elif [ "${TCP_FAMILY:-}" = "6" ] || { ! has_tcp && [ "${UDP_FAMILY:-}" = "6" ]; }; then
+            host="::1"
+        else
+            host="127.0.0.1"
+        fi
+    else
+        host="${PUBLIC_HOST:-}"
+        [[ -z "$host" ]] && host="$(detect_public_host)"
+        if [[ -z "$host" ]]; then
+            warn "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
+            return 1
+        fi
     fi
     host_part="$(format_host_for_url "$host")"
     carrier="${VECTOR_CARRIER:-tcp}"
@@ -851,20 +862,20 @@ get_fingerprint_from_journal() {
 }
 
 # 纯获取指纹（64 位小写 hex，无冒号），不打印不警告，供 pin= 拼接用
-# 顺序：官方 nowhere fingerprint（自动处理 Morph）-> 启动日志兜底 -> openssl s_client
-# 纯 UDP 时没有 TCP/TLS 监听，第一步和第三步都不可用，只剩日志兜底。
+# v8.7 顺序：优先按当前运行 MainPID 读启动日志（零网络建连、不向 nowhere 日志刷 unexpected-eof 报错）
+# -> 官方 nowhere fingerprint（自动处理 Morph）-> openssl s_client（仅 morph=0）
 get_tls_fingerprint() {
     [[ "$TLS_MODE" != "1" ]] && return 1
-    # 单次展示流程内缓存：do_show_config 一次调 4 次，服务刚重启/指纹暂不可读时每次 timeout 8 会叠加卡顿
+    # 单次展示流程内缓存：调用方在父 shell 预热 _CACHED_TLS_FP 后，子 shell 可直接命中
     if [ -n "${_CACHED_TLS_FP:-}" ]; then printf '%s' "$_CACHED_TLS_FP"; return 0; fi
     local jfp
+    jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
+    if [ -n "$jfp" ]; then
+        _CACHED_TLS_FP="$jfp"
+        printf '%s' "$jfp"
+        return 0
+    fi
     if ! has_tcp; then
-        jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
-        if [ -n "$jfp" ]; then
-            _CACHED_TLS_FP="$jfp"
-            printf '%s' "$jfp"
-            return 0
-        fi
         return 1
     fi
     local port probe_host="127.0.0.1"
@@ -883,12 +894,6 @@ get_tls_fingerprint() {
             echo "$fp"
             return 0
         fi
-    fi
-    jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
-    if [ -n "$jfp" ]; then
-        _CACHED_TLS_FP="$jfp"
-        printf '%s' "$jfp"
-        return 0
     fi
     # Morph 开启时 TLS 包在 Morph 信封里，openssl s_client 不可能握手成功，
     # 旧版会在这里白等 5 轮（最长约 45 秒）再失败
@@ -1042,10 +1047,13 @@ verify_shortcuts() {
 }
 
 install_shortcuts() {
-    step "$(L '安装快捷命令')"
-    divider
+    local mode="${1:-}"
+    if [ "$mode" != "--no-header" ] && [ "$mode" != "--quiet" ]; then
+        step "$(L '安装快捷命令')"
+        divider
+    fi
     if ! ensure_manager_copy; then
-        warn "$(L '快捷命令无法安装')"
+        [ "$mode" = "--quiet" ] || warn "$(L '快捷命令无法安装')"
         return 1
     fi
 
@@ -1072,16 +1080,31 @@ SHORTEOF
     done
     [ -x "$MANAGER_PATH" ] || missing=1
     if [ "$missing" = "1" ]; then
-        warn "$(L '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：')${MANAGER_PATH}"
+        [ "$mode" = "--quiet" ] || warn "$(L '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：')${MANAGER_PATH}"
         return 1
     fi
 
-    success "$(L '快捷命令已安装完成')"
-    echo -e "  ${CYAN}adam${NC}   $(L '— 打开管理菜单')"
-    echo -e "  ${CYAN}zt${NC}     $(L '— 查看服务状态')"
-    echo -e "  ${CYAN}pz${NC}     $(L '— 查看节点/连接信息')"
-    echo -e "  ${CYAN}cxpz${NC}   $(L '— 重新修改配置')"
-    echo -e "  ${CYAN}cq${NC}     $(L '— 快速重启服务')"
+    if [ "$mode" != "--quiet" ]; then
+        success "$(L '快捷命令已安装完成')"
+        echo -e "  ${CYAN}adam${NC}   $(L '— 打开管理菜单')"
+        echo -e "  ${CYAN}zt${NC}     $(L '— 查看服务状态')"
+        echo -e "  ${CYAN}pz${NC}     $(L '— 查看节点/连接信息')"
+        echo -e "  ${CYAN}cxpz${NC}   $(L '— 重新修改配置')"
+        echo -e "  ${CYAN}cq${NC}     $(L '— 快速重启服务')"
+    fi
+    return 0
+}
+
+# 任意组件安装或首次打开主菜单时自动确保 /usr/local/bin/adam 就绪（已就绪或目录不可写时静默跳过）
+ensure_adam_shortcut() {
+    [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ] && return 0
+    local mgr_dir
+    mgr_dir="$(dirname "$MANAGER_PATH")"
+    [ -w /usr/local/bin ] && [ -w "$mgr_dir" ] || return 0
+    if install_shortcuts --quiet >/dev/null 2>&1; then
+        info "$(L '快捷命令已自动就绪：以后可直接输入 adam 打开管理菜单')"
+    fi
+    return 0
 }
 
 # ── 证书申请与自动续期（v2 新增/重构） ──────────────────────────
@@ -1798,10 +1821,28 @@ menu_status_summary() {
 
 show_menu() {
     clear 2>/dev/null || true
+    local b1_l b1_t b1_r b2_l b2_t b2_r
+    if [ "${ADAM_LANG:-zh}" = "en" ]; then
+        b1_l=14
+        b1_t="Adam Nowhere Portal Manager · v${SCRIPT_VERSION}"
+        b1_r=$((62 - b1_l - 31 - ${#SCRIPT_VERSION}))
+        b2_l=2
+        b2_t="Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · Proxy · Tuning"
+        b2_r=$((62 - b2_l - 50 - ${#TARGET_NW_VERSION} - ${#SNELL_MAJOR}))
+    else
+        b1_l=11
+        b1_t="Adam Nowhere Portal 一键管理脚本 · v${SCRIPT_VERSION}"
+        b1_r=$((62 - b1_l - 36 - ${#SCRIPT_VERSION}))
+        b2_l=4
+        b2_t="Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · 反代 · 调优"
+        b2_r=$((62 - b2_l - 47 - ${#TARGET_NW_VERSION} - ${#SNELL_MAJOR}))
+    fi
+    [ "$b1_r" -lt 0 ] && b1_r=0
+    [ "$b2_r" -lt 0 ] && b2_r=0
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         Adam Nowhere Portal $(L '一键管理脚本')                     ║"
-    echo "║  Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · $(L '反代') · $(L '调优') ║"
+    printf '║%*s%s%*s║\n' "$b1_l" "" "$b1_t" "$b1_r" ""
+    printf '║%*s%s%*s║\n' "$b2_l" "" "$b2_t" "$b2_r" ""
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     menu_time_ip
@@ -2700,6 +2741,8 @@ do_install() {
 
     step "$(L '第 12 步：生成连接信息')"
     divider
+    _CACHED_TLS_FP=""
+    [ "$TLS_MODE" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
     build_client_links
     build_vector_info
     build_egress_info
@@ -2708,7 +2751,7 @@ do_install() {
 
     step "$(L '第 13 步：安装快捷命令')"
     divider
-    install_shortcuts || true
+    install_shortcuts --no-header || true
     if ! verify_shortcuts; then
         warn "$(L '安装完成，但快捷命令校验未通过（服务本身不受影响），请稍后执行 adam shortcuts 重新安装')"
     fi
@@ -2876,7 +2919,7 @@ CONFEOF
     echo -e "  $(L '日志 :') ${CYAN}journalctl -u nowhere -f${NC}"
     echo -e "  $(L '配置 :') ${CYAN}cat ${CONFIG_DIR}/config.txt${NC}"
     echo -e "  $(L '重启 :') ${CYAN}systemctl restart nowhere${NC}"
-    echo -e "  $(L '探测 :') ${CYAN}${MANAGER_PATH} probe${NC}$(L '（真实 TCP Flow 连通性测试）')"
+    echo -e "  $(L '探测 :') ${CYAN}adam probe${NC}$(L '（真实 TCP Flow 连通性测试）')"
     divider
 }
 
@@ -3702,6 +3745,7 @@ do_show_config() {
     if [ -f "$CONFIG_FILE" ]; then
         load_saved_config
         _CACHED_TLS_FP=""
+        [ "${TLS_MODE:-}" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
         # 每次查看都按当前保存参数重新生成（含最新自签 pin），避免展示过期指纹的旧串
         NOWHERE_PORTAL="$(build_portal_url)"
         build_client_links
@@ -3779,24 +3823,8 @@ do_genkey() {
     fi
 }
 
-do_probe() {
-    step "$(L '连通性探测 probe（真实 TCP Flow，不发送业务数据）')"
-    divider
-    [ -x "$BIN_PATH" ] || error "$(L '未找到 Nowhere 二进制，请先安装')"
-    if [ "$(current_role)" = "egress" ]; then
-        info "$(L '本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行')"
-        return 0
-    fi
-    load_saved_config
-    is_valid_key "$SHARED_KEY" || error "$(L '当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置')"
-    local vector_url target
-    vector_url="$(build_probe_vector_url || true)"
-    [ -n "$vector_url" ] || error "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
-    read -rp "$(L '目标地址 host:port（回车默认 example.com:443）:') " target || { [ -n "$target" ] || return 1; }
-    target=${target:-example.com:443}
-    info "Vector: ${vector_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
-    info "Target: ${target}"
-    # v8.6：HANDSHAKE_TIMEOUT=auto 时不传 NOW_HANDSHAKE_TIMEOUT（避免把字面量 auto 传给 nowhere 导致启动拒绝）
+_run_nowhere_probe_cmd() {
+    local vurl="$1" tgt="$2"
     (
         export NOW_MORPH_TCP_PRELUDE="${MORPH_TCP_PRELUDE:-fade}"
         export NOW_MORPH_UDP_PRELUDE="${MORPH_UDP_PRELUDE:-fade}"
@@ -3805,8 +3833,72 @@ do_probe() {
         else
             export NOW_HANDSHAKE_TIMEOUT="$HANDSHAKE_TIMEOUT"
         fi
-        "$BIN_PATH" probe "$vector_url" "$target"
-    ) || warn "$(L '探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达')"
+        "$BIN_PATH" probe "$vurl" "$tgt"
+    )
+}
+
+do_probe() {
+    step "$(L '连通性探测 probe（真实 TCP Flow，不发送业务数据）')"
+    divider
+    [ -x "$BIN_PATH" ] || error "$(L '未找到 Nowhere 二进制，请先安装')"
+    if [ "$(current_role)" = "egress" ]; then
+        info "$(L '本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行')"
+        return 0
+    fi
+    local local_mode=0 arg target=""
+    for arg in "$@"; do
+        case "$arg" in
+            --local|-l) local_mode=1 ;;
+            *) [ -z "$target" ] && target="$arg" ;;
+        esac
+    done
+    load_saved_config
+    is_valid_key "$SHARED_KEY" || error "$(L '当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置')"
+    _CACHED_TLS_FP=""
+    [ "${TLS_MODE:-}" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
+    local vector_url
+    if [ "$local_mode" = "1" ]; then
+        vector_url="$(build_probe_vector_url --local || true)"
+    else
+        vector_url="$(build_probe_vector_url || true)"
+    fi
+    [ -n "$vector_url" ] || error "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
+    if [ -z "$target" ]; then
+        if [ -t 0 ]; then
+            read -rp "$(L '目标地址 host:port（回车默认 example.com:443）:') " target || { [ -n "$target" ] || return 1; }
+        else
+            read -r target 2>/dev/null || true
+        fi
+    fi
+    target=${target:-example.com:443}
+    info "Vector: ${vector_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
+    info "Target: ${target}"
+    # v8.6：HANDSHAKE_TIMEOUT=auto 时不传 NOW_HANDSHAKE_TIMEOUT（避免把字面量 auto 传给 nowhere 导致启动拒绝）
+    local probe_out="" probe_rc=0
+    probe_out="$(_run_nowhere_probe_cmd "$vector_url" "$target" 2>&1)" || probe_rc=$?
+    [ -n "$probe_out" ] && printf '%s\n' "$probe_out"
+    if [ "$probe_rc" -eq 0 ]; then
+        return 0
+    fi
+    # v8.7：公网探测因云厂商 NAT 无回流（Hairpin NAT）失败时，在 tls=1 下自动回环自测定位故障边界
+    if [ "$local_mode" = "0" ] && [[ "$probe_out" == *"TRANSPORT_FAILED"* ]]; then
+        if [ "${TLS_MODE:-}" = "1" ]; then
+            local local_url
+            local_url="$(build_probe_vector_url --local || true)"
+            if [ -n "$local_url" ] && [ "$local_url" != "$vector_url" ]; then
+                info "$(L '公网地址本机回连超时（云厂商 NAT 常见无回流限制），自动改用本机回环地址复测...')"
+                info "Vector: ${local_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
+                if _run_nowhere_probe_cmd "$local_url" "$target"; then
+                    success "$(L '本机回环探测通过：Portal 服务端与出口链路均正常（公网回连失败通常仅因云厂商 NAT 无回流或安全组未放行）')"
+                    return 0
+                fi
+            fi
+        else
+            info "$(L '提示：若本机处于 AWS/GCP/阿里云等 NAT 环境，公网地址本机回连常因无回流失败，请从客户端侧验证或检查云安全组端口')"
+        fi
+    fi
+    warn "$(L '探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达')"
+    return 1
 }
 
 # svc_restart_wait UNIT [SECONDS] [LOG_LINES]：重启 → 等待 → 仍未 active 则打日志并返回 1（M14）

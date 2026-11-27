@@ -314,7 +314,7 @@ if bash -c '
     timedatectl() { echo "yes"; }
     systemctl() { return 1; }
     out="$(do_doctor --json)"
-    printf "%s" "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d[\"script_version\"]==\"8.6\" and d[\"ntp_sync\"]==\"synced\" and isinstance(d[\"perm_issues\"], list) and \"xray\" in d[\"services\"]"
+    printf "%s" "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d[\"script_version\"]==sys.argv[1] and d[\"ntp_sync\"]==\"synced\" and isinstance(d[\"perm_issues\"], list) and \"xray\" in d[\"services\"]" "$SCRIPT_VERSION"
 '; then ok "ENH-10: do_doctor --json emits valid structured JSON"; else fail "ENH-10"; fi
 
 # 11. do_export_clients (Mihomo / sing-box / Surge) + Mihomo REALITY fp=chrome normalization

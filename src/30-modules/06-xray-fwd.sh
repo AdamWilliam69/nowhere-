@@ -267,7 +267,7 @@ FWDEOF
     [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
     fw_allow_for_service "${fw_specs[@]}"
     reserved_ports_sync || true
-    success "$(L '转发规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
+    success "$(L '转发规则 ')${id}$(L ' 已生效：')$(format_host_for_url "$lip"):${lport} -> $(format_host_for_url "$rhost"):${rport}"
 }
 
 xray_fwd_list() {
@@ -289,7 +289,7 @@ xray_fwd_list() {
             else
                 status="${YELLOW}$(L '停用')${NC}"
             fi
-            echo -e "  ${BOLD}${idx})${NC} [${FWD_ID}] ${status}  ${CYAN}${FWD_LIP}:${FWD_LPORT}${NC} -> ${GREEN}${FWD_RHOST}:${FWD_RPORT}${NC} ${tags}${FWD_REMARK:+  # ${FWD_REMARK}}"
+            echo -e "  ${BOLD}${idx})${NC} [${FWD_ID}] ${status}  ${CYAN}$(format_host_for_url "$FWD_LIP"):${FWD_LPORT}${NC} -> ${GREEN}$(format_host_for_url "$FWD_RHOST"):${FWD_RPORT}${NC} ${tags}${FWD_REMARK:+  # ${FWD_REMARK}}"
         )
     done < <(xray_fwd_rule_files)
     if [ "$idx" -eq 0 ]; then

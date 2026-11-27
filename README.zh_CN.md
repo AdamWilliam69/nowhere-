@@ -1,10 +1,10 @@
 [English](/README.md) | [简体中文](/README.zh_CN.md)
 
-# Adam VPS 一键管理脚本（v8.6）
+# Adam VPS 一键管理脚本（v8.7）
 
 [![CI — Build, Lint & Test](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml/badge.svg)](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml)
 
-一个面向 Linux VPS 的一体化交互式管理脚本：在同一个菜单或命令行中安装、加固并维护 **Nowhere（v3.3.0 / NW3）**、**Snell v6**、**Xray（SS2022 / VLESS REALITY / XHTTP / dokodemo-door）**、**Realm 端口转发**、**域名反代（Caddy / Cloudflare Tunnel）**，并集成 UFW 防火墙、Fail2ban、系统网络调优、加密备份恢复、告警推送、多客户端导出与两段式自愈维护。
+一个面向 Linux VPS 的一体化交互式管理脚本：在同一个菜单或命令行中安装、加固并维护 **Nowhere（NW3）**、**Snell v6**、**Xray（SS2022 / VLESS REALITY / XHTTP / dokodemo-door）**、**Realm 端口转发**、**域名反代（Caddy / Cloudflare Tunnel）**，并集成 UFW 防火墙、Fail2ban、系统网络调优、加密备份恢复、告警推送、多客户端导出与两段式自愈维护。
 
 内置中英双语界面（`adam lang zh` / `adam lang en`，或 `ADAM_LANG=en adam`），自动化部署支持 `ADAM_ASSUME_YES=1`。
 
@@ -18,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/
 
 > 请使用上面的 `bash <(...)` 写法，不要用 `curl ... | bash`：后者会把脚本内容当作键盘输入，交互向导无法正常工作。
 
-安装完成后，脚本会把自己安装为 `/usr/local/bin/adam-nowhere-manager.sh`（快捷命令 `/usr/local/bin/adam`），之后直接输入：
+首次打开主菜单或安装任意组件后，脚本会自动把自己安装为 `/usr/local/bin/adam-nowhere-manager.sh`（快捷命令 `/usr/local/bin/adam`），之后直接输入：
 
 ```bash
 adam
@@ -42,25 +42,13 @@ XanMod 内核仅支持 `x86_64` 且不能在 LXC / OpenVZ 等容器类虚拟化�
 
 ---
 
-## v8.6 核心升级亮点
+## v8.7 体验与运维优化亮点
 
-- **CSPRNG 随机引擎**：全量替换 `$RANDOM`，新增 `csprng_hex`、无偏拒绝采样 `csprng_int`、`csprng_alnum`（Python + 纯 awk 兜底）、`csprng_short_id`、`csprng_url_path`；`random_free_port` 避开 TCP/UDP 监听与全部已托管服务端口。
-- **协议抗指纹与后量子进阶**：
-  - **Xray**：REALITY 生成 2–3 条变长偶数位 `shortIds` + 随机 `spiderX` + `"maxTimeDiff": 60000` + **ML-DSA-65 后量子签名**（`mldsa65Seed` / `&pqv=`）+ PQ 安全 `uTLS` 指纹池（`chrome` / `firefox` / `safari`）+ 候选 SNI **TLS 1.3 + H2 握手 RTT 延迟择优**；XHTTP 随机化 `xPaddingBytes`（`&extra=`）与拟真多段路径；CDN 自签证书改用 ECDSA P-256 + 随机序列号 + 365–730 天随机有效期；新增**原地热轮换节点**（`adam xray edit`，支持换 SNI / 轮换 shortIds+spiderX / 换 fp / 换端口 / 轮换 XHTTP 路径与填充 / 生成或轮换 ML-DSA-65，重载失败自动回滚）。
-  - **Snell v6**：PSK 升级为 CSPRNG 变长 32–48 位（`A-Za-z0-9_-`）。
-  - **Nowhere v3.3.0**：`HANDSHAKE_TIMEOUT` 默认 `auto`（省略环境变量以启用官方按密钥派生 3–30s），仍兼容自定义时长。
-  - **Realm**：WS/WSS 默认路径改用拟真多段随机路径。
-- **供应链与运行期安全**：
-  - 全量下载统一走 `secure_curl`（强制 HTTPS TLS ≥ 1.2）；可选只读 `GITHUB_TOKEN` 通过 `curl -K` 私有 fd 仅对 `https://api.github.com/*` 注入（不暴露于 `ps`、绝不泄露第三方域名）。
-  - 官方 Release SHA-256/SHA-512 + 本机架构 ELF 头校验覆盖 Nowhere / Xray / Snell / Realm / Caddy / cloudflared；Xray 规则库强校验官方 `dlc.dat` + `.sha256sum`。
-  - 管理脚本自更新强制校验 **[`nowhere-install.sh.sha256`](nowhere-install.sh.sha256)**（不匹配即拒绝替换，支持 `MAINT_SCRIPT_STRICT_SHA=1` 严格模式）。
-  - 全部 6 个 systemd 服务单元统一启用沙箱加固（`NoNewPrivileges`、`PrivateDevices`、`ProtectKernelTunables`、`ProtectKernelModules`、`ProtectControlGroups`、`RestrictNamespaces`、`LockPersonality`、`RestrictSUIDSGID`）。
-  - 备份支持可选 **AES-256-CBC (PBKDF2 600k iter)** 口令加密（`adam backup --encrypt` 生成 `.tgz.enc`，口令走 `fd:3` 不进命令行），`adam restore` 自动识别并解密恢复。
-- **可观测性、自动自愈与多客户端导出**：
-  - **两段式 Watchdog 自愈**：常规重启未恢复时自动执行对应服务的权限收敛/证书同步/配置重建/保留端口同步（30 分钟冷却防风暴）。
-  - **运维告警推送（`adam notify`）**：支持 Telegram Bot / Bark / HTTPS Webhook，覆盖二段自愈、服务宕机、自动更新回滚、证书剩余 `<14` 天、Nowhere `tls=1` 指纹变动与脚本更新。
-  - **NTP 时钟同步检查**（保障 REALITY `maxTimeDiff: 60000`）+ **`adam doctor --json`** 结构化巡检输出。
-  - **多客户端配置一键导出（`adam export mihomo|singbox|surge`）**，内置 Mihomo REALITY 指纹兼容自动规范化。
+- **开箱即用与全组件快捷命令**：首次进入交互主菜单或安装任意组件（Snell / Xray / Realm / Caddy / Cloudflare Tunnel / Nowhere）均自动安装 `/usr/local/bin/adam`，彻底消除非 Nowhere 场景下的 `adam: command not found`。
+- **Nowhere 探针与指纹优化**：`adam probe [target] [--local]` 支持命令行传参与非交互默认目标，云厂商 NAT 无回流导致公网探测超时时自动回环 `127.0.0.1` 复测定位故障边界；`tls=1` 指纹读取改为优先按当前 PID 读 journalctl，零 `tls connection failed` 报错污染日志。
+- **容器 / 精简内核诊断兼容**：`adam doctor` 在 `ss -p` 隐藏进程名时按托管端口自动回退识别监听、精简 Xray/Nowhere 版本展示、修复受限内核下 `ufw` 空白输出，`--json` 区分 `unconfigured` 与 `not-installed`；`xray`/`snell` 健康检查对只读 `ip_local_reserved_ports` 自动降级为提示。
+- **交互与展示细节**：`xray_add_ss` 加密方式严格循环校验；ML-DSA-65 `pqv` 改为摘要展示且超长链接跳过不可扫二维码；主菜单中英文框线精准对齐并显示脚本版本号；修复英文界面空格与 Caddy 端口提示；Xray 转发统一 `[::]:PORT` 格式；Caddyfile 改用 Tab 缩进消除格式警告；手动 `adam watchdog` 输出健康反馈。
+- **继承 v8.6 全部核心能力**：CSPRNG 随机引擎、Xray REALITY 多 `shortIds` + ML-DSA-65 后量子签名 + RTT SNI 择优 + `adam xray edit` 热轮换、Snell v6 32–48 位变长 PSK、Nowhere `HANDSHAKE_TIMEOUT=auto`、全链路 `secure_curl` + SHA-256/512 + ELF 校验（兼容压缩 GitHub JSON 与 `mawk`）、8 项 systemd 沙箱加固、AES-256-CBC 加密备份恢复、两段式 Watchdog 自愈、`adam notify` 告警与 `adam export` 多客户端导出。
 
 ---
 
@@ -130,7 +118,7 @@ adam help                    # 查看全部子命令
 ```bash
 ./scripts/build.sh                             # 从 src/ 构建 nowhere-install.sh 与 .sha256
 ./scripts/lint.sh                              # 校验构建同步、I18N、安全不变量与 0 警告 ShellCheck
-for t in tests/test_*.sh; do bash "$t"; done   # 运行全部 5 套自动化测试
+for t in tests/test_*.sh; do bash "$t"; done   # 运行全部 6 套自动化测试
 ```
 
 ---

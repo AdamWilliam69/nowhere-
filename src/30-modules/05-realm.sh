@@ -600,6 +600,7 @@ realm_install() {
     echo "$tag" > "$REALM_VERSION_FILE"
     realm_fix_perms
     maint_install_timers >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     success "$(L 'Realm ')${tag}$(L ' 安装完成（')$(${REALM_BIN} --version 2>&1 | awk "NR==1" || true)$(L '）')"
 }
 

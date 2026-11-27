@@ -336,6 +336,19 @@ set -o pipefail
 #       6 Fail2ban / 7 系统调优 / 8 自动维护）。原主菜单的 17 项 Nowhere 功能收进 Nowhere 子菜单并按
 #       安装与配置 / 运行与排查 / 证书 / 版本分组；「重装快捷命令」移到脚本更新。上面修订说明里的
 #       "菜单 17/18/19…" 是当时的编号。命令行子命令与 zt / pz / cxpz / cq 不变。
+#   ── 脚本 v8.7 修订（2026-11-26：实网安装全流程验证与运维体验打磨）──
+#     - 快捷命令自动就绪：新增 ensure_adam_shortcut，首次进入交互主菜单或通过任意组件（Snell / Xray /
+#       Realm / Caddy / CF-Tunnel / Nowhere）安装后均自动安装 /usr/local/bin/adam，不再因未装 Nowhere
+#       而出现 adam: command not found。
+#     - Nowhere 探针与指纹优化：do_probe 支持命令行传参（adam probe [target] [--local]）与非交互默认目标，
+#       在公网探测遇 NAT 无回流超时时自动回环自测 127.0.0.1 定位故障边界；get_tls_fingerprint 改为优先
+#       按当前 PID 读 journalctl（零 tls connection failed 报错污染）并在父 shell 缓存指纹。
+#     - 诊断与容器兼容优化：do_doctor 在容器 / hidepid 环境下自动按托管端口回退识别监听状态、精简 Xray/Nowhere
+#       版本展示、修复 ufw 不可用时空白输出；_doctor_json 区分已装二进制但未配置单元为 unconfigured；
+#       fw_status 在容器无 netfilter 时明确提示；xray/snell 健康检查对只读 ip_local_reserved_ports 容器降级为提示。
+#     - 交互与展示细节：xray_add_ss 加密方式严格循环校验；xray_show_node 对 ~2600B ML-DSA-65 pqv 改为摘要展示并
+#       为超长链接跳过不可扫二维码；修复主菜单中英文 Banner 框线错位并展示脚本版本号；修正英文界面空格与 Caddy
+#       端口提示；xray fwd 统一 [::]:PORT 格式；Caddyfile 改用 Tab 缩进消除未格式化告警；手动 watchdog 给出健康反馈。
 # ══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'
@@ -364,7 +377,7 @@ MANAGER_PATH="/usr/local/bin/adam-nowhere-manager.sh"
 DEFAULT_MORPH="1"
 DEFAULT_VECTOR_SOCKS="127.0.0.1:1080"
 DEFAULT_DIAL="auto"
-SCRIPT_VERSION="8.6"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
+SCRIPT_VERSION="8.7"   # 本管理脚本自身的修订版本（与 Nowhere 版本号相互独立）
 TARGET_NW_VERSION="v3.3.0"   # 本脚本文案与向导所对照的 Nowhere 版本
 MORPH_TCP_PRELUDE="fade"  # NOW_MORPH_TCP_PRELUDE：fade(v3.0.1起默认，v3.1.0不变)/full8/low7，仅影响本机发起的 Morph TCP 连接
 TCP_FAMILY=""             # 监听地址族限制：""/4/6 -> tcp/tcp4/tcp6
@@ -547,7 +560,7 @@ init_i18n_en() {
         ['保活巡检 / 脚本与内核自动更新']='Watchdog / auto-update scripts & kernels'
         ['提示：可直接输入']='Tip: run'
         ['唤出此菜单，或用']='for this menu, or use'
-        ['快捷执行；']='for shortcuts;'
+        ['快捷执行；']='for shortcuts; '
         ['查看全部子命令']='to see all commands'
         ['安装']='Install'
         ['（向导）']=' (wizard)'
@@ -759,7 +772,7 @@ init_i18n_en() {
         ['防火墙未放行']='Firewall has not allowed it'
         ['项问题，可用「一键修复」处理']=' issue(s); use "One-click repair"'
         ['（暂无记录）']='(no records yet)'
-        ['（适配 Nowhere']=' (for Nowhere '
+        ['（适配 Nowhere']=' (for Nowhere'
         ['，不自动更新']=', no auto-update'
         ['，实际']=', actual '
         ['，开始更新']=', updating now'
@@ -1685,7 +1698,7 @@ init_i18n_en() {
         ['确认本机有可用的 IPv4 登录方式并继续？']='Confirm this machine has a usable IPv4 login method and continue?'
         ['确认解封当前所有被封禁的 IP？']='Confirm unbanning all currently banned IPs?'
         ['确认跨代升级']='Confirm cross-generation upgrade'
-        ['磁盘：']='Disk:'
+        ['磁盘：']='Disk: '
         ['禁用 / 恢复 IPv6']='Disable / restore IPv6'
         ['禁用失败（内核可能未编译 IPv6 或 sysctl 被限制）']='Failed to disable (the kernel may not have IPv6 compiled in, or sysctl is restricted)'
         ['私钥文件路径（privkey.pem）:']='Private key file path (privkey.pem):'
@@ -1954,7 +1967,7 @@ init_i18n_en() {
         ['（通用 DNS-01 / acme.sh 请用 Nowhere 菜单 3 重新配置）']='(for generic DNS-01 / acme.sh, please reconfigure via Nowhere menu 3)'
         ['（须与 Portal 一致）']=' (must match the Portal)'
         ['）   回源:']=')   Origin:'
-        ['） 语言：']=') Language:'
+        ['） 语言：']=')  Language: '
         ['）加入白名单，避免输错密码把自己封掉？']=') to the allowlist, to avoid locking yourself out by mistyping the password?'
         ['）登录的：禁用 IPv6 会立刻断开，且之后只能用 IPv4 登录']=') you logged in with: disabling IPv6 will disconnect you immediately, and you can only log in via IPv4 afterwards'
         ['）的放行规则？']=') allow rules?'
@@ -2035,10 +2048,10 @@ init_i18n_en() {
         ['/ uninstall）']='/ uninstall)'
         ['/acme.sh）']='/acme.sh)'
         ['/tcp）']='/tcp)'
-        ['Fail2ban（']='Fail2ban('
-        ['Nowhere（Portal / Egress：']='Nowhere(Portal / Egress: '
-        ['Shadowsocks 2022（TCP + UDP）']='Shadowsocks 2022(TCP + UDP)'
-        ['Xray（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）']='Xray(SS2022 / VLESS: REALITY Vision, XHTTP REALITY, XHTTP CDN, VLESS Encryption)'
+        ['Fail2ban（']='Fail2ban ('
+        ['Nowhere（Portal / Egress：']='Nowhere (Portal / Egress: '
+        ['Shadowsocks 2022（TCP + UDP）']='Shadowsocks 2022 (TCP + UDP)'
+        ['Xray（SS2022 / VLESS：REALITY Vision、XHTTP REALITY、XHTTP CDN、VLESS Encryption）']='Xray (SS2022 / VLESS: REALITY Vision, XHTTP REALITY, XHTTP CDN, VLESS Encryption)'
         ['en）']='en)'
         ['mode：1']='mode: 1'
         ['stable）']='stable)'
@@ -2708,6 +2721,19 @@ init_i18n_en() {
         ['生成 / 轮换 REALITY ML-DSA-65 后量子签名']='Generate / rotate REALITY ML-DSA-65 post-quantum signature'
         ['仅 REALITY 节点支持 ML-DSA-65 后量子签名']='Only REALITY nodes support ML-DSA-65 post-quantum signature'
         ['当前 Xray 内核不支持 mldsa65，请先升级内核']='Current Xray core does not support mldsa65; please upgrade Xray first'
+        ['不可用（容器/内核受限）']='unavailable (container/restricted kernel)'
+        ['个已启用服务运行正常']='enabled service(s) are healthy'
+        ['保活巡检通过：全部']='Watchdog passed: all'
+        ['公网地址本机回连超时（云厂商 NAT 常见无回流限制），自动改用本机回环地址复测...']='Public-address self-probe timed out (common on cloud NAT without hairpinning); retrying via local loopback...'
+        ['内核保留端口在当前容器/受限内核中只读，已跳过检查']='Kernel reserved ports are read-only in this container/restricted kernel; check skipped'
+        ['分享链接较长（含后量子参数，共']='Share link is very long (includes post-quantum parameters,'
+        ['字符），已跳过二维码展示，请直接复制上方文本链接导入']='chars); QR code skipped — please copy the text link above directly'
+        ['快捷命令已自动就绪：以后可直接输入 adam 打开管理菜单']='Shortcut ready: run '\''adam'\'' anytime to open the management menu'
+        ['提示：若本机处于 AWS/GCP/阿里云等 NAT 环境，公网地址本机回连常因无回流失败，请从客户端侧验证或检查云安全组端口']='Tip: on cloud NAT hosts (AWS/GCP/Alibaba Cloud), self-probing the public address often fails due to no NAT hairpinning; test from a client or check your cloud security group'
+        ['无法读取 ufw 状态（容器或受限内核可能不支持 netfilter/iptables）']='Unable to read ufw status (container or restricted kernel may lack netfilter/iptables support)'
+        ['暂无已启用的受管服务需要巡检']='No enabled managed services to check'
+        ['本机回环探测通过：Portal 服务端与出口链路均正常（公网回连失败通常仅因云厂商 NAT 无回流或安全组未放行）']='Local loopback probe succeeded: Portal server and egress are healthy (public self-probe failure is usually just cloud NAT lacking hairpinning or a blocked security group port)'
+        ['本机监听端口 (1-65535，回车默认 80): ']='Local listen port (1-65535, Enter for default 80): '
     )
     _I18N_INIT=1
 }
@@ -3858,8 +3884,14 @@ fw_list() {
 
 fw_status() {
     fw_require || return 1
-    ufw status verbose 2>/dev/null || true
-    return 0
+    local out
+    if out="$(ufw status verbose 2>&1)" && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    warn "$(L '无法读取 ufw 状态（容器或受限内核可能不支持 netfilter/iptables）')"
+    [ -n "${out:-}" ] && printf '%s\n' "$out" >&2
+    return 1
 }
 
 # 供安装流程调用：放行指定端口。ufw 已启用时只加规则；未启用时先问再启用，
@@ -4598,6 +4630,10 @@ reserved_port_ok() {
         END { exit !f }'
 }
 
+reserved_ports_writable() {
+    [ -w /proc/sys/net/ipv4/ip_local_reserved_ports ]
+}
+
 # ss_port_lines proto port：输出 ss 里第 4 列端口精确等于 port 的监听行（proto=tcp|udp）
 ss_port_lines() {
     local proto="$1" p="$2" flag
@@ -4788,7 +4824,7 @@ maint_lock_manual() {
 #   第 1 段：reset-failed + 常规重启
 #   第 2 段：若第 1 段未恢复（且距上次同类自愈 ≥ 30 分钟冷却），触发对应服务的权限收敛/证书同步/配置重建/保留端口同步，再复验
 maint_watchdog() {
-    local unit stamp now last heal_ok old_pin new_pin
+    local unit stamp now last heal_ok old_pin new_pin checked=0 unhealthy=0
     maint_load
     [ "$MAINT_WATCHDOG" = "1" ] || return 0
     # 正在更新 / 安装时不插手，下一轮再看（maint_lock 内部已记日志）
@@ -4800,7 +4836,9 @@ maint_watchdog() {
         maint_unit_installed "$unit" || continue
         # 只管"设为开机自启"的服务：手动 disable 掉的不会被拉起
         systemctl is-enabled --quiet "$unit" 2>/dev/null || continue
+        checked=$((checked + 1))
         if maint_unit_healthy "$unit"; then continue; fi
+        unhealthy=$((unhealthy + 1))
         maint_log "[$(L '保活')] ${unit} $(L '状态异常（未运行或端口未监听），正在重启')"
         old_pin=""
         [ "$unit" = "nowhere" ] && [ -f "$TLS_PIN_FILE" ] && old_pin="$(cat "$TLS_PIN_FILE" 2>/dev/null || true)"
@@ -4853,6 +4891,13 @@ maint_watchdog() {
             notify_send "Service Down Alert: ${unit}" "${unit} is still unhealthy after stage-2 auto-repair. Run: journalctl -u ${unit} -n 50 --no-pager" || true
         fi
     done
+    if [ -t 1 ] && [ "$unhealthy" -eq 0 ]; then
+        if [ "$checked" -gt 0 ]; then
+            info "$(L '保活巡检通过：全部') ${checked} $(L '个已启用服务运行正常')"
+        else
+            info "$(L '暂无已启用的受管服务需要巡检')"
+        fi
+    fi
     return 0
 }
 
@@ -5249,8 +5294,10 @@ _doctor_check_perm() {
 }
 
 _svc_state_plain() {
-    if systemctl is-active --quiet "$1" 2>/dev/null; then printf 'active';
-    elif [ -f "/etc/systemd/system/$1.service" ]; then printf 'inactive';
+    local u="$1" inst="${2:-0}"
+    if systemctl is-active --quiet "$u" 2>/dev/null; then printf 'active';
+    elif [ -f "/etc/systemd/system/${u}.service" ]; then printf 'inactive';
+    elif [ "$inst" = "1" ]; then printf 'unconfigured';
     else printf 'not-installed'; fi
 }
 
@@ -5286,6 +5333,13 @@ _doctor_json() {
     local wd_st="inactive" mt_st="inactive"
     systemctl is-active --quiet adam-watchdog.timer 2>/dev/null && wd_st="active"
     systemctl is-active --quiet adam-maintain.timer 2>/dev/null && mt_st="active"
+    local nw_i=0 sn_i=0 xr_i=0 rm_i=0 cd_i=0 cf_i=0
+    [ -x "$BIN_PATH" ] && nw_i=1
+    [ -x "$SNELL_BIN" ] && sn_i=1
+    [ -x "$XRAY_BIN" ] && xr_i=1
+    realm_installed && rm_i=1
+    caddy_installed && cd_i=1
+    cf_tunnel_installed && cf_i=1
     cat << JEOF
 {
   "script_version": "$(_json_escape "$SCRIPT_VERSION")",
@@ -5300,17 +5354,41 @@ _doctor_json() {
     "maintain": "${mt_st}"
   },
   "services": {
-    "nowhere": { "installed": $([ -x "$BIN_PATH" ] && echo true || echo false), "role": "$(_json_escape "$(current_role)")", "state": "$(_svc_state_plain nowhere)" },
-    "snell": { "installed": $([ -x "$SNELL_BIN" ] && echo true || echo false), "state": "$(_svc_state_plain snell)" },
-    "xray": { "installed": $([ -x "$XRAY_BIN" ] && echo true || echo false), "nodes": $(xray_node_count), "state": "$(_svc_state_plain adam-xray)" },
-    "realm": { "installed": $(realm_installed && echo true || echo false), "state": "$(_svc_state_plain adam-realm)" },
-    "caddy": { "installed": $(caddy_installed && echo true || echo false), "state": "$(_svc_state_plain adam-caddy)" },
-    "cloudflared": { "installed": $(cf_tunnel_installed && echo true || echo false), "state": "$(_svc_state_plain adam-cloudflared)" }
+    "nowhere": { "installed": $([ "$nw_i" = "1" ] && echo true || echo false), "role": "$(_json_escape "$(current_role)")", "state": "$(_svc_state_plain nowhere "$nw_i")" },
+    "snell": { "installed": $([ "$sn_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain snell "$sn_i")" },
+    "xray": { "installed": $([ "$xr_i" = "1" ] && echo true || echo false), "nodes": $(xray_node_count), "state": "$(_svc_state_plain adam-xray "$xr_i")" },
+    "realm": { "installed": $([ "$rm_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-realm "$rm_i")" },
+    "caddy": { "installed": $([ "$cd_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-caddy "$cd_i")" },
+    "cloudflared": { "installed": $([ "$cf_i" = "1" ] && echo true || echo false), "state": "$(_svc_state_plain adam-cloudflared "$cf_i")" }
   },
   "perm_issue_count": ${#perm_list[@]},
   "perm_issues": [${perm_json}]
 }
 JEOF
+}
+
+_doctor_ss_managed() {
+    local proto="$1" flag out mports p lines=""
+    case "$proto" in tcp) flag="-tlnp" ;; udp) flag="-ulnp" ;; *) return 1 ;; esac
+    out="$(ss "$flag" 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || true)"
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # 容器或 hidepid=2 环境下 ss -p 不显示进程名，回退按已配置托管端口精确匹配
+    mports="$(managed_ports 2>/dev/null | awk -F/ -v pr="$proto" '$2 == pr && $1 ~ /^[0-9]+$/ {print $1}' | sort -un || true)"
+    if [ -n "$mports" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            out="$(ss_port_lines "$proto" "$p" || true)"
+            [ -n "$out" ] && lines="${lines:+${lines}$'\n'}${out}"
+        done <<< "$mports"
+        if [ -n "$lines" ]; then
+            printf '%s\n' "$lines" | awk '!seen[$0]++'
+            return 0
+        fi
+    fi
+    return 1
 }
 
 do_doctor() {
@@ -5321,9 +5399,22 @@ do_doctor() {
     step "$(L '一键诊断（只读，不改任何配置）')"
     divider
     echo "  $(L '管理脚本 :') ${SCRIPT_VERSION}$(L '（适配 Nowhere') ${TARGET_NW_VERSION}$(L '） 语言：')${ADAM_LANG}"
-    echo "  Nowhere  : $(if [ -x "$BIN_PATH" ]; then "$BIN_PATH" --version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) $(L '· 角色') $(current_role) · $(svc_state nowhere)"
+    local nw_v xr_v
+    if [ -x "$BIN_PATH" ]; then
+        nw_v="$(read_installed_version)"
+        [ -n "$nw_v" ] || nw_v="$("$BIN_PATH" --version 2>&1 | awk 'NR==1 {print $1}' || true)"
+    else
+        nw_v="$(L '未安装')"
+    fi
+    if [ -x "$XRAY_BIN" ]; then
+        xr_v="$(xray_installed_version)"
+        [ -n "$xr_v" ] || xr_v="$("$XRAY_BIN" version 2>&1 | awk 'NR==1 {print $2}' || true)"
+    else
+        xr_v="$(L '未安装')"
+    fi
+    echo "  Nowhere  : ${nw_v} $(L '· 角色') $(current_role) · $(svc_state nowhere)"
     echo "  Snell    : $([ -x "$SNELL_BIN" ] && { snell_installed_version; } || echo "$(L '未安装')") · $(svc_state snell)"
-    echo "  Xray     : $(if [ -x "$XRAY_BIN" ]; then "$XRAY_BIN" version 2>&1 | awk 'NR==1' || true; else L '未安装'; fi) · $(svc_state adam-xray)"
+    echo "  Xray     : ${xr_v} · $(svc_state adam-xray)"
     echo "  Realm    : $(realm_state_text)"
     echo "  $(L '域名反代') : $(proxy_state_text)"
     if [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ]; then info "$(L '快捷命令 adam：正常（指向') ${MANAGER_PATH}$(L '）')"; else warn "$(L '快捷命令 adam 不可用：请执行') ${MANAGER_PATH} shortcuts $(L '或重新运行安装脚本')"; fi
@@ -5338,8 +5429,8 @@ do_doctor() {
     echo ""
     info "$(L '监听端口（ss）：')"
     if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）')"
-        ss -ulnp 2>/dev/null | grep -E 'nowhere|snell|xray|realm|caddy' || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）')"
+        _doctor_ss_managed tcp || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 TCP 监听）')"
+        _doctor_ss_managed udp || echo "  $(L '（无 Nowhere/Snell/Xray/Realm/Caddy 的 UDP 监听）')"
     else
         warn "$(L 'ss 工具缺失，无法列出监听端口（请安装 iproute2）')"
     fi
@@ -5404,7 +5495,9 @@ do_doctor() {
         fi
     fi
     if command -v ufw >/dev/null 2>&1; then
-        echo "  $(L '防火墙'): $(ufw status 2>/dev/null | awk 'NR==1' || true)"
+        local _ufw_line
+        _ufw_line="$(ufw status 2>/dev/null | awk 'NR==1' || true)"
+        echo "  $(L '防火墙'): ${_ufw_line:-$(L '不可用（容器/内核受限）')}"
     else
         echo "  $(L '防火墙'): $(L '未安装')"
     fi
@@ -6626,14 +6719,25 @@ build_egress_info() {
     EGRESS_URL="egress://${SHARED_KEY}@${host_part}/${carrier}:${port}?${query}"
 }
 
-# 供 probe 使用的 Vector URL（不需要 in=）
+# 供 probe 使用的 Vector URL（不需要 in=）；传入 --local 时优先走本机回环地址（绕过云 VPS NAT 无回流）
 build_probe_vector_url() {
-    local host host_part port carrier query
-    host="${PUBLIC_HOST:-}"
-    [[ -z "$host" ]] && host="$(detect_public_host)"
-    if [[ -z "$host" ]]; then
-        warn "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
-        return 1
+    local local_mode=0 host host_part port carrier query
+    [ "${1:-}" = "--local" ] && local_mode=1
+    if [ "$local_mode" = "1" ]; then
+        if [ -n "${LISTEN_HOST:-}" ] && [ "$LISTEN_HOST" != "*" ] && [ "$LISTEN_HOST" != "0.0.0.0" ] && [ "$LISTEN_HOST" != "::" ] && [ "$LISTEN_HOST" != "[::]" ]; then
+            host="$LISTEN_HOST"
+        elif [ "${TCP_FAMILY:-}" = "6" ] || { ! has_tcp && [ "${UDP_FAMILY:-}" = "6" ]; }; then
+            host="::1"
+        else
+            host="127.0.0.1"
+        fi
+    else
+        host="${PUBLIC_HOST:-}"
+        [[ -z "$host" ]] && host="$(detect_public_host)"
+        if [[ -z "$host" ]]; then
+            warn "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
+            return 1
+        fi
     fi
     host_part="$(format_host_for_url "$host")"
     carrier="${VECTOR_CARRIER:-tcp}"
@@ -6679,20 +6783,20 @@ get_fingerprint_from_journal() {
 }
 
 # 纯获取指纹（64 位小写 hex，无冒号），不打印不警告，供 pin= 拼接用
-# 顺序：官方 nowhere fingerprint（自动处理 Morph）-> 启动日志兜底 -> openssl s_client
-# 纯 UDP 时没有 TCP/TLS 监听，第一步和第三步都不可用，只剩日志兜底。
+# v8.7 顺序：优先按当前运行 MainPID 读启动日志（零网络建连、不向 nowhere 日志刷 unexpected-eof 报错）
+# -> 官方 nowhere fingerprint（自动处理 Morph）-> openssl s_client（仅 morph=0）
 get_tls_fingerprint() {
     [[ "$TLS_MODE" != "1" ]] && return 1
-    # 单次展示流程内缓存：do_show_config 一次调 4 次，服务刚重启/指纹暂不可读时每次 timeout 8 会叠加卡顿
+    # 单次展示流程内缓存：调用方在父 shell 预热 _CACHED_TLS_FP 后，子 shell 可直接命中
     if [ -n "${_CACHED_TLS_FP:-}" ]; then printf '%s' "$_CACHED_TLS_FP"; return 0; fi
     local jfp
+    jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
+    if [ -n "$jfp" ]; then
+        _CACHED_TLS_FP="$jfp"
+        printf '%s' "$jfp"
+        return 0
+    fi
     if ! has_tcp; then
-        jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
-        if [ -n "$jfp" ]; then
-            _CACHED_TLS_FP="$jfp"
-            printf '%s' "$jfp"
-            return 0
-        fi
         return 1
     fi
     local port probe_host="127.0.0.1"
@@ -6711,12 +6815,6 @@ get_tls_fingerprint() {
             echo "$fp"
             return 0
         fi
-    fi
-    jfp="$(get_fingerprint_from_journal 2>/dev/null || true)"
-    if [ -n "$jfp" ]; then
-        _CACHED_TLS_FP="$jfp"
-        printf '%s' "$jfp"
-        return 0
     fi
     # Morph 开启时 TLS 包在 Morph 信封里，openssl s_client 不可能握手成功，
     # 旧版会在这里白等 5 轮（最长约 45 秒）再失败
@@ -6870,10 +6968,13 @@ verify_shortcuts() {
 }
 
 install_shortcuts() {
-    step "$(L '安装快捷命令')"
-    divider
+    local mode="${1:-}"
+    if [ "$mode" != "--no-header" ] && [ "$mode" != "--quiet" ]; then
+        step "$(L '安装快捷命令')"
+        divider
+    fi
     if ! ensure_manager_copy; then
-        warn "$(L '快捷命令无法安装')"
+        [ "$mode" = "--quiet" ] || warn "$(L '快捷命令无法安装')"
         return 1
     fi
 
@@ -6900,16 +7001,31 @@ SHORTEOF
     done
     [ -x "$MANAGER_PATH" ] || missing=1
     if [ "$missing" = "1" ]; then
-        warn "$(L '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：')${MANAGER_PATH}"
+        [ "$mode" = "--quiet" ] || warn "$(L '快捷命令安装失败：请检查 /usr/local/bin 是否可写，并确认管理脚本副本存在：')${MANAGER_PATH}"
         return 1
     fi
 
-    success "$(L '快捷命令已安装完成')"
-    echo -e "  ${CYAN}adam${NC}   $(L '— 打开管理菜单')"
-    echo -e "  ${CYAN}zt${NC}     $(L '— 查看服务状态')"
-    echo -e "  ${CYAN}pz${NC}     $(L '— 查看节点/连接信息')"
-    echo -e "  ${CYAN}cxpz${NC}   $(L '— 重新修改配置')"
-    echo -e "  ${CYAN}cq${NC}     $(L '— 快速重启服务')"
+    if [ "$mode" != "--quiet" ]; then
+        success "$(L '快捷命令已安装完成')"
+        echo -e "  ${CYAN}adam${NC}   $(L '— 打开管理菜单')"
+        echo -e "  ${CYAN}zt${NC}     $(L '— 查看服务状态')"
+        echo -e "  ${CYAN}pz${NC}     $(L '— 查看节点/连接信息')"
+        echo -e "  ${CYAN}cxpz${NC}   $(L '— 重新修改配置')"
+        echo -e "  ${CYAN}cq${NC}     $(L '— 快速重启服务')"
+    fi
+    return 0
+}
+
+# 任意组件安装或首次打开主菜单时自动确保 /usr/local/bin/adam 就绪（已就绪或目录不可写时静默跳过）
+ensure_adam_shortcut() {
+    [ -x /usr/local/bin/adam ] && [ -x "$MANAGER_PATH" ] && return 0
+    local mgr_dir
+    mgr_dir="$(dirname "$MANAGER_PATH")"
+    [ -w /usr/local/bin ] && [ -w "$mgr_dir" ] || return 0
+    if install_shortcuts --quiet >/dev/null 2>&1; then
+        info "$(L '快捷命令已自动就绪：以后可直接输入 adam 打开管理菜单')"
+    fi
+    return 0
 }
 
 # ── 证书申请与自动续期（v2 新增/重构） ──────────────────────────
@@ -7626,10 +7742,28 @@ menu_status_summary() {
 
 show_menu() {
     clear 2>/dev/null || true
+    local b1_l b1_t b1_r b2_l b2_t b2_r
+    if [ "${ADAM_LANG:-zh}" = "en" ]; then
+        b1_l=14
+        b1_t="Adam Nowhere Portal Manager · v${SCRIPT_VERSION}"
+        b1_r=$((62 - b1_l - 31 - ${#SCRIPT_VERSION}))
+        b2_l=2
+        b2_t="Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · Proxy · Tuning"
+        b2_r=$((62 - b2_l - 50 - ${#TARGET_NW_VERSION} - ${#SNELL_MAJOR}))
+    else
+        b1_l=11
+        b1_t="Adam Nowhere Portal 一键管理脚本 · v${SCRIPT_VERSION}"
+        b1_r=$((62 - b1_l - 36 - ${#SCRIPT_VERSION}))
+        b2_l=4
+        b2_t="Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · 反代 · 调优"
+        b2_r=$((62 - b2_l - 47 - ${#TARGET_NW_VERSION} - ${#SNELL_MAJOR}))
+    fi
+    [ "$b1_r" -lt 0 ] && b1_r=0
+    [ "$b2_r" -lt 0 ] && b2_r=0
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         Adam Nowhere Portal $(L '一键管理脚本')                     ║"
-    echo "║  Nowhere ${TARGET_NW_VERSION} · Snell v${SNELL_MAJOR} · Xray · Realm · $(L '反代') · $(L '调优') ║"
+    printf '║%*s%s%*s║\n' "$b1_l" "" "$b1_t" "$b1_r" ""
+    printf '║%*s%s%*s║\n' "$b2_l" "" "$b2_t" "$b2_r" ""
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     menu_time_ip
@@ -8528,6 +8662,8 @@ do_install() {
 
     step "$(L '第 12 步：生成连接信息')"
     divider
+    _CACHED_TLS_FP=""
+    [ "$TLS_MODE" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
     build_client_links
     build_vector_info
     build_egress_info
@@ -8536,7 +8672,7 @@ do_install() {
 
     step "$(L '第 13 步：安装快捷命令')"
     divider
-    install_shortcuts || true
+    install_shortcuts --no-header || true
     if ! verify_shortcuts; then
         warn "$(L '安装完成，但快捷命令校验未通过（服务本身不受影响），请稍后执行 adam shortcuts 重新安装')"
     fi
@@ -8704,7 +8840,7 @@ CONFEOF
     echo -e "  $(L '日志 :') ${CYAN}journalctl -u nowhere -f${NC}"
     echo -e "  $(L '配置 :') ${CYAN}cat ${CONFIG_DIR}/config.txt${NC}"
     echo -e "  $(L '重启 :') ${CYAN}systemctl restart nowhere${NC}"
-    echo -e "  $(L '探测 :') ${CYAN}${MANAGER_PATH} probe${NC}$(L '（真实 TCP Flow 连通性测试）')"
+    echo -e "  $(L '探测 :') ${CYAN}adam probe${NC}$(L '（真实 TCP Flow 连通性测试）')"
     divider
 }
 
@@ -9530,6 +9666,7 @@ do_show_config() {
     if [ -f "$CONFIG_FILE" ]; then
         load_saved_config
         _CACHED_TLS_FP=""
+        [ "${TLS_MODE:-}" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
         # 每次查看都按当前保存参数重新生成（含最新自签 pin），避免展示过期指纹的旧串
         NOWHERE_PORTAL="$(build_portal_url)"
         build_client_links
@@ -9607,24 +9744,8 @@ do_genkey() {
     fi
 }
 
-do_probe() {
-    step "$(L '连通性探测 probe（真实 TCP Flow，不发送业务数据）')"
-    divider
-    [ -x "$BIN_PATH" ] || error "$(L '未找到 Nowhere 二进制，请先安装')"
-    if [ "$(current_role)" = "egress" ]; then
-        info "$(L '本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行')"
-        return 0
-    fi
-    load_saved_config
-    is_valid_key "$SHARED_KEY" || error "$(L '当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置')"
-    local vector_url target
-    vector_url="$(build_probe_vector_url || true)"
-    [ -n "$vector_url" ] || error "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
-    read -rp "$(L '目标地址 host:port（回车默认 example.com:443）:') " target || { [ -n "$target" ] || return 1; }
-    target=${target:-example.com:443}
-    info "Vector: ${vector_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
-    info "Target: ${target}"
-    # v8.6：HANDSHAKE_TIMEOUT=auto 时不传 NOW_HANDSHAKE_TIMEOUT（避免把字面量 auto 传给 nowhere 导致启动拒绝）
+_run_nowhere_probe_cmd() {
+    local vurl="$1" tgt="$2"
     (
         export NOW_MORPH_TCP_PRELUDE="${MORPH_TCP_PRELUDE:-fade}"
         export NOW_MORPH_UDP_PRELUDE="${MORPH_UDP_PRELUDE:-fade}"
@@ -9633,8 +9754,72 @@ do_probe() {
         else
             export NOW_HANDSHAKE_TIMEOUT="$HANDSHAKE_TIMEOUT"
         fi
-        "$BIN_PATH" probe "$vector_url" "$target"
-    ) || warn "$(L '探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达')"
+        "$BIN_PATH" probe "$vurl" "$tgt"
+    )
+}
+
+do_probe() {
+    step "$(L '连通性探测 probe（真实 TCP Flow，不发送业务数据）')"
+    divider
+    [ -x "$BIN_PATH" ] || error "$(L '未找到 Nowhere 二进制，请先安装')"
+    if [ "$(current_role)" = "egress" ]; then
+        info "$(L '本机是 Egress 角色：probe 需要以 Vector 身份连接 Portal，请在 Portal 机或客户端机上执行')"
+        return 0
+    fi
+    local local_mode=0 arg target=""
+    for arg in "$@"; do
+        case "$arg" in
+            --local|-l) local_mode=1 ;;
+            *) [ -z "$target" ] && target="$arg" ;;
+        esac
+    done
+    load_saved_config
+    is_valid_key "$SHARED_KEY" || error "$(L '当前密钥不符合 v3 规范，无法探测，请先用 Nowhere 菜单 3 重新配置')"
+    _CACHED_TLS_FP=""
+    [ "${TLS_MODE:-}" = "1" ] && _CACHED_TLS_FP="$(get_tls_fingerprint 2>/dev/null || true)"
+    local vector_url
+    if [ "$local_mode" = "1" ]; then
+        vector_url="$(build_probe_vector_url --local || true)"
+    else
+        vector_url="$(build_probe_vector_url || true)"
+    fi
+    [ -n "$vector_url" ] || error "$(L '未能确定公网地址，无法生成 Vector 探针链接')"
+    if [ -z "$target" ]; then
+        if [ -t 0 ]; then
+            read -rp "$(L '目标地址 host:port（回车默认 example.com:443）:') " target || { [ -n "$target" ] || return 1; }
+        else
+            read -r target 2>/dev/null || true
+        fi
+    fi
+    target=${target:-example.com:443}
+    info "Vector: ${vector_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
+    info "Target: ${target}"
+    # v8.6：HANDSHAKE_TIMEOUT=auto 时不传 NOW_HANDSHAKE_TIMEOUT（避免把字面量 auto 传给 nowhere 导致启动拒绝）
+    local probe_out="" probe_rc=0
+    probe_out="$(_run_nowhere_probe_cmd "$vector_url" "$target" 2>&1)" || probe_rc=$?
+    [ -n "$probe_out" ] && printf '%s\n' "$probe_out"
+    if [ "$probe_rc" -eq 0 ]; then
+        return 0
+    fi
+    # v8.7：公网探测因云厂商 NAT 无回流（Hairpin NAT）失败时，在 tls=1 下自动回环自测定位故障边界
+    if [ "$local_mode" = "0" ] && [[ "$probe_out" == *"TRANSPORT_FAILED"* ]]; then
+        if [ "${TLS_MODE:-}" = "1" ]; then
+            local local_url
+            local_url="$(build_probe_vector_url --local || true)"
+            if [ -n "$local_url" ] && [ "$local_url" != "$vector_url" ]; then
+                info "$(L '公网地址本机回连超时（云厂商 NAT 常见无回流限制），自动改用本机回环地址复测...')"
+                info "Vector: ${local_url/$SHARED_KEY/$(mask_secret "$SHARED_KEY")}"
+                if _run_nowhere_probe_cmd "$local_url" "$target"; then
+                    success "$(L '本机回环探测通过：Portal 服务端与出口链路均正常（公网回连失败通常仅因云厂商 NAT 无回流或安全组未放行）')"
+                    return 0
+                fi
+            fi
+        else
+            info "$(L '提示：若本机处于 AWS/GCP/阿里云等 NAT 环境，公网地址本机回连常因无回流失败，请从客户端侧验证或检查云安全组端口')"
+        fi
+    fi
+    warn "$(L '探测未成功（Result 非 OK）。常见原因：Portal 出口不可达、没有可用的 Egress（会等到 Flow 建立超时）、对端 Morph/pin/密钥不一致、目标本身不可达')"
+    return 1
 }
 
 # svc_restart_wait UNIT [SECONDS] [LOG_LINES]：重启 → 等待 → 仍未 active 则打日志并返回 1（M14）
@@ -10849,7 +11034,7 @@ snell_install() {
     if snell_is_prerelease "$latest"; then
         warn "$(L '当前安装的是测试版') ${latest}$(L '：客户端需使用支持该版本的 Surge 测试渠道，协议在正式版前仍可能变动，两端要同步')"
     fi
-    ensure_manager_copy >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     snell_show_config
     return 0
 }
@@ -10993,7 +11178,13 @@ snell_health_check() {
     if [ -n "$port" ]; then
         if tcp_listening "$port"; then hc_line 0 "TCP ${port} $(L '正在监听')"; else hc_line 1 "TCP ${port} $(L '没有在监听')"; fi
         if [ "$port" -ge 1024 ]; then
-            if reserved_port_ok "$port"; then hc_line 0 "$(L '端口') ${port} $(L '已加入内核保留端口')"; else hc_line 1 "$(L '端口') ${port} $(L '未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）')"; fi
+            if reserved_port_ok "$port"; then
+                hc_line 0 "$(L '端口') ${port} $(L '已加入内核保留端口')"
+            elif ! reserved_ports_writable; then
+                hc_line 2 "$(L '内核保留端口在当前容器/受限内核中只读，已跳过检查')"
+            else
+                hc_line 1 "$(L '端口') ${port} $(L '未加入内核保留端口（可能被出站连接占用导致重启后绑定失败）')"
+            fi
         fi
         if ufw_active; then
             if fw_is_allowed "$port" tcp; then hc_line 0 "$(L '防火墙已放行') ${port}/tcp"; else hc_line 1 "$(L '防火墙未放行') ${port}/tcp"; fi
@@ -11012,7 +11203,7 @@ snell_health_check() {
     local xp
     while IFS= read -r xp; do
         if snell_extra_healthy "$xp"; then hc_line 0 "$(L '附加端口') ${xp} $(L '运行并监听中')"; else hc_line 1 "$(L '附加端口') ${xp} $(L '未运行或没有在监听')"; fi
-        if [ "$xp" -ge 1024 ] && ! reserved_port_ok "$xp"; then hc_line 1 "$(L '附加端口') ${xp} $(L '未加入内核保留端口')"; fi
+        if [ "$xp" -ge 1024 ] && ! reserved_port_ok "$xp" && reserved_ports_writable; then hc_line 1 "$(L '附加端口') ${xp} $(L '未加入内核保留端口')"; fi
         if ufw_active && ! fw_is_allowed "$xp" tcp; then hc_line 1 "$(L '防火墙未放行附加端口') ${xp}/tcp"; fi
     done < <(snell_extra_ports)
     if grep -q '^Restart=always' "$SNELL_SERVICE" 2>/dev/null; then hc_line 0 "$(L '服务单元已启用崩溃自动拉起')"; else hc_line 1 "$(L '服务单元未启用 Restart=always（旧版单元）')"; fi
@@ -12589,12 +12780,15 @@ xray_add_ss() {
     local port tag listen name method="2022-blake3-aes-128-gcm" bytes=16 pass ans
     echo "$(L 'Shadowsocks 2022 加密方式：')"
     echo "  1) $(L '2022-blake3-aes-128-gcm（默认）  2')) 2022-blake3-aes-256-gcm  3) 2022-blake3-chacha20-poly1305"
-    read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || { [ -n "$ans" ] || return 1; }
-    case "${ans:-1}" in
-        2) method="2022-blake3-aes-256-gcm"; bytes=32 ;;
-        3) method="2022-blake3-chacha20-poly1305"; bytes=32 ;;
-        *) : ;;
-    esac
+    while true; do
+        read -rp "$(L '选择') [$(L '1/2/3，默认1')]: " ans || { [ -n "$ans" ] || return 1; }
+        case "${ans:-1}" in
+            1) method="2022-blake3-aes-128-gcm"; bytes=16; break ;;
+            2) method="2022-blake3-aes-256-gcm"; bytes=32; break ;;
+            3) method="2022-blake3-chacha20-poly1305"; bytes=32; break ;;
+            *) warn "$(L '无效选择')" ;;
+        esac
+    done
     while true; do
         xray_new_node_begin "$(random_free_port)" ss SS2022 || return 1
         if udp_listening "$XN_PORT"; then
@@ -12694,8 +12888,16 @@ xray_show_node() {
         echo "  $(L '端口:') ${N_PORT}"
         case "$N_TYPE" in
             vision|xhttp-reality)
+                local _pqv_disp=""
+                if [ -n "${N_PQV:-}" ]; then
+                    if [ "${#N_PQV}" -gt 32 ]; then
+                        _pqv_disp="    ML-DSA-65(pqv): ${N_PQV:0:12}...${N_PQV: -8} (${#N_PQV}B)"
+                    else
+                        _pqv_disp="    ML-DSA-65(pqv): ${N_PQV}"
+                    fi
+                fi
                 echo "  $(L '伪装站点:') ${N_SNI}    uTLS(fp): ${N_FP:-chrome}    $(L '公钥')(pbk): ${N_PBK}"
-                echo "  shortIds: ${N_SIDS:-$N_SID}${N_SPX:+    spiderX: ${N_SPX}}${N_PQV:+    ML-DSA-65(pqv): ${N_PQV}}"
+                echo "  shortIds: ${N_SIDS:-$N_SID}${N_SPX:+    spiderX: ${N_SPX}}${_pqv_disp}"
                 ;;
             xhttp-cdn|xhttp-tls)
                 echo "  uTLS(fp): ${N_FP:-chrome}"
@@ -12730,7 +12932,11 @@ xray_show_node() {
         fi
     fi
     if command -v qrencode >/dev/null 2>&1 && [ -n "$link" ] && [ -t 1 ]; then
-        qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null || true
+        if [ "${#link}" -gt 1200 ]; then
+            info "$(L '分享链接较长（含后量子参数，共') ${#link} $(L '字符），已跳过二维码展示，请直接复制上方文本链接导入')"
+        else
+            qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null || true
+        fi
     fi
     return 0
 }
@@ -12972,6 +13178,7 @@ xray_install() {
     xray_save_state
     maint_ask_script_auto
     maint_install_timers || true
+    ensure_adam_shortcut || true
     success "Xray $(xray_installed_version) $(L '安装完成')"
     if [ "$(xray_node_count)" -gt 0 ] || [ "$(xray_fwd_enabled_count)" -gt 0 ]; then
         xray_sync_reality_snis || true
@@ -13100,6 +13307,7 @@ xray_health_check() {
     health_check_common adam-xray
     if out="$(xray_test_conf)"; then hc_line 0 "$(L '配置校验通过')"; else hc_line 1 "$(L '配置校验失败:') $(printf '%s\n' "$out" | tail -n 1)"; fi
     local -a _ntags=()
+    local _rsv_ro_warned=0
     while IFS= read -r tag; do [ -n "$tag" ] && _ntags+=("$tag"); done < <(xray_node_tags)
     for tag in "${_ntags[@]}"; do
         xray_node_load "$tag" || continue
@@ -13109,7 +13317,14 @@ xray_health_check() {
             if udp_listening "$N_PORT"; then hc_line 0 "[${tag}] UDP ${N_PORT} $(L '正在监听')"; else hc_line 1 "[${tag}] UDP ${N_PORT} $(L '没有在监听')"; fi
             if ufw_active && ! fw_is_allowed "$N_PORT" udp; then hc_line 1 "[${tag}] $(L '防火墙未放行') ${N_PORT}/udp"; fi
         fi
-        if [[ "$N_PORT" =~ ^[0-9]+$ ]] && [ "$N_PORT" -ge 1024 ] && ! reserved_port_ok "$N_PORT"; then hc_line 1 "[${tag}] $(L '端口') ${N_PORT} $(L '未加入内核保留端口')"; fi
+        if [[ "$N_PORT" =~ ^[0-9]+$ ]] && [ "$N_PORT" -ge 1024 ] && ! reserved_port_ok "$N_PORT"; then
+            if reserved_ports_writable; then
+                hc_line 1 "[${tag}] $(L '端口') ${N_PORT} $(L '未加入内核保留端口')"
+            elif [ "$_rsv_ro_warned" = "0" ]; then
+                hc_line 2 "$(L '内核保留端口在当前容器/受限内核中只读，已跳过检查')"
+                _rsv_ro_warned=1
+            fi
+        fi
         if ufw_active && ! fw_is_allowed "$N_PORT" tcp; then hc_line 1 "[${tag}] $(L '防火墙未放行') ${N_PORT}/tcp"; fi
         cert_lbl=""
         if [ "$N_TYPE" = "xhttp-tls" ]; then cert_lbl="$(L '证书剩余')";
@@ -15058,6 +15273,7 @@ realm_install() {
     echo "$tag" > "$REALM_VERSION_FILE"
     realm_fix_perms
     maint_install_timers >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     success "$(L 'Realm ')${tag}$(L ' 安装完成（')$(${REALM_BIN} --version 2>&1 | awk "NR==1" || true)$(L '）')"
 }
 
@@ -16459,7 +16675,7 @@ FWDEOF
     [ "$proto" != "tcp" ] && fw_specs+=("${lport}/udp")
     fw_allow_for_service "${fw_specs[@]}"
     reserved_ports_sync || true
-    success "$(L '转发规则 ')${id}$(L ' 已生效：')${lip}:${lport} -> ${rhost}:${rport}"
+    success "$(L '转发规则 ')${id}$(L ' 已生效：')$(format_host_for_url "$lip"):${lport} -> $(format_host_for_url "$rhost"):${rport}"
 }
 
 xray_fwd_list() {
@@ -16481,7 +16697,7 @@ xray_fwd_list() {
             else
                 status="${YELLOW}$(L '停用')${NC}"
             fi
-            echo -e "  ${BOLD}${idx})${NC} [${FWD_ID}] ${status}  ${CYAN}${FWD_LIP}:${FWD_LPORT}${NC} -> ${GREEN}${FWD_RHOST}:${FWD_RPORT}${NC} ${tags}${FWD_REMARK:+  # ${FWD_REMARK}}"
+            echo -e "  ${BOLD}${idx})${NC} [${FWD_ID}] ${status}  ${CYAN}$(format_host_for_url "$FWD_LIP"):${FWD_LPORT}${NC} -> ${GREEN}$(format_host_for_url "$FWD_RHOST"):${FWD_RPORT}${NC} ${tags}${FWD_REMARK:+  # ${FWD_REMARK}}"
         )
     done < <(xray_fwd_rule_files)
     if [ "$idx" -eq 0 ]; then
@@ -16905,8 +17121,8 @@ caddy_write_main_config() {
     caddy_load_state
     {
         printf '{\n'
-        printf '    admin off\n'
-        [ -n "${CADDY_EMAIL:-}" ] && printf '    email %s\n' "$CADDY_EMAIL"
+        printf '\tadmin off\n'
+        [ -n "${CADDY_EMAIL:-}" ] && printf '\temail %s\n' "$CADDY_EMAIL"
         printf '}\n\n'
         printf 'import %s/*.caddy\n' "$CADDY_SITES_DIR"
     } > "$CADDY_FILE"
@@ -16968,31 +17184,31 @@ caddy_render_site() {
         local tmpf
         tmpf="$(mktemp "${CADDY_SITES_DIR}/.${id}.XXXXXX")" || exit 1
         {
-            echo "# id=${id} mode=${SITE_MODE:-https} remark=${SITE_REMARK:-}"
-            echo "${addr} {"
-            echo "    encode zstd gzip"
+            printf '# id=%s mode=%s remark=%s\n' "$id" "${SITE_MODE:-https}" "${SITE_REMARK:-}"
+            printf '%s {\n' "$addr"
+            printf '\tencode zstd gzip\n'
             if [ "${SITE_MODE:-https}" = "remote" ]; then
-                echo "    reverse_proxy ${up} {"
-                echo "        header_up Host {upstream_hostport}"
-                echo "        header_up X-Real-IP {remote_host}"
+                printf '\treverse_proxy %s {\n' "$up"
+                printf '\t\theader_up Host {upstream_hostport}\n'
+                printf '\t\theader_up X-Real-IP {remote_host}\n'
                 if [ "${SITE_INSECURE:-0}" = "1" ]; then
-                    echo "        transport http {"
-                    echo "            tls_insecure_skip_verify"
-                    echo "        }"
+                    printf '\t\ttransport http {\n'
+                    printf '\t\t\ttls_insecure_skip_verify\n'
+                    printf '\t\t}\n'
                 fi
-                echo "    }"
+                printf '\t}\n'
             else
-                echo "    reverse_proxy ${up} {"
-                echo "        flush_interval -1"
-                echo "        header_up X-Real-IP {remote_host}"
+                printf '\treverse_proxy %s {\n' "$up"
+                printf '\t\tflush_interval -1\n'
+                printf '\t\theader_up X-Real-IP {remote_host}\n'
                 if [ "${SITE_INSECURE:-0}" = "1" ]; then
-                    echo "        transport http {"
-                    echo "            tls_insecure_skip_verify"
-                    echo "        }"
+                    printf '\t\ttransport http {\n'
+                    printf '\t\t\ttls_insecure_skip_verify\n'
+                    printf '\t\t}\n'
                 fi
-                echo "    }"
+                printf '\t}\n'
             fi
-            echo "}"
+            printf '}\n'
         } > "$tmpf" || { rm -f "$tmpf"; exit 1; }
         chmod 640 "$tmpf"
         mv -f "$tmpf" "$caddy_file"
@@ -17145,6 +17361,7 @@ caddy_install() {
         fi
     fi
     maint_install_timers >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     success "$(L 'Caddy 安装完成') (${tag})"
 }
 
@@ -17213,7 +17430,7 @@ caddy_add_site() {
         3)
             mode="http"
             while true; do
-                read -rp "$(L '本机监听端口 (1-65535): ') [default 80]: " port || { [ -n "$port" ] || return 1; }
+                read -rp "$(L '本机监听端口 (1-65535，回车默认 80): ')" port || { [ -n "$port" ] || return 1; }
                 port="${port:-80}"
                 validate_port "$port" && { port=$((10#$port)); break; }
                 warn "$(L '端口不合法')"
@@ -17621,6 +17838,7 @@ cf_tunnel_install() {
             error "$(L '更新失败')"
         fi
     fi
+    ensure_adam_shortcut || true
     success "$(L 'cloudflared 安装完成') (${tag})"
 }
 
@@ -17982,6 +18200,7 @@ USAGEEOF
 
 run_interactive_menu() {
     ask_lang_first_time
+    ensure_adam_shortcut || true
     while true; do
         show_menu
         case "$MENU_CHOICE" in
@@ -18018,7 +18237,7 @@ case "$ACTION" in
     select-version) do_select_version ;;
     rollback)   do_rollback ;;
     generate-key) do_genkey ;;
-    probe)      do_probe ;;
+    probe)      do_probe "${ACTION_ARGS[@]}" ;;
     cert-status) do_cert_status ;;
     install-egress) do_install_egress_service ;;
     snell)      snell_cli "${ACTION_ARGS[@]}" ;;

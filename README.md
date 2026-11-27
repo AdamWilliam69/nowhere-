@@ -1,10 +1,10 @@
 [English](/README.md) | [简体中文](/README.zh_CN.md)
 
-# Adam VPS Manager (v8.6)
+# Adam VPS Manager (v8.7)
 
 [![CI — Build, Lint & Test](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml/badge.svg)](https://github.com/AdamWilliam69/nowhere-/actions/workflows/ci.yml)
 
-An all-in-one interactive VPS management script for Linux. From a single menu (or direct CLI subcommands) it installs, hardens, and maintains **Nowhere (v3.3.0 / NW3)**, **Snell v6**, **Xray (SS2022 / VLESS REALITY / XHTTP / dokodemo-door)**, **Realm**, and **Domain Reverse Proxy (Caddy / Cloudflare Tunnel)** — together with UFW firewall, Fail2ban, system & network tuning, encrypted backup/restore, alert notifications, multi-client config export, and two-stage self-healing maintenance.
+An all-in-one interactive VPS management script for Linux. From a single menu (or direct CLI subcommands) it installs, hardens, and maintains **Nowhere (NW3)**, **Snell v6**, **Xray (SS2022 / VLESS REALITY / XHTTP / dokodemo-door)**, **Realm**, and **Domain Reverse Proxy (Caddy / Cloudflare Tunnel)** — together with UFW firewall, Fail2ban, system & network tuning, encrypted backup/restore, alert notifications, multi-client config export, and two-stage self-healing maintenance.
 
 The interactive UI supports both **Simplified Chinese** and **English** (`adam lang zh` / `adam lang en`, or `ADAM_LANG=en adam`).
 
@@ -18,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AdamWilliam69/nowhere-/main/
 
 > Use the `bash <(...)` form above, not `curl ... | bash`. With a pipe, the script's own text is fed in as keyboard input and the interactive wizards break.
 
-After installation the script installs itself as `/usr/local/bin/adam-nowhere-manager.sh` (with shortcut `/usr/local/bin/adam`). From then on, run:
+On first run (or after installing any component), the script automatically installs itself as `/usr/local/bin/adam-nowhere-manager.sh` (with shortcut `/usr/local/bin/adam`). From then on, run:
 
 ```bash
 adam
@@ -42,25 +42,18 @@ The XanMod kernel is `x86_64` only and cannot be used in container-based virtual
 
 ---
 
-## What's New in v8.6
+## What's New in v8.7
 
-- **CSPRNG Engine**: Replaced all `$RANDOM` usage with cryptographic randomness (`csprng_hex`, unbiased `csprng_int`, `csprng_alnum` with pure-awk fallback, `csprng_short_id`, `csprng_url_path`). `random_free_port` avoids both TCP/UDP listeners and all managed service ports.
-- **Protocol Anti-Fingerprinting & Post-Quantum**:
-  - **Xray**: REALITY nodes generate 2–3 variable-length even-hex `shortIds`, CSPRNG `spiderX`, `"maxTimeDiff": 60000`, optional **ML-DSA-65 post-quantum signatures** (`mldsa65Seed` / `&pqv=`), PQ-safe `uTLS` fingerprint picker (`chrome` / `firefox` / `safari`), and **RTT latency-ranked SNI selection** across verified TLS 1.3 + H2 targets; XHTTP nodes randomize `xPaddingBytes` (`&extra=`) and realistic multi-segment paths; CDN self-signed certificates use ECDSA P-256 + CSPRNG serial + 365–730 day validity; supports **in-place node hot-rotation** (`adam xray edit`).
-  - **Snell v6**: Variable-length 32–48 char CSPRNG PSK (`A-Za-z0-9_-`).
-  - **Nowhere v3.3.0**: `HANDSHAKE_TIMEOUT` defaults to `auto` (omits env var to use official key-derived 3–30s timeout), still compatible with custom durations.
-  - **Realm**: WS/WSS default path uses realistic multi-segment CSPRNG paths.
-- **Supply-Chain & Runtime Security**:
-  - Unified `secure_curl` (`--proto '=https' --tlsv1.2`); optional read-only `GITHUB_TOKEN` injected strictly for `https://api.github.com/*` via `curl -K` private fd (never exposed in `ps` or sent to third-party hosts).
-  - Official Release SHA-256 / SHA-512 + native-architecture ELF header verification across Nowhere, Xray, Snell, Realm, Caddy, and cloudflared; official `dlc.dat` + `.sha256sum` verification for Xray geo data.
-  - Script self-update enforces **[`nowhere-install.sh.sha256`](nowhere-install.sh.sha256)** verification (rejects tampering immediately; optional strict mode `MAINT_SCRIPT_STRICT_SHA=1`).
-  - All 6 systemd service units enforce sandbox hardening (`NoNewPrivileges`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictNamespaces`, `LockPersonality`, `RestrictSUIDSGID`).
-  - Optional **AES-256-CBC (PBKDF2 600k iter)** encrypted backup (`adam backup --encrypt` -> `.tgz.enc`) and transparent auto-decrypting `adam restore`.
-- **Observability, Self-Healing & Multi-Client Export**:
-  - **Two-stage Watchdog self-healing**: failed normal restarts automatically run component repair (permissions, cert sync, config rebuild, reserved ports) with 30-min cooldown.
-  - **Ops Alert Notifications (`adam notify`)**: Telegram Bot, Bark, and HTTPS Webhook alerts on stage-2 self-heal, service down, auto-update rollbacks, cert expiry `<14d`, Nowhere `tls=1` pin change, and script updates.
-  - **NTP clock sync check** (protects REALITY `maxTimeDiff: 60000`) + **`adam doctor --json`** structured diagnostics.
-  - **Multi-client config export (`adam export mihomo|singbox|surge`)** with Mihomo REALITY `client-fingerprint` compatibility guard.
+- **Seamless First-Run & Multi-Component Experience**:
+  - Automatic `/usr/local/bin/adam` shortcut bootstrap on first interactive menu launch and across every component installer (Snell, Xray, Realm, Caddy, Cloudflare Tunnel, Nowhere).
+  - Enhanced `adam probe [target] [--local]` with CLI arguments, non-TTY defaults, and automatic loopback (`127.0.0.1`) diagnosis when cloud NAT lacks hairpinning; journal-first TLS fingerprint lookup eliminates spurious `tls connection failed` log noise.
+  - Container / `hidepid` resilient diagnostics: `adam doctor` falls back to managed-port matching when `ss -p` hides process names, formats concise versions, reports restricted `ufw` clearly, and distinguishes `unconfigured` vs `not-installed` in `--json`; `xray`/`snell` health checks downgrade read-only `ip_local_reserved_ports` cleanly.
+  - Strict cipher validation in `xray_add_ss`, compact ML-DSA-65 `pqv` summary & QR length guard (`>1200` chars), tab-formatted Caddyfile (0 Caddy format warnings), bracketed `[::]:PORT` Xray forward display, aligned bilingual menu banner with script version, and interactive `adam watchdog` summary.
+- **v8.6 Core Architecture (Included)**:
+  - **CSPRNG Engine**: Cryptographic randomness across keys, ports, shortIds, paths, and Snell 32–48 char PSKs.
+  - **Protocol Anti-Fingerprinting & Post-Quantum**: Xray REALITY multi-shortIds, CSPRNG `spiderX`, `maxTimeDiff: 60000`, ML-DSA-65 (`&pqv=`), RTT latency-ranked SNI selection, XHTTP `xPaddingBytes`, ECDSA P-256 self-signed certs, and `adam xray edit` hot-rotation; Nowhere `HANDSHAKE_TIMEOUT=auto`.
+  - **Supply-Chain & Runtime Security**: `secure_curl` (HTTPS TLS ≥ 1.2), official SHA-256/SHA-512 + native ELF verification (minified GitHub JSON & `mawk` compatible), systemd 8-directive sandbox hardening, `.sha256`-verified self-update, and AES-256-CBC (PBKDF2 600k) encrypted backups.
+  - **Observability & Self-Healing**: Two-stage Watchdog self-healing (30-min cooldown), `adam notify` (Telegram/Bark/Webhook), NTP sync check, `adam doctor --json`, and `adam export mihomo|singbox|surge`.
 
 ---
 
@@ -130,7 +123,7 @@ This repository keeps modular source files under `src/` and assembles the single
 ```bash
 ./scripts/build.sh                             # rebuild nowhere-install.sh & .sha256 from src/
 ./scripts/lint.sh                              # verify build sync, I18N, security invariants, 0-warning ShellCheck
-for t in tests/test_*.sh; do bash "$t"; done   # run all 5 automated test suites
+for t in tests/test_*.sh; do bash "$t"; done   # run all 6 automated test suites
 ```
 
 ---

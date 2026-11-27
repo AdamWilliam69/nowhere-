@@ -264,8 +264,8 @@ caddy_write_main_config() {
     caddy_load_state
     {
         printf '{\n'
-        printf '    admin off\n'
-        [ -n "${CADDY_EMAIL:-}" ] && printf '    email %s\n' "$CADDY_EMAIL"
+        printf '\tadmin off\n'
+        [ -n "${CADDY_EMAIL:-}" ] && printf '\temail %s\n' "$CADDY_EMAIL"
         printf '}\n\n'
         printf 'import %s/*.caddy\n' "$CADDY_SITES_DIR"
     } > "$CADDY_FILE"
@@ -327,31 +327,31 @@ caddy_render_site() {
         local tmpf
         tmpf="$(mktemp "${CADDY_SITES_DIR}/.${id}.XXXXXX")" || exit 1
         {
-            echo "# id=${id} mode=${SITE_MODE:-https} remark=${SITE_REMARK:-}"
-            echo "${addr} {"
-            echo "    encode zstd gzip"
+            printf '# id=%s mode=%s remark=%s\n' "$id" "${SITE_MODE:-https}" "${SITE_REMARK:-}"
+            printf '%s {\n' "$addr"
+            printf '\tencode zstd gzip\n'
             if [ "${SITE_MODE:-https}" = "remote" ]; then
-                echo "    reverse_proxy ${up} {"
-                echo "        header_up Host {upstream_hostport}"
-                echo "        header_up X-Real-IP {remote_host}"
+                printf '\treverse_proxy %s {\n' "$up"
+                printf '\t\theader_up Host {upstream_hostport}\n'
+                printf '\t\theader_up X-Real-IP {remote_host}\n'
                 if [ "${SITE_INSECURE:-0}" = "1" ]; then
-                    echo "        transport http {"
-                    echo "            tls_insecure_skip_verify"
-                    echo "        }"
+                    printf '\t\ttransport http {\n'
+                    printf '\t\t\ttls_insecure_skip_verify\n'
+                    printf '\t\t}\n'
                 fi
-                echo "    }"
+                printf '\t}\n'
             else
-                echo "    reverse_proxy ${up} {"
-                echo "        flush_interval -1"
-                echo "        header_up X-Real-IP {remote_host}"
+                printf '\treverse_proxy %s {\n' "$up"
+                printf '\t\tflush_interval -1\n'
+                printf '\t\theader_up X-Real-IP {remote_host}\n'
                 if [ "${SITE_INSECURE:-0}" = "1" ]; then
-                    echo "        transport http {"
-                    echo "            tls_insecure_skip_verify"
-                    echo "        }"
+                    printf '\t\ttransport http {\n'
+                    printf '\t\t\ttls_insecure_skip_verify\n'
+                    printf '\t\t}\n'
                 fi
-                echo "    }"
+                printf '\t}\n'
             fi
-            echo "}"
+            printf '}\n'
         } > "$tmpf" || { rm -f "$tmpf"; exit 1; }
         chmod 640 "$tmpf"
         mv -f "$tmpf" "$caddy_file"
@@ -504,6 +504,7 @@ caddy_install() {
         fi
     fi
     maint_install_timers >/dev/null 2>&1 || true
+    ensure_adam_shortcut || true
     success "$(L 'Caddy 安装完成') (${tag})"
 }
 
@@ -572,7 +573,7 @@ caddy_add_site() {
         3)
             mode="http"
             while true; do
-                read -rp "$(L '本机监听端口 (1-65535): ') [default 80]: " port || { [ -n "$port" ] || return 1; }
+                read -rp "$(L '本机监听端口 (1-65535，回车默认 80): ')" port || { [ -n "$port" ] || return 1; }
                 port="${port:-80}"
                 validate_port "$port" && { port=$((10#$port)); break; }
                 warn "$(L '端口不合法')"
@@ -980,6 +981,7 @@ cf_tunnel_install() {
             error "$(L '更新失败')"
         fi
     fi
+    ensure_adam_shortcut || true
     success "$(L 'cloudflared 安装完成') (${tag})"
 }
 
